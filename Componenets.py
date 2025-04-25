@@ -1,8 +1,12 @@
 import pickle
 from typing import List, Tuple
 import numpy as np
+
 from quantizer.simple import simple_dequantize, simple_quantize
+# from quantizer.wz_quant import wz_quantizer, wz_de_quantizer
+
 from compressor.entropy_coding import entropy_coding, entropy_decoding
+
 import pytorch_lightning as pl
 import torch
 from torch import nn
@@ -120,6 +124,7 @@ def grad_quantizer(data: List[Tuple[str, np.ndarray]], method=None, **kwargs) ->
         return simple_quantize(data, **kwargs)  # <-- now uint8
     elif method == "wz":
         raise NotImplementedError("WZ quantisation not implemented yet.")
+        # return wz_quantizer(data)
     elif method == "raw":
         return data
 
@@ -143,6 +148,7 @@ def grad_de_quantizer(quantized_data: List[np.ndarray],
         de_q = np.array([simple_dequantize(a, **kwargs) for a in quantized_data])
     elif method == "wz":
         raise NotImplementedError("WZ de‑quantisation not implemented yet.")
+        # return wz_de_quantizer(data)
     elif method == "raw":
         de_q = quantized_data
 
