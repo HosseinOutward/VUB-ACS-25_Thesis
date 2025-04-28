@@ -245,26 +245,13 @@ if __name__ == "__main__":
     Test the components of the system with different configurations to see how they perform.
     """
 
-    print("\n============================")
-    config.MODE_ENCODER = "raw"
-    config.MODE_quantizer = "raw"
-    config.dtype = np.float32
-    test_components()
+    list_options={
+        "encoders": ["raw", "entropy"],
+        "quants": ["raw", "8bit", "wz"],
+    }
 
-    print("\n============================")
-    config.MODE_ENCODER = "entropy"
-    config.MODE_quantizer = "raw"
-    config.dtype = np.float32
-    test_components()
-
-    print("\n============================")
-    config.MODE_ENCODER = "raw"
-    config.MODE_quantizer = "8bit"
-    config.dtype = np.uint8
-    test_components()
-
-    print("\n============================")
-    config.MODE_ENCODER = "entropy"
-    config.MODE_quantizer = "8bit"
-    config.dtype = np.uint8
-    test_components()
+    for config.MODE_ENCODER in list_options["encoders"]:
+        for config.MODE_quantizer in list_options["quants"]:
+            print("\n============================")
+            config.dtype = np.uint8 if config.MODE_quantizer == "8bit" else np.float32
+            test_components()
