@@ -1,6 +1,5 @@
 import argparse
 
-
 def parse_args(layered):
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=180)
@@ -29,4 +28,10 @@ def parse_args(layered):
         parser.add_argument('--entropy_coder', action='store_true')
         parser.add_argument('--eval_every_epochs', type=int, default=5)
 
-    return parser.parse_args()
+    import sys
+    if 'ipykernel_launcher' in sys.argv[0]:
+        args = parser.parse_args([])
+    else:
+        args = parser.parse_args()
+
+    return args
