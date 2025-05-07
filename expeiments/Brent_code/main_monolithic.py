@@ -38,7 +38,7 @@ def main(args):
         tau_t = args.tau * np.exp(epoch/args.epochs * np.log(0.1 / args.tau))
         print('tau={:.04f}'.format(tau_t))
 
-        for batch_idx in range(TRAIN_BATCHES):
+        for batch_idx in range(int(TRAIN_BATCHES)):
 
             optimizer.zero_grad()
 
