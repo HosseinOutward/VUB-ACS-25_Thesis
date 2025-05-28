@@ -42,10 +42,10 @@ class Agent:
         self.pre_send_preprocess = pre_send_preprocess
         self.local_data_train = shared_train_loader
 
-        self.start_weight = None
+        self.last_grad = None
 
     def train(self, epochs):
-        self.start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
+        start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
 
         # setup the DataLoader for this agent
         self.local_data_train.sampler.rank = self.agent_id
@@ -62,12 +62,15 @@ class Agent:
 
         self.local_model.eval()
 
+        temp = self.local_model.state_dict()
+        self.last_epoch_grad = {
+            k: temp[k] - start_weight[k].to(temp[k].device).to(temp[k].dtype)
+            for k in temp}
+
     def get_accum_grads(self):
-        res = self.local_model.state_dict()
-        res = {k: res[k] - self.start_weight[k].to(res[k].device).to(res[k].dtype)
-               for k in res}
+        res = self.last_epoch_grad
         if self.pre_send_preprocess is not None:
-            res = self.pre_send_preprocess(res)
+            res = self.pre_send_preprocess(self.last_epoch_grad)
         return res
 
 
