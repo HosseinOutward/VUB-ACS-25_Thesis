@@ -8,10 +8,10 @@ import pytorch_lightning as pl
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, lr=1e-3, bit_count=2):
+    def __init__(self, lr=1e-3, bit_count=2, reconst_ld=100):
         super(PL_EncoderDecoder_ANN, self).__init__()
         self.coding_model = EncoderDecoder(input_dim=1, layers=3, hidden_dim=100, bit_count=bit_count, marginal=True)
-        self.reconst_ld = 100
+        self.reconst_ld = reconst_ld
         self.tau = 1
         self.lr = lr
         self.lr_step = 40
