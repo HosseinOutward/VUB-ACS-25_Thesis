@@ -1,3 +1,4 @@
+import gzip
 from typing import Optional, Callable, Dict, List
 import numpy as np
 import torch
@@ -29,9 +30,21 @@ def fedavg(state_dicts, num_samples):
     total = sum(num_samples)
     global_state = {}
     for k in state_dicts[0]:
-        # weighted sum over clients
         global_state[k] = sum(sd[k] * (n / total) for sd, n in zip(state_dicts, num_samples))
     return global_state
+
+def report_metric(model, dataloader, name=None, rank=0):
+    with torch.no_grad():
+        model.eval()
+        if name=='train': dataloader.sampler.rank = rank
+
+        temp = [model.step_with_custom_logs(None, batch, 0)
+                    for i, batch in enumerate(dataloader)]
+        temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
+
+        loss_log = np.mean(temp[0])
+        auc_log = np.mean(temp[1])
+        print(f"         {name} loss: {loss_log:.3f}, {name} auc: {auc_log:.3f}")
 
 
 class FederatedModelWrapper(pl.LightningModule):
@@ -56,8 +69,9 @@ class FederatedModelWrapper(pl.LightningModule):
         if self.record_gradients:
             filename = (f"experiments/exp_data/gradients_resnet/"
                         f"worker_{self.worker_id}_round_{self.curr_round}_epoch_{self.current_epoch}"
-                        f"_batch_{self.batch_idx}_gradients.pt")
-            torch.save(self.latest_parameters, filename)
+                        f"_batch_{self.batch_idx}_gradients.pt.gz")
+            with gzip.open(filename, "wb") as f:
+                torch.save(self.latest_parameters, f)
 
         return super().on_before_optimizer_step(optimizer)
 
@@ -78,36 +92,39 @@ class Agent:
         self.local_model = model.clone()
         self.local_model.worker_id = agent_id
 
-        self.last_grad = None
+        self.last_train_param_change = None
 
     def train(self, epochs, round_s):
         start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
 
-        # setup the DataLoader for this agent
+        # set up the DataLoader parameters for this agent
         self.local_data_train.sampler.rank = self.agent_id
         self.local_model.curr_round = round_s
 
+        # train the model
         trainer = Trainer(
             max_epochs=epochs,
             accelerator='cuda',
             logger=False,
             enable_progress_bar=False,
             enable_checkpointing=False,
-            enable_model_summary=False,
-        )
+            enable_model_summary=False,)
         trainer.fit(self.local_model, self.local_data_train)
 
+        # remove model from GPU memory
         self.local_model.eval()
 
+        # calculate the change in parameters after training
         temp = self.local_model.state_dict()
-        self.last_epoch_grad = {
+        self.last_train_param_change = {
             k: temp[k] - start_weight[k].to(temp[k].device).to(temp[k].dtype)
             for k in temp}
 
     def get_accum_grads(self):
-        res = self.last_epoch_grad
+        # Return the accumulated gradients after processing it
+        res = self.last_train_param_change
         if self.pre_send_preprocess is not None:
-            res = self.pre_send_preprocess(self.last_epoch_grad)
+            res = self.pre_send_preprocess(self.last_train_param_change)
         return res
 
 
@@ -162,30 +179,28 @@ class FLSimulator:
         self.global_model.load_state_dict(state_dict)
 
     def run_simulation(self):
+        # cycle through communication rounds
         for round_s in range(self.communication_rounds):
-            print(f"round {round_s + 1}/{self.communication_rounds}")
+            print(f"\nround {round_s + 1}/{self.communication_rounds}"
+                  " --------------------")
 
             # report the global model loss and accuracy on entire test set
-            with torch.no_grad():
-                temp = [
-                    self.global_model.step_with_custom_logs(None, batch, 0)
-                        for i, batch in enumerate(self.test_loader)]
-                temp = list(zip(*[
-                            (t[0].detach().cpu().numpy(), t[1].detach().cpu().numpy())
-                        for t in temp]))
-                loss_log = np.mean(temp[0])
-                auc_log = np.mean(temp[1])
-                print(f"         loss: {loss_log}")
-                print(f"         auc: {auc_log}")
-
+            print("  - reporting global model metrics")
+            report_metric(self.global_model, self.test_loader, 'test')
+            report_metric(self.global_model, self.shared_train_loader, 'train')
 
             # Train each agent for the number of epochs
             for i, agent in enumerate(self.agents):
-                print(f"  > training agent {i + 1}/{len(self.agents)}")
+                print(f"     > training agent {i + 1}/{len(self.agents)}")
                 agent.train(epochs=self.client_epochs_per_round, round_s=round_s)
+                report_metric(agent.local_model, self.test_loader, 'test')
+                report_metric(agent.local_model, self.shared_train_loader, 'train', rank=i)
 
             # Aggregate pl_models from all agents
             self._aggregate_models()
             for agent in self.agents:
                 agent.local_model.load_state_dict(self.global_model.state_dict())
-                # agent.local_model = self.global_model.clone()
+
+        print("\nfinal global model metrics")
+        report_metric(self.global_model, self.test_loader, 'test')
+        report_metric(self.global_model, self.shared_train_loader, 'train')
