@@ -41,6 +41,7 @@ class Agent:
         self.local_model = model.clone()
         self.pre_send_preprocess = pre_send_preprocess
         self.local_data_train = shared_train_loader
+        self.data_size = len(shared_train_loader.sampler)
 
         self.last_grad = None
 
@@ -116,7 +117,7 @@ class FLSimulator:
         # fedavg
         grads = fedavg(
             self.server_rec_process([agent.get_accum_grads() for agent in self.agents]),
-            [len(agent.local_data_train) for agent in self.agents]
+            [agent.data_size for agent in self.agents]
         )
         state_dict = self.global_model.state_dict()
         for k in grads:
@@ -133,6 +134,7 @@ class FLSimulator:
                                    for i, batch in enumerate(self.test_loader)])
             print(f"         loss: {loss}")
 
+            # Train each agent for the number of epochs
             for agent in self.agents:
                 agent.train(epochs=self.client_epochs_per_round)
 
