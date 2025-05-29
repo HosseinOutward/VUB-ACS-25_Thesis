@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
+from torch.optim import Optimizer
 from torchvision.datasets import VisionDataset
 from torchvision.datasets.samplers import DistributedSampler
 
@@ -33,23 +34,58 @@ def fedavg(state_dicts, num_samples):
     return global_state
 
 
+class FederatedModelWrapper(pl.LightningModule):
+    def __init__(self, record_gradients: bool = False):
+        super(FederatedModelWrapper, self).__init__()
+        self.record_gradients = record_gradients
+        self.latest_parameters = None
+        self.worker_id = None
+        self.curr_round=None
+
+    def on_before_optimizer_step(self, optimizer: Optimizer):
+        """
+        This is the hook that is called before the optimizer step.
+        """
+        self.latest_parameters = []
+        for name, param in self.model.named_parameters():
+            if param.grad is None:
+                continue
+            self.latest_parameters.append([name, param.grad.cpu().detach().numpy()])
+
+        # Save the latest gradients as a compressed file
+        if self.record_gradients:
+            filename = (f"experiments/exp_data/gradients_resnet/"
+                        f"worker_{self.worker_id}_round_{self.curr_round}_epoch_{self.current_epoch}"
+                        f"_batch_{self.batch_idx}_gradients.pt")
+            torch.save(self.latest_parameters, filename)
+
+        return super().on_before_optimizer_step(optimizer)
+
+    def clone(self, copy=None):
+        copy.record_gradients = self.record_gradients
+        return copy
+
+
 class Agent:
-    def __init__(self, agent_id: int, model: pl.LightningModule,
+    def __init__(self, agent_id: int, model: FederatedModelWrapper,
                  shared_train_loader: torch.utils.data.DataLoader,
                  pre_send_preprocess: Optional[Callable[[Dict], Dict]] = None):
         self.agent_id = agent_id
-        self.local_model = model.clone()
         self.pre_send_preprocess = pre_send_preprocess
         self.local_data_train = shared_train_loader
         self.data_size = len(shared_train_loader.sampler)
 
+        self.local_model = model.clone()
+        self.local_model.worker_id = agent_id
+
         self.last_grad = None
 
-    def train(self, epochs):
+    def train(self, epochs, round_s):
         start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
 
         # setup the DataLoader for this agent
         self.local_data_train.sampler.rank = self.agent_id
+        self.local_model.curr_round = round_s
 
         trainer = Trainer(
             max_epochs=epochs,
@@ -78,7 +114,7 @@ class Agent:
 class FLSimulator:
     def __init__(self, num_agents: int, communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
-                 pl_model: pl.LightningModule, aggregation_method='fedavg',
+                 pl_model: FederatedModelWrapper, aggregation_method='fedavg',
                  iid_data=False, pre_send_process=None,
                  server_rec_process: Optional[Callable[[List[Dict]], List[Dict]]] = None):
         assert iid_data is True, "Currently only IID data is supported"
@@ -94,6 +130,7 @@ class FLSimulator:
             num_workers=2, pin_memory=True, persistent_workers=True)
 
         # todo: custom sampler for non-IID data
+        # todo: fix how sample counts (len) is calulated for fedavg
         sampler = DistributedSampler(dataset_train,
                         num_replicas=num_agents, rank=-1, shuffle=True)
         self.shared_train_loader = torch.utils.data.DataLoader(
@@ -130,13 +167,22 @@ class FLSimulator:
 
             # report the global model loss and accuracy on entire test set
             with torch.no_grad():
-                loss = np.average([self.global_model.validation_step(batch, i).detach().cpu().numpy()
-                                   for i, batch in enumerate(self.test_loader)])
-            print(f"         loss: {loss}")
+                temp = [
+                    self.global_model.step_with_custom_logs(None, batch, 0)
+                        for i, batch in enumerate(self.test_loader)]
+                temp = list(zip(*[
+                            (t[0].detach().cpu().numpy(), t[1].detach().cpu().numpy())
+                        for t in temp]))
+                loss_log = np.mean(temp[0])
+                auc_log = np.mean(temp[1])
+                print(f"         loss: {loss_log}")
+                print(f"         auc: {auc_log}")
+
 
             # Train each agent for the number of epochs
-            for agent in self.agents:
-                agent.train(epochs=self.client_epochs_per_round)
+            for i, agent in enumerate(self.agents):
+                print(f"  > training agent {i + 1}/{len(self.agents)}")
+                agent.train(epochs=self.client_epochs_per_round, round_s=round_s)
 
             # Aggregate pl_models from all agents
             self._aggregate_models()

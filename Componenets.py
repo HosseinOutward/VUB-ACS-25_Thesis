@@ -22,41 +22,6 @@ config = type("config", (object,), config)  # for attribute-style access
 
 
 # -----------------------------------------------------------------------------
-# Federated model wrapper
-# -----------------------------------------------------------------------------
-class FederatedModelWrapper(pl.LightningModule):
-    def __init__(self, model: nn.Module):
-        super(FederatedModelWrapper, self).__init__()
-        self.model = model
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.latest_parameters = None
-
-    def forward(self, x):
-        return self.model(x)
-
-    def training_step(self, batch, batch_idx):
-        data, target = batch
-        output = self.forward(data)
-        loss = self.loss_fn(output, target)
-        return loss
-
-    def on_before_optimizer_step(self, optimizer: Optimizer): # --->  important part
-        """
-        This is the hook that is called before the optimizer step.
-        """
-        self.latest_parameters = []
-        for name, param in self.model.named_parameters():
-            if param.grad is None:
-                continue
-            self.latest_parameters.append([name, param.grad.cpu().detach().numpy()])
-
-        return super().on_before_optimizer_step(optimizer)
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), lr=0.0005)
-
-
-# -----------------------------------------------------------------------------
 # Encoding / decoding
 # -----------------------------------------------------------------------------
 def grad_encoder(data: np.ndarray, method=None, **kwargs) -> bytes:
@@ -78,6 +43,8 @@ def grad_encoder(data: np.ndarray, method=None, **kwargs) -> bytes:
         return entropy_coding(data, **kwargs)
     elif "raw" in method:
         return data.tobytes()
+
+    return None
 
 
 def grad_decoder(encoded_data: List[bytes], out_dtype=None, method=None, **kwargs) -> np.ndarray:
@@ -186,6 +153,7 @@ def test_components():
     print("\n== Testing Components for 1 round w 5 workers ==")
     print(f'{config.MODE_ENCODER=}, {config.MODE_quantizer=}\n')
 
+    # todo: gradiant ro baraye chnd epoch sum bokon bad bezar
     test_grads = pickle.load(open("testing_model_grad.pkl", "rb"))
 
     # ---- quantise & encode ---------------------------------------------------
