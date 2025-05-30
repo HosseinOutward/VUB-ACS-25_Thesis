@@ -1,12 +1,12 @@
 import gzip
-from typing import Optional, Callable, Dict, List
+from typing import Optional, Callable, Dict, List, Iterator, Union
 import numpy as np
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 from torch.optim import Optimizer
+from torch.utils.data import Sampler
 from torchvision.datasets import VisionDataset
-from torchvision.datasets.samplers import DistributedSampler
 
 
 # def dirichlet_split(dataset, num_clients, alpha=0.5):
@@ -33,13 +33,15 @@ def fedavg(state_dicts, num_samples):
         global_state[k] = sum(sd[k] * (n / total) for sd, n in zip(state_dicts, num_samples))
     return global_state
 
+
 def report_metric(model, dataloader, name=None, rank=0):
     with torch.no_grad():
         model.eval()
-        if name=='train': dataloader.sampler.rank = rank
+        if name == 'train':
+            dataloader.sampler.offset = rank
 
         temp = [model.step_with_custom_logs(None, batch, 0)
-                    for i, batch in enumerate(dataloader)]
+                for i, batch in enumerate(dataloader)]
         temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
 
         loss_log = np.mean(temp[0])
@@ -48,12 +50,12 @@ def report_metric(model, dataloader, name=None, rank=0):
 
 
 class FederatedModelWrapper(pl.LightningModule):
-    def __init__(self, record_gradients: bool = False):
+    def __init__(self, record_gradients: bool | str = False):
         super(FederatedModelWrapper, self).__init__()
         self.record_gradients = record_gradients
         self.latest_parameters = None
         self.worker_id = None
-        self.curr_round=None
+        self.curr_round = None
 
     def on_before_optimizer_step(self, optimizer: Optimizer):
         """
@@ -61,14 +63,15 @@ class FederatedModelWrapper(pl.LightningModule):
         """
         self.latest_parameters = []
         for name, param in self.model.named_parameters():
-            if param.grad is None:
-                continue
-            self.latest_parameters.append([name, param.grad.cpu().detach().numpy()])
+            if param.grad is None: continue
+            temp = param.grad.cpu().detach().to(torch.float16)
+            self.latest_parameters.append(temp)
 
         # Save the latest gradients as a compressed file
-        if self.record_gradients:
-            filename = (f"experiments/exp_data/gradients_resnet/"
-                        f"worker_{self.worker_id}_round_{self.curr_round}_epoch_{self.current_epoch}"
+        if self.record_gradients is not False:
+            filename = (self.record_gradients +
+                        f"worker_{self.worker_id}_round_"
+                        f"{self.curr_round}_epoch_{self.current_epoch}"
                         f"_batch_{self.batch_idx}_gradients.pt.gz")
             with gzip.open(filename, "wb") as f:
                 torch.save(self.latest_parameters, f)
@@ -80,6 +83,48 @@ class FederatedModelWrapper(pl.LightningModule):
         return copy
 
 
+class CustomSampler(Sampler):
+    def __init__(self, dataset, partitions_count, shuffle_whole,
+                 shuffle_in_partition, non_iid_flag=False, seed=42):
+        super().__init__()
+
+        # todo: custom sampler for non-IID data
+        assert non_iid_flag is False, "Currently only IID data is supported"
+
+        self.dataset = dataset
+        self.shuffle_in_partition = shuffle_in_partition
+
+        self.offset = -1
+        self.seed = seed
+
+        self.shuffle_whole_idx = np.arange(len(self.dataset))
+        if shuffle_whole:
+            g = torch.Generator()
+            g.manual_seed(self.seed)
+            self.shuffle_whole_idx = torch.randperm(
+                len(dataset)).numpy()
+
+        self.partitions_count = partitions_count
+
+        self.size_of_partition = {
+            i: len(self.shuffle_whole_idx[i::self.partitions_count])
+            for i in range(self.partitions_count)}
+
+    def __iter__(self) -> Iterator[int]:
+        # Generate indices for the current partition
+        indices = self.shuffle_whole_idx[self.offset::self.partitions_count]
+
+        # shuffle the indices within the partition
+        if self.shuffle_in_partition:
+            in_part_idx = torch.randperm(len(self)).numpy()
+            indices = indices[in_part_idx]
+
+        return iter(indices)
+
+    def __len__(self) -> int:
+        return self.size_of_partition[self.offset]
+
+
 class Agent:
     def __init__(self, agent_id: int, model: FederatedModelWrapper,
                  shared_train_loader: torch.utils.data.DataLoader,
@@ -87,7 +132,8 @@ class Agent:
         self.agent_id = agent_id
         self.pre_send_preprocess = pre_send_preprocess
         self.local_data_train = shared_train_loader
-        self.data_size = len(shared_train_loader.sampler)
+
+        self.data_size = self.local_data_train.sampler.size_of_partition[agent_id]
 
         self.local_model = model.clone()
         self.local_model.worker_id = agent_id
@@ -98,7 +144,7 @@ class Agent:
         start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
 
         # set up the DataLoader parameters for this agent
-        self.local_data_train.sampler.rank = self.agent_id
+        self.local_data_train.sampler.offset = self.agent_id
         self.local_model.curr_round = round_s
 
         # train the model
@@ -108,7 +154,7 @@ class Agent:
             logger=False,
             enable_progress_bar=False,
             enable_checkpointing=False,
-            enable_model_summary=False,)
+            enable_model_summary=False, )
         trainer.fit(self.local_model, self.local_data_train)
 
         # remove model from GPU memory
@@ -129,12 +175,12 @@ class Agent:
 
 
 class FLSimulator:
-    def __init__(self, num_agents: int, communication_rounds: int, client_epochs_per_round: int,
+    def __init__(self, num_agents: int,
+                 communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
                  pl_model: FederatedModelWrapper, aggregation_method='fedavg',
-                 iid_data=False, pre_send_process=None,
+                 non_iid_flag=False, pre_send_process=None,
                  server_rec_process: Optional[Callable[[List[Dict]], List[Dict]]] = None):
-        assert iid_data is True, "Currently only IID data is supported"
 
         self.num_agents = num_agents
         self.communication_rounds = communication_rounds
@@ -146,10 +192,8 @@ class FLSimulator:
             dataset_test, batch_size=batch_size, shuffle=False,
             num_workers=2, pin_memory=True, persistent_workers=True)
 
-        # todo: custom sampler for non-IID data
-        # todo: fix how sample counts (len) is calulated for fedavg
-        sampler = DistributedSampler(dataset_train,
-                        num_replicas=num_agents, rank=-1, shuffle=True)
+        sampler: CustomSampler = CustomSampler(dataset_train, num_agents,
+                    True, True, non_iid_flag=non_iid_flag)
         self.shared_train_loader = torch.utils.data.DataLoader(
             dataset_train, batch_size=batch_size, sampler=sampler,
             num_workers=10, pin_memory=True, persistent_workers=True)
@@ -160,9 +204,9 @@ class FLSimulator:
         self.global_model = pl_model
 
         self.agents = [Agent(
-            agent_id, self.global_model,
-            self.shared_train_loader, pre_send_process
-        ) for agent_id in range(num_agents)]
+                agent_id, self.global_model,
+                self.shared_train_loader, pre_send_process
+            ) for agent_id in range(num_agents)]
 
     def _aggregate_models(self):
         if self.aggregation_method != 'fedavg':
