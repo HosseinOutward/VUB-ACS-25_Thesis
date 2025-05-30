@@ -1,4 +1,7 @@
 import gzip
+import os
+
+import lz4.frame
 from typing import Optional, Callable, Dict, List, Iterator, Union
 import numpy as np
 import torch
@@ -37,10 +40,14 @@ def fedavg(state_dicts, num_samples):
 def report_metric(model, dataloader, name=None, rank=0):
     with torch.no_grad():
         model.eval()
+        model.to('cuda')
+
         if name == 'train':
             dataloader.sampler.offset = rank
 
-        temp = [model.step_with_custom_logs(None, batch, 0)
+        temp = [
+            model.step_with_custom_logs(
+                None, (batch[0].to('cuda'),batch[1].to('cuda')), 0)
                 for i, batch in enumerate(dataloader)]
         temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
 
@@ -48,12 +55,16 @@ def report_metric(model, dataloader, name=None, rank=0):
         auc_log = np.mean(temp[1])
         print(f"         {name} loss: {loss_log:.3f}, {name} auc: {auc_log:.3f}")
 
+        model.to('cpu')
 
+
+# todo: modify the FederatedModelWrapper to be more general and stop it from being an inheritance
 class FederatedModelWrapper(pl.LightningModule):
     def __init__(self, record_gradients: bool | str = False):
         super(FederatedModelWrapper, self).__init__()
         self.record_gradients = record_gradients
-        self.latest_parameters = None
+        self.latest_parameters_grad = None
+        self.latest_parameters_grad_names = None
         self.worker_id = None
         self.curr_round = None
 
@@ -61,20 +72,29 @@ class FederatedModelWrapper(pl.LightningModule):
         """
         This is the hook that is called before the optimizer step.
         """
-        self.latest_parameters = []
+        self.latest_parameters_grad = []
+        self.latest_parameters_grad_names = []
         for name, param in self.model.named_parameters():
             if param.grad is None: continue
             temp = param.grad.cpu().detach().to(torch.float16)
-            self.latest_parameters.append(temp)
+            self.latest_parameters_grad.append(temp)
+            self.latest_parameters_grad_names.append(name)
 
         # Save the latest gradients as a compressed file
         if self.record_gradients is not False:
-            filename = (self.record_gradients +
+            file_path = (self.record_gradients +
                         f"worker_{self.worker_id}_round_"
                         f"{self.curr_round}_epoch_{self.current_epoch}"
                         f"_batch_{self.batch_idx}_gradients.pt.gz")
-            with gzip.open(filename, "wb") as f:
-                torch.save(self.latest_parameters, f)
+            with gzip.open(file_path, "wb", compresslevel=1) as f:
+            # with lz4.frame.open(file_path.replace(".gz", ".lz4"), "wb") as f:
+                torch.save(self.latest_parameters_grad, f)
+
+            # Save the names of the parameters
+            if not os.path.exists(self.record_gradients + '_grad_namings.txt'):
+                with open(self.record_gradients + '_grad_namings.txt', "w") as f:
+                    for name in self.latest_parameters_grad_names:
+                        f.write(name + "\n")
 
         return super().on_before_optimizer_step(optimizer)
 
