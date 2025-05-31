@@ -1,45 +1,112 @@
 import gzip
+import time
+import warnings
+
+
 import numpy as np
 import os
 import torch
 from concurrent.futures import ProcessPoolExecutor
+
+from joblib import Parallel, delayed
 from sklearn.feature_selection import mutual_info_regression
-from sklearn.metrics.pairwise import cosine_similarity
 
 
-def _calculate_metrics_for_pair(v1, v2):
-    # 1. Pearson Correlation --------
-    p_corr = np.corrcoef(v1, v2)[0, 1]
-
-    # 2. Mutual Information --------
-    n_neigh = max(1, min(3, len(v1) - 1))
+def _calculate_mi_for_pair(v1: np.ndarray, v2: np.ndarray) -> float:
+    sample_count = len(v1)
+    n_neigh = max(1, min(3, sample_count - 1))
     mi_val = mutual_info_regression(
         v1.reshape(-1, 1), v2, n_neighbors=n_neigh, random_state=42)[0]
-    mi_val = max(0, mi_val)
+    mi_val = max(0.0, mi_val)  # Ensure non-negative MI
 
-    # 3. Distance and std --------
-    temp = v1 - v2
-    mean_dist = np.mean(temp)
-    std_dist = np.std(temp)
-
-    # 4. Cosine Similarity --------
-    cos_sim = cosine_similarity(v1.reshape(1, -1), v2.reshape(1, -1))[0, 0]
-
-    return np.array([p_corr, mi_val, mean_dist, std_dist, cos_sim])
+    return mi_val
 
 
-def get_similarity_metrics(list_of_pairs_of_elements: np.ndarray):
-    # list_of_pairs_of_elements.shape = [pair_count, 2, sample_count]
-    results = [
-        _calculate_metrics_for_pair(v1, v2)
-        for v1, v2 in list_of_pairs_of_elements
-    ]
-    return np.array(results)
+def get_similarity_metrics(list_of_pairs_of_elements: np.ndarray) -> np.ndarray:
+    pair_count, _, sample_count = list_of_pairs_of_elements.shape
+
+    # Separate the two sets of vectors across all pairs
+    v1_all = list_of_pairs_of_elements[:, 0, :]  # shape [pair_count, sample_count]
+    v2_all = list_of_pairs_of_elements[:, 1, :]  # shape [pair_count, sample_count]
+
+    # --- 1. Pearson Correlation (Vectorized) ---
+    # Formula: cov(v1, v2) / (std(v1) * std(v2))
+
+    # t1 = time.time()
+
+    v1_mean = np.mean(v1_all, axis=1, keepdims=True)  # shape [pair_count, 1]
+    v2_mean = np.mean(v2_all, axis=1, keepdims=True)  # shape [pair_count, 1]
+    cov = np.mean((v1_all - v1_mean) * (v2_all - v2_mean), axis=1)  # shape [pair_count]
+
+    v1_std = np.std(v1_all, axis=1)  # shape [pair_count]
+    v2_std = np.std(v2_all, axis=1)  # shape [pair_count]
+
+    denominator = v1_std * v2_std
+    p_corr = np.full(pair_count, np.nan, dtype=np.float64)
+    non_zero_std_mask = denominator != 0
+    p_corr[non_zero_std_mask] = cov[non_zero_std_mask] / denominator[non_zero_std_mask]
+
+    # t1 = time.time() - t1
+    # print('\n      - Pearson correlation time:', f"{t1:.4f}")
+
+    # --- 3. Distance Mean and Std (Vectorized) ---
+
+    # t1 = time.time()
+
+    temp_all = v1_all - v2_all  # shape [pair_count, sample_count]
+    mean_dist = np.mean(temp_all, axis=1)  # shape [pair_count]
+    std_dist = np.std(temp_all, axis=1)  # shape [pair_count]
+
+    # t1 = time.time() - t1
+    # print('      - Distance time:', f"{t1:.4f}")
+
+    # --- 4. Cosine Similarity (Vectorized) ---
+
+    # t1 = time.time()
+
+    # Formula: dot(v1, v2) / (norm(v1) * norm(v2))
+    dot_product = np.sum(v1_all * v2_all, axis=1)  # shape [pair_count]
+    norm_v1 = np.linalg.norm(v1_all, axis=1)  # shape [pair_count]
+    norm_v2 = np.linalg.norm(v2_all, axis=1)  # shape [pair_count]
+    denominator_cos = norm_v1 * norm_v2
+
+    cos_sim = np.zeros(pair_count, dtype=np.float64)
+    both_zero_norm_mask = (norm_v1 == 0) & (norm_v2 == 0)
+    cos_sim[both_zero_norm_mask] = 1.0
+    non_zero_denominator_mask = denominator_cos != 0
+    cos_sim[non_zero_denominator_mask] = (
+            dot_product[non_zero_denominator_mask] / denominator_cos[non_zero_denominator_mask])
+
+    # t1 = time.time() - t1
+    # print('      - Cosine time:', f"{t1:.4f}")
+
+    # --- 2. Mutual Information (Parallelized) ---
+
+    # t1 = time.time()
+
+    with warnings.catch_warnings():
+        # Suppress sklearn warnings if any occur during MI calculation in parallel
+        warnings.simplefilter("ignore")
+        mi_values = Parallel(n_jobs=-1, backend='loky')(
+            delayed(_calculate_mi_for_pair)(
+                list_of_pairs_of_elements[i, 0, :], list_of_pairs_of_elements[i, 1, :])
+            for i in range(pair_count)
+        )
+    mi_values = np.array(mi_values)  # shape [pair_count]
+
+    # t1 = time.time() - t1
+    # print('      - MI time:', f"{t1:.4f}")
+
+    # --- Combine Results ---
+    results = np.stack([p_corr, mi_values,
+                        mean_dist, std_dist, cos_sim], axis=1)  # shape [pair_count, 5]
+
+    return results
 
 
 def _load_and_flatten(args):
     (train_attempt, batch_idx, layer_names,
-        path_to_files, curr_round, current_epoch) = args
+     path_to_files, curr_round, current_epoch) = args
     filename = f"_round_{curr_round}_epoch_{current_epoch}_batch_{batch_idx}_gradients.pt.gz"
     p0 = path_to_files[train_attempt] + f"worker_{0}" + filename
     p1 = path_to_files[train_attempt] + f"worker_{1}" + filename
@@ -54,6 +121,8 @@ def _load_and_flatten(args):
 if __name__ == "__main__":
     train_attempt_count, worker_count, round_count, epoch_count, batch_count = 4, 2, 2, 30, 17
 
+    # train_attempt_count, worker_count, round_count, epoch_count, batch_count = 2, 2, 1, 2, 5
+
     path_to_files = [f"experiments/exp_data/gradients_resnet/gradients_resnet_t{i}/" for i in range(4)]
     filename = f"_round_{0}_epoch_{0}_batch_{0}_gradients.pt.gz"
 
@@ -63,31 +132,31 @@ if __name__ == "__main__":
         per_layer_ele_count = [len(t) for t in temp1]
 
     with open(path_to_files[0] + f"_grad_namings.txt", "rb") as f:
-        layer_names = f.read().decode("utf-8").replace("\r",'').split("\n")[:-1]
+        layer_names = f.read().decode("utf-8").replace("\r", '').split("\n")[:-1]
 
-    result = {k:[] for k in layer_names}
+    result = {k: [] for k in layer_names}
     time_steps = np.array(np.meshgrid(
         range(round_count), range(epoch_count))).T.reshape(-1, 2)
     sample_steps = np.array(np.meshgrid(
         range(train_attempt_count), range(batch_count))).T.reshape(-1, 2)
     for curr_round, current_epoch in time_steps:
         print(f"\nRound {curr_round}, Epoch {current_epoch} ------------")
-        sample_dict = {k:[] for k in layer_names}
+        sample_dict = {k: [] for k in layer_names}
 
         jobs = [(ta, bi, layer_names, path_to_files, curr_round, current_epoch)
-                    for ta, bi in sample_steps]
+                for ta, bi in sample_steps]
         # Iterate directly over pool.map without as_completed.
         with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
             for res in pool.map(_load_and_flatten, jobs, chunksize=1):
                 for k in layer_names:
                     sample_dict[k].append(res[k])
 
-        sample_dict = {k:np.array(sample_dict[k]).transpose(2,1,0) for k in sample_dict.keys()}
+        sample_dict = {k: np.array(sample_dict[k]).transpose(2, 1, 0) for k in sample_dict.keys()}
 
         print("      - reading disk done; calculating similarity metrics...")
         for i, k in enumerate(sample_dict.keys()):
-            if (i+1) % 10 == 0:
-                print(f"          > getting sim vec for layer {i+1}/{len(sample_dict.keys())}")
+            if (i + 1) % 10 == 0:
+                print(f"          > getting sim vec for layer {i + 1}/{len(sample_dict.keys())}")
             result[k].append(get_similarity_metrics(sample_dict[k]))
     result = {k: np.array(result[k]) for k in layer_names}
 
