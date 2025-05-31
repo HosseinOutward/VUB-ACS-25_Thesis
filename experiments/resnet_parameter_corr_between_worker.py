@@ -50,6 +50,8 @@ def _calculate_mi_for_pair(v1: np.ndarray, v2: np.ndarray) -> float:
 #             for i in range(pair_count)
 #         )
 #     mi_values = np.array(mi_values)  # shape [pair_count]
+#     entropy = ??
+#
 #
 #     # --- Combine Results ---
 #     results = np.stack([p_corr, mean_dist, std_dist, val_mean,
@@ -106,14 +108,25 @@ def _load_and_flatten(args):
     return {k: (to_np(g0, i), to_np(g1, i)) for i, k in enumerate(layer_names)}
 
 
+def load_grad_files(sample_steps, layer_names, path_to_files, curr_round, current_epoch):
+    sample_dict = {k: [] for k in layer_names}
+    jobs = [(ta, bi, layer_names, path_to_files, curr_round, current_epoch) for ta, bi in sample_steps]
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+        for res in pool.map(_load_and_flatten, jobs, chunksize=1):
+            for k in layer_names:
+                sample_dict[k].append(res[k])
+    return sample_dict
+
+
 if __name__ == "__main__":
-    train_attempt_count, worker_count, round_count, epoch_count, batch_count = 4, 2, 2, 30, 17
+    train_attempt_count, worker_count, round_count, epoch_count, batch_count = 6, 2, 2, 30, 17
 
     # train_attempt_count, worker_count, round_count, epoch_count, batch_count = 2, 2, 1, 2, 2
 
-    path_to_files = [f"experiments/exp_data/gradients_resnet/gradients_resnet_t{i}/" for i in range(4)]
+    path_to_files = [f"experiments/exp_data/gradients_resnet/gradients_resnet_t{i}/"
+                     for i in range(train_attempt_count)]
 
-    with open(path_to_files[0] + f"_grad_namings.txt", "rb") as f:
+    with open(path_to_files[-1] + f"_grad_namings.txt", "rb") as f:
         layer_names = f.read().decode("utf-8").replace("\r", '').split("\n")[:-1]
 
     result = {k: [] for k in layer_names}
@@ -123,15 +136,9 @@ if __name__ == "__main__":
         range(train_attempt_count), range(batch_count))).T.reshape(-1, 2)
     for curr_round, current_epoch in time_steps:
         print(f"\nRound {curr_round}, Epoch {current_epoch} ------------")
-        sample_dict = {k: [] for k in layer_names}
 
-        jobs = [(ta, bi, layer_names, path_to_files, curr_round, current_epoch)
-                for ta, bi in sample_steps]
-        # Iterate directly over pool.map without as_completed.
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-            for res in pool.map(_load_and_flatten, jobs, chunksize=1):
-                for k in layer_names:
-                    sample_dict[k].append(res[k])
+        # indexing: {layer_name}, sample_id, worker_id, element_id
+        sample_dict = load_grad_files(sample_steps, layer_names, path_to_files, curr_round, current_epoch)
 
         sample_dict = {k: np.array(sample_dict[k]).transpose(2, 1, 0) for k in sample_dict.keys()}
 
