@@ -112,12 +112,6 @@ if __name__ == "__main__":
     # train_attempt_count, worker_count, round_count, epoch_count, batch_count = 2, 2, 1, 2, 2
 
     path_to_files = [f"experiments/exp_data/gradients_resnet/gradients_resnet_t{i}/" for i in range(4)]
-    filename = f"_round_{0}_epoch_{0}_batch_{0}_gradients.pt.gz"
-
-    with gzip.open(path_to_files[0] + f"worker_{0}" + filename, "rb") as f:
-        temp1 = torch.load(f)
-        layer_counts = len(temp1)
-        per_layer_ele_count = [len(t) for t in temp1]
 
     with open(path_to_files[0] + f"_grad_namings.txt", "rb") as f:
         layer_names = f.read().decode("utf-8").replace("\r", '').split("\n")[:-1]
