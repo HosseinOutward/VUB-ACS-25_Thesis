@@ -1,14 +1,19 @@
 import gzip
-import time
-import warnings
-
 import numpy as np
 import os
 import torch
 from concurrent.futures import ProcessPoolExecutor
-
-from joblib import Parallel, delayed
 from sklearn.feature_selection import mutual_info_regression
+
+
+# todo: for generating samples of training, dont use multiple entirely separate attempts.
+#    instead of having multiple entirely separate attempts, from start to end,
+#    have a single attempt but repeat a single batch/epoch multiple times on one state_dict
+#    and then settle with the last one and continue the training, repeating for each batch/epoch.
+#    this way we ensure the attempts are comparable and no need for divergence checking
+
+# todo: after above, compute similarities (and others) during training,
+#    and save them to disk, so that we can analyze them later.
 
 
 def _calculate_mi_for_pair(v1: np.ndarray, v2: np.ndarray) -> float:

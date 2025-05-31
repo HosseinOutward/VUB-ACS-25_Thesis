@@ -82,6 +82,9 @@ class FederatedModelWrapper(pl.LightningModule):
 
         # Save the latest gradients as a compressed file
         if self.record_gradients is not False:
+            # todo: See issue in file - generating samples while training if needed
+            #       experiments/resnet_parameter_corr_between_worker.py, line 9
+            # todo: instead of simply saving, run a custom function on the gradients
             file_path = (self.record_gradients +
                         f"worker_{self.worker_id}_round_"
                         f"{self.curr_round}_epoch_{self.current_epoch}"
