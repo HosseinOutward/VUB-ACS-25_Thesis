@@ -101,22 +101,36 @@ def get_similarity_metrics_gpu(list_of_pairs_of_elements: np.ndarray) -> np.ndar
 
 def _load_and_flatten(args):
     (train_attempt, batch_idx, layer_names,
-     path_to_files, curr_round, current_epoch) = args
+     path_to_files, curr_round, current_epoch, single_worker) = args
     filename = f"_round_{curr_round}_epoch_{current_epoch}_batch_{batch_idx}_gradients.pt.gz"
+    to_np = lambda x, i: x[i].numpy().ravel()
+
     p0 = path_to_files[train_attempt] + f"worker_{0}" + filename
-    p1 = path_to_files[train_attempt] + f"worker_{1}" + filename
     with gzip.open(p0, "rb") as f:
         g0 = torch.load(f, map_location="cpu")
+
+    if single_worker:
+        return {k: to_np(g0, i) for i, k in enumerate(layer_names)}
+
+    p1 = path_to_files[train_attempt] + f"worker_{1}" + filename
     with gzip.open(p1, "rb") as f:
         g1 = torch.load(f, map_location="cpu")
-    to_np = lambda x, i: x[i].numpy().ravel()
     return {k: (to_np(g0, i), to_np(g1, i)) for i, k in enumerate(layer_names)}
 
 
-def load_grad_files(sample_steps, layer_names, path_to_files, curr_round, current_epoch):
+def load_grad_files(sample_steps, layer_names, path_to_files,
+                    curr_round, current_epoch=None, single_worker=False):
     sample_dict = {k: [] for k in layer_names}
-    jobs = [(ta, bi, layer_names, path_to_files, curr_round, current_epoch) for ta, bi in sample_steps]
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+
+    if sample_steps.shape[1]==2:
+        assert current_epoch is not None
+        jobs = [(ta, bi, layer_names, path_to_files, curr_round,
+             current_epoch, single_worker) for ta, bi in sample_steps]
+    else:
+        jobs = [(ta, bi, layer_names, path_to_files, curr_round,
+             ep, single_worker) for ta, ep, bi in sample_steps]
+
+    with ProcessPoolExecutor(max_workers=os.cpu_count()-2) as pool:
         for res in pool.map(_load_and_flatten, jobs, chunksize=1):
             for k in layer_names:
                 sample_dict[k].append(res[k])
@@ -154,8 +168,11 @@ if __name__ == "__main__":
             result[k].append(get_similarity_metrics_gpu(sample_dict[k]))
     result = {k: np.array(result[k]) for k in layer_names}
 
+    print("similarity metrics calculated; saving results...")
     # save results to disk
     for k in result.keys():
+        print('          > saving sim vec for layer', k)
+        # todo parallelize saving
         temp = f"experiments/exp_data/resnet_parameter_corr_between_worker/param_sim_vec_{k}.pt.gz"
         with gzip.open(temp, "wb") as f:
             torch.save(result[k], f)

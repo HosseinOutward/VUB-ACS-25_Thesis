@@ -266,7 +266,9 @@ class FLSimulator:
             # Aggregate pl_models from all agents
             self._aggregate_models()
             for agent in self.agents:
+                # todo find a way for the optimizer configurations to work after grad aggregation
                 agent.local_model.load_state_dict(self.global_model.state_dict())
+                # agent.local_model = self.global_model.clone()
 
         print("\nfinal global model metrics")
         report_metric(self.global_model, self.test_loader, 'test')
