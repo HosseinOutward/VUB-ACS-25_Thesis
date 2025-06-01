@@ -82,19 +82,20 @@ def get_similarity_metrics_gpu(list_of_pairs_of_elements: np.ndarray) -> np.ndar
     v2_std = torch.std(v2_all, dim=1)  # shape [pair_count]
 
     denominator = v1_std * v2_std
-    p_corr = torch.full((denominator.shape), np.nan,
-                        dtype=v1_all.dtype, device='cuda')
+    p_corr = torch.full(denominator.shape,
+        np.nan, dtype=v1_all.dtype, device='cuda')
     non_zero_std_mask = denominator != 0
     p_corr[non_zero_std_mask] = cov[non_zero_std_mask] / denominator[non_zero_std_mask]
 
     # --- 2, 3, 4. Distance Mean and Std ---
-    temp_all = v1_all - v2_all  # shape [pair_count, sample_count]
+    temp_all = torch.abs(v1_all - v2_all)  # shape [pair_count, sample_count]
     mean_dist = torch.mean(temp_all, dim=1)  # shape [pair_count]
     std_dist = torch.std(temp_all, dim=1)  # shape [pair_count]
-    val_mean = (torch.mean(v1_all, dim=1) + torch.mean(v2_all, dim=1))/2
+    val_mean = (torch.mean(torch.abs(v1_all), dim=1) +
+                torch.mean(torch.abs(v2_all), dim=1))/2
 
     # --- Combine Results ---
-    results = torch.stack([p_corr, mean_dist, std_dist, val_mean], dim=1)  # shape [pair_count, 4]
+    results = torch.stack([p_corr, mean_dist/val_mean, std_dist/val_mean, val_mean], dim=1)  # shape [pair_count, 4]
 
     return results.cpu().numpy()
 
@@ -140,40 +141,41 @@ def load_grad_files(sample_steps, layer_names, path_to_files,
 if __name__ == "__main__":
     train_attempt_count, worker_count, round_count, epoch_count, batch_count = 6, 2, 2, 30, 17
 
-    # train_attempt_count, worker_count, round_count, epoch_count, batch_count = 2, 2, 1, 2, 2
+    # train_attempt_count, worker_count, round_count, epoch_count, batch_count = 2, 2, 1, 6, 3
 
-    path_to_files = [f"experiments/exp_data/gradients_resnet/gradients_resnet_t{i}/"
+    path_to_files = [f"exp_data/gradients_resnet/gradients_resnet_t{i}/"
                      for i in range(train_attempt_count)]
 
     with open(path_to_files[-1] + f"_grad_namings.txt", "rb") as f:
         layer_names = f.read().decode("utf-8").replace("\r", '').split("\n")[:-1]
 
-    result = {k: [] for k in layer_names}
     time_steps = np.array(np.meshgrid(
         range(round_count), range(epoch_count))).T.reshape(-1, 2)
     sample_steps = np.array(np.meshgrid(
         range(train_attempt_count), range(batch_count))).T.reshape(-1, 2)
+
+    result = {k: [] for k in layer_names}
     for curr_round, current_epoch in time_steps:
         print(f"\nRound {curr_round}, Epoch {current_epoch} ------------")
 
         # indexing: {layer_name}, sample_id, worker_id, element_id
         sample_dict = load_grad_files(sample_steps, layer_names, path_to_files, curr_round, current_epoch)
 
-        sample_dict = {k: np.array(sample_dict[k]).transpose(2, 1, 0) for k in sample_dict.keys()}
+        sample_dict = {k: np.array(sample_dict[k]).transpose(2, 1, 0) for k in layer_names}
 
         print("      - reading disk done; calculating similarity metrics...")
-        for i, k in enumerate(sample_dict.keys()):
+        for i, k in enumerate(layer_names):
             if (i + 1) % 30 == 0:
-                print(f"          > getting sim vec for layer {i + 1}/{len(sample_dict.keys())}")
+                print(f"          > getting sim vec for layer {i + 1}/{len(layer_names)}")
             result[k].append(get_similarity_metrics_gpu(sample_dict[k]))
     result = {k: np.array(result[k]) for k in layer_names}
 
     print("similarity metrics calculated; saving results...")
     # save results to disk
-    for k in result.keys():
+    for k in layer_names:
         print('          > saving sim vec for layer', k)
         # todo parallelize saving
-        temp = f"experiments/exp_data/resnet_parameter_corr_between_worker/param_sim_vec_{k}.pt.gz"
+        temp = f"exp_data/resnet_parameter_corr_between_worker/param_sim_vec_{k}.pt.gz"
         with gzip.open(temp, "wb") as f:
             torch.save(result[k], f)
 
