@@ -68,7 +68,7 @@ def fedavg(grad_dict_per_agent, sample_size_per_agent):
 
     for worker_grad_dict, weight in zip(grad_dict_per_agent, agent_weights):
         for k, v_grad_tensor in worker_grad_dict.items():
-                aggregated_grads[k].add_(v_grad_tensor.to(aggregated_grads[k].device), alpha=weight)
+            aggregated_grads[k].add_(v_grad_tensor.to(aggregated_grads[k].device), alpha=weight)
 
     return aggregated_grads
 
@@ -93,7 +93,7 @@ class FederatedModelWrapper(pl.LightningModule):
             if not param.requires_grad or param.grad is None: continue
             self.accu_param_grads[name] += param.grad.detach().clone()
 
-        self.applied_on_grads_before_optim(self, self.args_for_f_on_grad)
+        self.applied_on_grads_before_optim(self, **self.args_for_f_on_grad)
 
         return super().on_before_optimizer_step(optimizer)
 
@@ -115,13 +115,8 @@ class FederatedModelWrapper(pl.LightningModule):
 # todo: See issue in file - generating samples while training if needed
 #       experiments/resnet_parameter_corr_between_worker.py, line 9
 # todo: instead of simply saving, run a custom function on the gradients
-def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper, args_for_f_on_grad: Dict):
-    if args_for_f_on_grad.get('save_folder_path') is None:
-        raise ValueError("save_folder_path must be provided in args_for_f_on_grad")
-
-    save_folder_path, worker_id, curr_round, current_epoch, batch_idx = \
-        (args_for_f_on_grad[k] for k in
-         ['save_folder_path', 'worker_id', 'curr_round', 'current_epoch', 'batch_idx'])
+def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
+    save_folder_path, worker_id, curr_round, current_epoch, batch_idx):
 
     file_path = (save_folder_path +
                  f"worker_{worker_id}_round_"
@@ -201,9 +196,6 @@ class Agent:
 
         self.data_size = self.local_data_train.sampler.size_of_partition[agent_id]
 
-        self.local_model = model.clone()
-        self.local_model.args_for_f_on_grad['worker_id'] = agent_id
-
     def train(self, epochs, round_s):
         # set up the DataLoader parameters for this agent
         self.local_model.args_for_f_on_grad['curr_round'] = round_s
@@ -248,7 +240,7 @@ class FLSimulator:
 
         # Create a shared train DataLoader outside agents
         self.test_loader = torch.utils.data.DataLoader(
-            dataset_test, batch_size=batch_size*3, shuffle=False,
+            dataset_test, batch_size=batch_size * 3, shuffle=False,
             num_workers=2, pin_memory=True, persistent_workers=True)
 
         sampler: CustomSampler = CustomSampler(dataset_train, num_agents,
@@ -268,6 +260,12 @@ class FLSimulator:
         ) for agent_id in range(num_agents)]
 
         self.server_optimizer = self.global_model.configure_optimizers()
+
+    def set_local_models(self):
+        # todo find a way for the optimizer configurations to work after grad aggregation
+        for ag in self.agents:
+            ag.local_model = self.global_model.clone()
+            ag.local_model.args_for_f_on_grad['worker_id'] = ag.agent_id
 
     # todo doesnt work
     def _aggregate_models(self):
@@ -289,6 +287,21 @@ class FLSimulator:
                 param.grad = grad_to_apply
         self.server_optimizer.step()
 
+    def do_train_global_model_and_set_local_model(self, num_epochs):
+        print(f'training global model on all data before simulation starts for {num_epochs} epochs')
+        for rank in range(self.num_agents):
+            self.shared_train_loader.sampler.offset = rank
+            trainer = Trainer(
+                max_epochs=num_epochs,
+                accelerator='cuda',
+                logger=False,
+                enable_progress_bar=False,
+                enable_checkpointing=False,
+                enable_model_summary=False, )
+            trainer.fit(self.global_model, self.shared_train_loader)
+
+        self.set_local_models()
+
     def run_simulation(self):
         # cycle through communication rounds
         for round_s in range(self.communication_rounds):
@@ -302,21 +315,18 @@ class FLSimulator:
                           rank=np.random.randint(0, self.num_agents - 1))
 
             # Train each agent for the number of epochs
-            for i, agent in enumerate(self.agents):
+            for i, ag in enumerate(self.agents):
                 print(f"     > training agent {i + 1}/{len(self.agents)}")
-                agent.train(epochs=self.client_epochs_per_round, round_s=round_s)
+                ag.train(epochs=self.client_epochs_per_round, round_s=round_s)
 
-                report_metric(agent.local_model, self.test_loader, 'test')
-                report_metric(agent.local_model, self.shared_train_loader, 'train', rank=i)
+                report_metric(ag.local_model, self.test_loader, 'test')
+                report_metric(ag.local_model, self.shared_train_loader, 'train', rank=i)
 
             # Aggregate pl_models from all agents
             self._aggregate_models()
 
             # Load the aggregated global model to each agent's local model
-            for agent in self.agents:
-                # todo find a way for the optimizer configurations to work after grad aggregation
-                agent.local_model.load_state_dict(self.global_model.state_dict())
-                # agent.local_model = self.global_model.clone()
+            self.set_local_models()
 
         print("\nfinal global model metrics")
         report_metric(self.global_model, self.test_loader, 'test')
