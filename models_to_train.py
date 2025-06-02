@@ -49,13 +49,14 @@ class ResNetPLModel(FederatedModelWrapper):
         return loss, auc
 
     def training_step(self, batch, batch_idx):
-        self.batch_idx = batch_idx
+        super(ResNetPLModel, self).training_step(batch, batch_idx)
+
         loss, auc = self.step_with_custom_logs('train', batch, batch_idx)
         return loss
 
-    def validation_step(self, batch, batch_idx):
-        loss, auc = self.step_with_custom_logs('valid', batch, batch_idx)
-        return loss
+    # def validation_step(self, batch, batch_idx):
+    #     loss, auc = self.step_with_custom_logs('valid', batch, batch_idx)
+    #     return loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
@@ -65,6 +66,5 @@ class ResNetPLModel(FederatedModelWrapper):
         new_model = ResNetPLModel(num_classes=self.num_classes, lr=self.lr,
                                   resnet_version=self.resnet_version,
                                   logging_disabled=self.logging_disabled)
-        new_model.load_state_dict(self.state_dict())
 
         return super(ResNetPLModel, self).clone(copy=new_model)
