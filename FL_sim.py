@@ -29,81 +29,123 @@ from torchvision.datasets import VisionDataset
 #     return [torch.utils.data.Subset(dataset, idxs) for idxs in client_indices]
 
 
-def fedavg(state_dicts, num_samples):
-    total = sum(num_samples)
-    global_state = {}
-    for k in state_dicts[0]:
-        global_state[k] = sum(sd[k] * (n / total) for sd, n in zip(state_dicts, num_samples))
-    return global_state
+def report_metric(model, dataloader, name=None, rank=-1):
+    print(f"         {name} loss: ", end='')
 
+    if name == 'train':
+        dataloader.sampler.offset = rank
 
-def report_metric(model, dataloader, name=None, rank=0):
     with torch.no_grad():
         model.eval()
         model.to('cuda')
 
-        if name == 'train':
-            dataloader.sampler.offset = rank
-
         temp = [
             model.step_with_custom_logs(
-                None, (batch[0].to('cuda'),batch[1].to('cuda')), 0)
-                for i, batch in enumerate(dataloader)]
+                None, (batch[0].to('cuda'), batch[1].to('cuda')), 0)
+            for i, batch in enumerate(dataloader)
+        ]
         temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
 
         loss_log = np.mean(temp[0])
         auc_log = np.mean(temp[1])
-        print(f"         {name} loss: {loss_log:.3f}, {name} auc: {auc_log:.3f}")
+        print(f"{loss_log:.3f}, {name} auc: {auc_log:.3f}")
 
         model.to('cpu')
 
 
-# todo: modify the FederatedModelWrapper to be more general and stop it from being an inheritance
+def fedavg(grad_dict_per_agent, sample_size_per_agent):
+    print("Aggregating gradients using FedAvg...")
+
+    total_sample_count = sum(sample_size_per_agent)
+    agent_weights = map(lambda x: x / total_sample_count, sample_size_per_agent)
+
+    first_worker_grads = grad_dict_per_agent[0]
+    layer_with_grad_names = first_worker_grads.keys()
+    aggregated_grads = {
+        k: torch.zeros_like(first_worker_grads[k], device=first_worker_grads[k].device)
+        for k in layer_with_grad_names
+    }
+
+    for worker_grad_dict, weight in zip(grad_dict_per_agent, agent_weights):
+        for k, v_grad_tensor in worker_grad_dict.items():
+                aggregated_grads[k].add_(v_grad_tensor.to(aggregated_grads[k].device), alpha=weight)
+
+    return aggregated_grads
+
+
 class FederatedModelWrapper(pl.LightningModule):
-    def __init__(self, record_gradients: bool | str = False):
+    def __init__(self,
+                 applied_on_grads_before_optim: Callable[[pl.LightningModule, Dict], None] = lambda x, y: None):
         super(FederatedModelWrapper, self).__init__()
-        self.record_gradients = record_gradients
-        self.latest_parameters_grad = None
-        self.latest_parameters_grad_names = None
-        self.worker_id = None
-        self.curr_round = None
+        self.applied_on_grads_before_optim = applied_on_grads_before_optim
+        self.args_for_f_on_grad = {k: None for k in
+                                   ['worker_id', 'curr_round', 'current_epoch', 'batch_idx']}
+
+        self.accu_param_grads = None
+
+    def training_step(self, batch, batch_idx):
+        self.args_for_f_on_grad['batch_idx'] = batch_idx
 
     def on_before_optimizer_step(self, optimizer: Optimizer):
-        """
-        This is the hook that is called before the optimizer step.
-        """
-        self.latest_parameters_grad = []
-        self.latest_parameters_grad_names = []
-        for name, param in self.model.named_parameters():
-            if param.grad is None: continue
-            temp = param.grad.cpu().detach().to(torch.float16)
-            self.latest_parameters_grad.append(temp)
-            self.latest_parameters_grad_names.append(name)
+        self.args_for_f_on_grad['current_epoch'] = self.current_epoch
 
-        # Save the latest gradients as a compressed file
-        if self.record_gradients is not False:
-            # todo: See issue in file - generating samples while training if needed
-            #       experiments/resnet_parameter_corr_between_worker.py, line 9
-            # todo: instead of simply saving, run a custom function on the gradients
-            file_path = (self.record_gradients +
-                        f"worker_{self.worker_id}_round_"
-                        f"{self.curr_round}_epoch_{self.current_epoch}"
-                        f"_batch_{self.batch_idx}_gradients.pt.gz")
-            with gzip.open(file_path, "wb", compresslevel=1) as f:
-            # with lz4.frame.open(file_path.replace(".gz", ".lz4"), "wb") as f:
-                torch.save(self.latest_parameters_grad, f)
+        for name, param in self.named_parameters():
+            if not param.requires_grad or param.grad is None: continue
+            self.accu_param_grads[name] += param.grad.detach().clone()
 
-            # Save the names of the parameters
-            if not os.path.exists(self.record_gradients + '_grad_namings.txt'):
-                with open(self.record_gradients + '_grad_namings.txt', "w") as f:
-                    for name in self.latest_parameters_grad_names:
-                        f.write(name + "\n")
+        self.applied_on_grads_before_optim(self, self.args_for_f_on_grad)
 
         return super().on_before_optimizer_step(optimizer)
 
+    def on_train_start(self):
+        self.accu_param_grads = {
+            k: torch.zeros_like(v.data, device=v.device)
+            for k, v in self.named_parameters() if v.requires_grad
+        }
+        super().on_train_start()
+
     def clone(self, copy=None):
-        copy.record_gradients = self.record_gradients
+        copy.load_state_dict(self.state_dict())
+        copy.args_for_f_on_grad = self.args_for_f_on_grad
+        copy.applied_on_grads_before_optim = self.applied_on_grads_before_optim
+
         return copy
+
+
+# todo: See issue in file - generating samples while training if needed
+#       experiments/resnet_parameter_corr_between_worker.py, line 9
+# todo: instead of simply saving, run a custom function on the gradients
+def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper, args_for_f_on_grad: Dict):
+    if args_for_f_on_grad.get('save_folder_path') is None:
+        raise ValueError("save_folder_path must be provided in args_for_f_on_grad")
+
+    save_folder_path, worker_id, curr_round, current_epoch, batch_idx = \
+        (args_for_f_on_grad[k] for k in
+         ['save_folder_path', 'worker_id', 'curr_round', 'current_epoch', 'batch_idx'])
+
+    file_path = (save_folder_path +
+                 f"worker_{worker_id}_round_"
+                 f"{curr_round}_epoch_{current_epoch}"
+                 f"_batch_{batch_idx}_gradients.pt.gz")
+
+    with gzip.open(file_path, "wb", compresslevel=1) as f:
+        latest_parameters_grad = [
+            param.grad.detach().clone()
+            for _, param in fl_model.named_parameters()
+            if param.requires_grad
+        ]
+        torch.save(latest_parameters_grad, f)
+
+    # Save the names of the parameters
+    if not os.path.exists(save_folder_path + '_grad_namings.txt'):
+        with open(save_folder_path + '_grad_namings.txt', "w") as f:
+            latest_parameters_grad_names = [
+                name
+                for name, _ in fl_model.named_parameters()
+                if _.requires_grad
+            ]
+            for name in latest_parameters_grad_names:
+                f.write(name + "\n")
 
 
 class CustomSampler(Sampler):
@@ -153,22 +195,20 @@ class Agent:
                  shared_train_loader: torch.utils.data.DataLoader,
                  pre_send_preprocess: Optional[Callable[[Dict], Dict]] = None):
         self.agent_id = agent_id
-        self.pre_send_preprocess = pre_send_preprocess
         self.local_data_train = shared_train_loader
+
+        self.pre_send_preprocess = pre_send_preprocess
 
         self.data_size = self.local_data_train.sampler.size_of_partition[agent_id]
 
         self.local_model = model.clone()
-        self.local_model.worker_id = agent_id
-
-        self.last_train_param_change = None
+        self.local_model.args_for_f_on_grad['worker_id'] = agent_id
 
     def train(self, epochs, round_s):
-        start_weight = {k: v.clone() for k, v in self.local_model.state_dict().items()}
-
         # set up the DataLoader parameters for this agent
+        self.local_model.args_for_f_on_grad['curr_round'] = round_s
+
         self.local_data_train.sampler.offset = self.agent_id
-        self.local_model.curr_round = round_s
 
         # train the model
         trainer = Trainer(
@@ -182,19 +222,15 @@ class Agent:
 
         # remove model from GPU memory
         self.local_model.eval()
-
-        # calculate the change in parameters after training
-        temp = self.local_model.state_dict()
-        self.last_train_param_change = {
-            k: temp[k] - start_weight[k].to(temp[k].device).to(temp[k].dtype)
-            for k in temp}
+        self.local_model.to('cpu')
 
     def get_accum_grads(self):
-        # Return the accumulated gradients after processing it
-        res = self.last_train_param_change
+        grad_dict = self.local_model.accu_param_grads
+
         if self.pre_send_preprocess is not None:
-            res = self.pre_send_preprocess(self.last_train_param_change)
-        return res
+            grad_dict = self.pre_send_preprocess(grad_dict)
+
+        return grad_dict
 
 
 class FLSimulator:
@@ -212,11 +248,11 @@ class FLSimulator:
 
         # Create a shared train DataLoader outside agents
         self.test_loader = torch.utils.data.DataLoader(
-            dataset_test, batch_size=batch_size, shuffle=False,
+            dataset_test, batch_size=batch_size*3, shuffle=False,
             num_workers=2, pin_memory=True, persistent_workers=True)
 
         sampler: CustomSampler = CustomSampler(dataset_train, num_agents,
-                    True, True, non_iid_flag=non_iid_flag)
+                                               True, True, non_iid_flag=non_iid_flag)
         self.shared_train_loader = torch.utils.data.DataLoader(
             dataset_train, batch_size=batch_size, sampler=sampler,
             num_workers=10, pin_memory=True, persistent_workers=True)
@@ -227,23 +263,31 @@ class FLSimulator:
         self.global_model = pl_model
 
         self.agents = [Agent(
-                agent_id, self.global_model,
-                self.shared_train_loader, pre_send_process
-            ) for agent_id in range(num_agents)]
+            agent_id, self.global_model,
+            self.shared_train_loader, pre_send_process
+        ) for agent_id in range(num_agents)]
 
+        self.server_optimizer = self.global_model.configure_optimizers()
+
+    # todo doesnt work
     def _aggregate_models(self):
+        sample_size_per_agent = [agent.data_size for agent in self.agents]
+        grad_dict_per_agent = [agent.get_accum_grads() for agent in self.agents]
+        grad_dict_per_agent = self.server_rec_process(grad_dict_per_agent)
+
         if self.aggregation_method != 'fedavg':
             raise ValueError(f"Unsupported aggregation method: {self.aggregation_method}")
+        aggregated_grads = fedavg(grad_dict_per_agent, sample_size_per_agent)
 
-        # fedavg
-        grads = fedavg(
-            self.server_rec_process([agent.get_accum_grads() for agent in self.agents]),
-            [agent.data_size for agent in self.agents]
-        )
-        state_dict = self.global_model.state_dict()
-        for k in grads:
-            state_dict[k] += grads[k].to(state_dict[k].dtype)
-        self.global_model.load_state_dict(state_dict)
+        self.server_optimizer.zero_grad()
+        for name, param in self.global_model.named_parameters():
+            if param.requires_grad:
+                assert name in aggregated_grads, \
+                    f"Parameter {name} not found in aggregated gradients"
+
+                grad_to_apply = aggregated_grads[name].detach().clone().to(param.device)
+                param.grad = grad_to_apply
+        self.server_optimizer.step()
 
     def run_simulation(self):
         # cycle through communication rounds
@@ -254,17 +298,21 @@ class FLSimulator:
             # report the global model loss and accuracy on entire test set
             print("  - reporting global model metrics")
             report_metric(self.global_model, self.test_loader, 'test')
-            report_metric(self.global_model, self.shared_train_loader, 'train')
+            report_metric(self.global_model, self.shared_train_loader, 'train',
+                          rank=np.random.randint(0, self.num_agents - 1))
 
             # Train each agent for the number of epochs
             for i, agent in enumerate(self.agents):
                 print(f"     > training agent {i + 1}/{len(self.agents)}")
                 agent.train(epochs=self.client_epochs_per_round, round_s=round_s)
+
                 report_metric(agent.local_model, self.test_loader, 'test')
                 report_metric(agent.local_model, self.shared_train_loader, 'train', rank=i)
 
             # Aggregate pl_models from all agents
             self._aggregate_models()
+
+            # Load the aggregated global model to each agent's local model
             for agent in self.agents:
                 # todo find a way for the optimizer configurations to work after grad aggregation
                 agent.local_model.load_state_dict(self.global_model.state_dict())
@@ -272,4 +320,5 @@ class FLSimulator:
 
         print("\nfinal global model metrics")
         report_metric(self.global_model, self.test_loader, 'test')
-        report_metric(self.global_model, self.shared_train_loader, 'train')
+        report_metric(self.global_model, self.shared_train_loader, 'train',
+                      rank=np.random.randint(0, self.num_agents - 1))
