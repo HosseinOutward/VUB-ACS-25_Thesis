@@ -54,9 +54,11 @@ class ResNetPLModel(FederatedModelWrapper):
         loss, auc = self.step_with_custom_logs('train', batch, batch_idx)
         return loss
 
-    # def validation_step(self, batch, batch_idx):
-    #     loss, auc = self.step_with_custom_logs('valid', batch, batch_idx)
-    #     return loss
+    def validation_step(self, batch, batch_idx):
+        if not self.logging_disabled:
+            return 0
+        loss, auc = self.step_with_custom_logs('valid', batch, batch_idx)
+        return loss
 
     def configure_optimizers(self):
         # optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
