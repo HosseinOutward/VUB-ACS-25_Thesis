@@ -79,11 +79,11 @@ class ConditionalPrior(ProbabilisticModel):
 
 class EncoderDecoder(nn.Module):
 
-    def __init__(self, input_dim=1, layers=3, hidden_dim=100, bit_count=4, marginal=True):
+    def __init__(self, input_dim=1, layers=3, hidden_dim=100, code_size=2**4, marginal=True):
 
         super().__init__()
 
-        self.code_size = 2**bit_count
+        self.code_size = code_size
 
         self.encoder = Encoder(input_dim=input_dim, code_size=self.code_size, layers=layers, hidden_dim=hidden_dim)
         self.decoder = Decoder(code_size=self.code_size, output_dim=input_dim, layers=layers, hidden_dim=hidden_dim)
