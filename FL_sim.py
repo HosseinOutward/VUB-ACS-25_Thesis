@@ -1,8 +1,9 @@
 import gzip
 import os
-
+from types import LambdaType
+from pytorch_lightning.loggers import CSVLogger
 import lz4.frame
-from typing import Optional, Callable, Dict, List, Iterator, Union
+from typing import Optional, Callable, Dict, List, Iterator, Any
 import numpy as np
 import torch
 import pytorch_lightning as pl
@@ -10,67 +11,6 @@ from pytorch_lightning import Trainer
 from torch.optim import Optimizer
 from torch.utils.data import Sampler
 from torchvision.datasets import VisionDataset
-
-
-# def dirichlet_split(dataset, num_clients, alpha=0.5):
-#     labels = np.array([y for _, y in dataset])
-#     n_classes = labels.max() + 1
-#     client_indices = [[] for _ in range(num_clients)]
-#
-#     for c in range(n_classes):
-#         idx_c = np.where(labels == c)[0]
-#         np.random.shuffle(idx_c)
-#         proportions = np.random.dirichlet(alpha=np.repeat(alpha, num_clients))
-#         proportions = (np.cumsum(proportions) * len(idx_c)).astype(int)[:-1]
-#         splits = np.split(idx_c, proportions)
-#         for client_id, idx in enumerate(splits):
-#             client_indices[client_id].extend(idx.tolist())
-#
-#     return [torch.utils.data.Subset(dataset, idxs) for idxs in client_indices]
-
-
-def report_metric(model, dataloader, name=None, rank=-1):
-    print(f"         {name} loss: ", end='')
-
-    if name == 'train':
-        dataloader.sampler.offset = rank
-
-    with torch.no_grad():
-        model.eval()
-        model.to('cuda')
-
-        temp = [
-            model.step_with_custom_logs(
-                None, (batch[0].to('cuda'), batch[1].to('cuda')), 0)
-            for i, batch in enumerate(dataloader)
-        ]
-        temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
-
-        loss_log = np.mean(temp[0])
-        auc_log = np.mean(temp[1])
-        print(f"{loss_log:.3f}, {name} auc: {auc_log:.3f}")
-
-        model.to('cpu')
-
-
-def fedavg(grad_dict_per_agent, sample_size_per_agent):
-    print("Aggregating gradients using FedAvg...")
-
-    total_sample_count = sum(sample_size_per_agent)
-    agent_weights = map(lambda x: x / total_sample_count, sample_size_per_agent)
-
-    first_worker_grads = grad_dict_per_agent[0]
-    layer_with_grad_names = first_worker_grads.keys()
-    aggregated_grads = {
-        k: torch.zeros_like(first_worker_grads[k], device=first_worker_grads[k].device)
-        for k in layer_with_grad_names
-    }
-
-    for worker_grad_dict, weight in zip(grad_dict_per_agent, agent_weights):
-        for k, v_grad_tensor in worker_grad_dict.items():
-            aggregated_grads[k].add_(v_grad_tensor.to(aggregated_grads[k].device), alpha=weight)
-
-    return aggregated_grads
 
 
 class FederatedModelWrapper(pl.LightningModule):
@@ -112,12 +52,79 @@ class FederatedModelWrapper(pl.LightningModule):
         return copy
 
 
+# def dirichlet_split(dataset, num_clients, alpha=0.5):
+#     labels = np.array([y for _, y in dataset])
+#     n_classes = labels.max() + 1
+#     client_indices = [[] for _ in range(num_clients)]
+#
+#     for c in range(n_classes):
+#         idx_c = np.where(labels == c)[0]
+#         np.random.shuffle(idx_c)
+#         proportions = np.random.dirichlet(alpha=np.repeat(alpha, num_clients))
+#         proportions = (np.cumsum(proportions) * len(idx_c)).astype(int)[:-1]
+#         splits = np.split(idx_c, proportions)
+#         for client_id, idx in enumerate(splits):
+#             client_indices[client_id].extend(idx.tolist())
+#
+#     return [torch.utils.data.Subset(dataset, idxs) for idxs in client_indices]
+
+
+def report_metric(model, dataloader, name=None, rank=-1):
+    # todo utilize self.log with logger instead of this nonsense
+    print(f"         {name} loss: ", end='')
+
+    org_logging_dis_flag = model.logging_disabled
+    model.logging_disabled=True
+
+    if name == 'train':
+        print(f'({rank=}) ', end='')
+        dataloader.sampler.offset = rank
+
+    with torch.no_grad():
+        model.eval()
+        model.to('cuda')
+
+        temp = [
+            model.step_with_custom_logs(
+                None, (batch[0].to('cuda'), batch[1].to('cuda')), 0)
+            for i, batch in enumerate(dataloader)
+        ]
+        temp = list(zip(*[(t.detach().cpu().numpy() for t in tt) for tt in temp]))
+
+        loss_log = np.mean(temp[0])
+        auc_log = np.mean(temp[1])
+        print(f"{loss_log:.3f}, {name} auc: {auc_log:.3f}")
+
+        model.to('cpu')
+
+    model.logging_disabled=org_logging_dis_flag
+
+
+def fedavg(grad_dict_per_agent, sample_size_per_agent):
+    print("Aggregating gradients using FedAvg...")
+
+    total_sample_count = sum(sample_size_per_agent)
+    agent_weights = map(lambda x: x / total_sample_count, sample_size_per_agent)
+
+    first_worker_grads = grad_dict_per_agent[0]
+    layer_with_grad_names = first_worker_grads.keys()
+    aggregated_grads = {
+        k: torch.zeros_like(first_worker_grads[k], device=first_worker_grads[k].device)
+        for k in layer_with_grad_names
+    }
+
+    for worker_grad_dict, weight in zip(grad_dict_per_agent, agent_weights):
+        for k, v_grad_tensor in worker_grad_dict.items():
+            aggregated_grads[k].add_(v_grad_tensor.to(aggregated_grads[k].device), alpha=weight)
+
+    return aggregated_grads
+
+
 # todo: See issue in file - generating samples while training if needed
 #       experiments/resnet_parameter_corr_between_worker.py, line 9
 # todo: instead of simply saving, run a custom function on the gradients
 def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
-    save_folder_path, worker_id, curr_round, current_epoch, batch_idx):
-
+                                  save_folder_path, worker_id, curr_round, current_epoch, batch_idx):
     file_path = (save_folder_path +
                  f"worker_{worker_id}_round_"
                  f"{curr_round}_epoch_{current_epoch}"
@@ -143,6 +150,7 @@ def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
                 f.write(name + "\n")
 
 
+# ---------------------------------------------------------------------------------
 class CustomSampler(Sampler):
     def __init__(self, dataset, partitions_count, shuffle_whole,
                  shuffle_in_partition, non_iid_flag=False, seed=42):
@@ -185,53 +193,68 @@ class CustomSampler(Sampler):
         return self.size_of_partition[self.offset]
 
 
+# ---------------------------------------------------------------------------------
 class Agent:
-    def __init__(self, agent_id: int, model: FederatedModelWrapper,
+    def __init__(self, agent_id: int,
                  shared_train_loader: torch.utils.data.DataLoader,
-                 pre_send_preprocess: Optional[Callable[[Dict], Dict]] = None):
+                 test_loader: torch.utils.data.DataLoader,
+                 pre_send_preprocess: Optional[Callable[[Dict, int], Dict]] = None):
+        self.local_model: FederatedModelWrapper | None = None
+
         self.agent_id = agent_id
         self.local_data_train = shared_train_loader
+        self.test_loader = test_loader
 
         self.pre_send_preprocess = pre_send_preprocess
 
         self.data_size = self.local_data_train.sampler.size_of_partition[agent_id]
 
     def train(self, epochs, round_s):
+        assert isinstance(self.local_model, FederatedModelWrapper), \
+            "Local model is not set. Call set_local_models() before training."
+        
         # set up the DataLoader parameters for this agent
         self.local_model.args_for_f_on_grad['curr_round'] = round_s
 
         self.local_data_train.sampler.offset = self.agent_id
 
         # train the model
+        logger = False
+        if not self.local_model.logging_disabled:
+            logger = CSVLogger(save_dir="experiments/exp_data/run_stats",
+                            name=f"agent_{self.agent_id}_round_{round_s}",)
+
         trainer = Trainer(
             max_epochs=epochs,
             accelerator='cuda',
-            logger=False,
+            logger=logger,
+            log_every_n_steps=1,
             enable_progress_bar=False,
             enable_checkpointing=False,
             enable_model_summary=False, )
-        trainer.fit(self.local_model, self.local_data_train)
+        trainer.fit(self.local_model, self.local_data_train, self.test_loader)
 
         # remove model from GPU memory
         self.local_model.eval()
         self.local_model.to('cpu')
 
-    def get_accum_grads(self):
+    def get_worker_broadcast(self):
         grad_dict = self.local_model.accu_param_grads
-
-        if self.pre_send_preprocess is not None:
-            grad_dict = self.pre_send_preprocess(grad_dict)
-
-        return grad_dict
+        broadcast_data = self.pre_send_preprocess(grad_dict, self.agent_id)
+        return broadcast_data
 
 
+# ---------------------------------------------------------------------------------
 class FLSimulator:
     def __init__(self, num_agents: int,
                  communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
-                 pl_model: FederatedModelWrapper, aggregation_method='fedavg',
-                 non_iid_flag=False, pre_send_process=None,
-                 server_rec_process: Optional[Callable[[List[Dict]], List[Dict]]] = None):
+                 pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_flag=False,
+                 pre_send_process:Optional[Callable[[Dict, int], Any]] = lambda x,i: x,
+                 server_rec_process:Optional[Callable[[int, Dict, List, Any], Dict]] = lambda i,s,z,x: x):
+
+        if LambdaType in [type(pre_send_process), type(server_rec_process)]:
+            assert type(pre_send_process) is LambdaType and type(server_rec_process) is LambdaType
 
         self.num_agents = num_agents
         self.communication_rounds = communication_rounds
@@ -249,29 +272,28 @@ class FLSimulator:
             dataset_train, batch_size=batch_size, sampler=sampler,
             num_workers=10, pin_memory=True, persistent_workers=True)
 
-        self.server_rec_process = server_rec_process \
-            if server_rec_process is not None else lambda x: x
+        self.server_rec_process = server_rec_process
 
         self.global_model = pl_model
 
         self.agents = [Agent(
-            agent_id, self.global_model,
-            self.shared_train_loader, pre_send_process
-        ) for agent_id in range(num_agents)]
+                agent_id, self.shared_train_loader, self.test_loader, pre_send_process
+            ) for agent_id in range(num_agents)]
 
         self.server_optimizer = self.global_model.configure_optimizers()
 
-    def set_local_models(self):
+        temp = self.global_model.named_parameters()
+        self.model_shape_dict = {k: v.shape for k, v in temp if v.requires_grad}
+
+    def _set_local_models(self):
         # todo find a way for the optimizer configurations to work after grad aggregation
         for ag in self.agents:
             ag.local_model = self.global_model.clone()
             ag.local_model.args_for_f_on_grad['worker_id'] = ag.agent_id
 
     # todo doesnt work
-    def _aggregate_models(self):
+    def _aggregate_models(self, grad_dict_per_agent: Optional[List[Dict]] = None):
         sample_size_per_agent = [agent.data_size for agent in self.agents]
-        grad_dict_per_agent = [agent.get_accum_grads() for agent in self.agents]
-        grad_dict_per_agent = self.server_rec_process(grad_dict_per_agent)
 
         if self.aggregation_method != 'fedavg':
             raise ValueError(f"Unsupported aggregation method: {self.aggregation_method}")
@@ -300,35 +322,47 @@ class FLSimulator:
                 enable_model_summary=False, )
             trainer.fit(self.global_model, self.shared_train_loader)
 
-        self.set_local_models()
+        self._set_local_models()
 
-    def run_simulation(self):
+    def run_simulation(self, metric_logging=True, pre_training_global_epochs=5):
+        if pre_training_global_epochs!=0:
+            self.do_train_global_model_and_set_local_model(num_epochs=pre_training_global_epochs)
+
         # cycle through communication rounds
         for round_s in range(self.communication_rounds):
-            print(f"\nround {round_s + 1}/{self.communication_rounds}"
-                  " --------------------")
+            self._set_local_models()
+
+            print(f"\nround {round_s + 1}/{self.communication_rounds} --------------------")
 
             # report the global model loss and accuracy on entire test set
             print("  - reporting global model metrics")
-            report_metric(self.global_model, self.test_loader, 'test')
-            report_metric(self.global_model, self.shared_train_loader, 'train',
-                          rank=np.random.randint(0, self.num_agents - 1))
+            if metric_logging:
+                report_metric(self.global_model, self.test_loader, 'test')
+                report_metric(self.global_model, self.shared_train_loader, 'train',
+                              rank=np.random.randint(0, self.num_agents - 1))
 
-            # Train each agent for the number of epochs
+            # ------------- Train each agent for the number of epochs -------------
+            grad_dict_per_agent = []
             for i, ag in enumerate(self.agents):
                 print(f"     > training agent {i + 1}/{len(self.agents)}")
                 ag.train(epochs=self.client_epochs_per_round, round_s=round_s)
 
-                report_metric(ag.local_model, self.test_loader, 'test')
-                report_metric(ag.local_model, self.shared_train_loader, 'train', rank=i)
+                decoded_agent_broadcast = self.server_rec_process(
+                    i, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
+                grad_dict_per_agent.append(decoded_agent_broadcast)
+
+                if metric_logging:
+                    report_metric(ag.local_model, self.test_loader, 'test')
+                    report_metric(ag.local_model, self.shared_train_loader, 'train', rank=i)
 
             # Aggregate pl_models from all agents
-            self._aggregate_models()
+            self._aggregate_models(grad_dict_per_agent)
 
-            # Load the aggregated global model to each agent's local model
-            self.set_local_models()
+        # Load the aggregated global model to each agent's local model
+        self._set_local_models()
 
         print("\nfinal global model metrics")
-        report_metric(self.global_model, self.test_loader, 'test')
-        report_metric(self.global_model, self.shared_train_loader, 'train',
-                      rank=np.random.randint(0, self.num_agents - 1))
+        if metric_logging:
+            report_metric(self.global_model, self.test_loader, 'test')
+            report_metric(self.global_model, self.shared_train_loader, 'train',
+                          rank=np.random.randint(0, self.num_agents - 1))
