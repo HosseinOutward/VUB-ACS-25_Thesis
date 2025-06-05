@@ -249,7 +249,7 @@ class FLSimulator:
     def __init__(self, num_agents: int,
                  communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
-                 pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_flag=False,
+                 pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_sampling=False,
                  pre_send_process:Optional[Callable[[Dict, int], Any]] = lambda x,i: x,
                  server_rec_process:Optional[Callable[[int, Dict, List, Any], Dict]] = lambda i,s,z,x: x):
 
@@ -267,7 +267,7 @@ class FLSimulator:
             num_workers=2, pin_memory=True, persistent_workers=True)
 
         sampler: CustomSampler = CustomSampler(dataset_train, num_agents,
-                                               True, True, non_iid_flag=non_iid_flag)
+                                               True, True, non_iid_flag=non_iid_sampling)
         self.shared_train_loader = torch.utils.data.DataLoader(
             dataset_train, batch_size=batch_size, sampler=sampler,
             num_workers=10, pin_memory=True, persistent_workers=True)
@@ -324,7 +324,7 @@ class FLSimulator:
 
         self._set_local_models()
 
-    def run_simulation(self, metric_logging=True, pre_training_global_epochs=5):
+    def run_simulation(self, post_training_report=True, pre_training_global_epochs=5):
         if pre_training_global_epochs!=0:
             self.do_train_global_model_and_set_local_model(num_epochs=pre_training_global_epochs)
 
@@ -336,7 +336,7 @@ class FLSimulator:
 
             # report the global model loss and accuracy on entire test set
             print("  - reporting global model metrics")
-            if metric_logging:
+            if post_training_report:
                 report_metric(self.global_model, self.test_loader, 'test')
                 report_metric(self.global_model, self.shared_train_loader, 'train',
                               rank=np.random.randint(0, self.num_agents - 1))
@@ -348,10 +348,10 @@ class FLSimulator:
                 ag.train(epochs=self.client_epochs_per_round, round_s=round_s)
 
                 decoded_agent_broadcast = self.server_rec_process(
-                    i, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
+                    i, self.num_agents, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
                 grad_dict_per_agent.append(decoded_agent_broadcast)
 
-                if metric_logging:
+                if post_training_report:
                     report_metric(ag.local_model, self.test_loader, 'test')
                     report_metric(ag.local_model, self.shared_train_loader, 'train', rank=i)
 
@@ -362,7 +362,7 @@ class FLSimulator:
         self._set_local_models()
 
         print("\nfinal global model metrics")
-        if metric_logging:
+        if post_training_report:
             report_metric(self.global_model, self.test_loader, 'test')
             report_metric(self.global_model, self.shared_train_loader, 'train',
                           rank=np.random.randint(0, self.num_agents - 1))
