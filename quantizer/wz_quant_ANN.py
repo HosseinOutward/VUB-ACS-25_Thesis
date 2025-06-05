@@ -1,6 +1,7 @@
 from pytorch_lightning import Trainer
 
 from quantizer.brent_wz_models import EncoderDecoder
+from compressor.arithmatic_coding import arithmetic_encode, arithmetic_decode
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -36,6 +37,9 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         loss = torch.log(p_ux / p_u).mean() + \
                self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
 
+        # clamp loss to avoid NaN
+        loss = torch.clamp(loss, min=-5, max=5)
+
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
         # train_mse_loss = train_mse_loss / TRAIN_BATCHES
         # train_loss = train_loss / TRAIN_BATCHES
@@ -56,9 +60,9 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         loss = self.custom_steps(batch, batch_idx, 'train')
         return loss
 
-    # def validation_step(self, batch, batch_idx):
-    #     loss = self.custom_steps(batch, batch_idx, 'val')
-    #     return loss
+    def validation_step(self, batch, batch_idx):
+        loss = self.custom_steps(batch, batch_idx, 'val')
+        return loss
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
@@ -67,27 +71,28 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         return [optimizer], [scheduler]
 
     def encode(self, grad_vector):
-        x = self.encoder(grad_vector)
+        x = self.coding_model.encoder(grad_vector)
         x = F.softmax(x, dim=-1)
+        x = torch.argmax(x, dim=-1)
         return x
 
-    def decode(self, encoded_data, side_info):
-        bin = torch.argmax(encoded_data, dim=-1)
-        reconstruct = self.decoder(F.one_hot(bin, num_classes=self.code_size), side_info)
+    def decode(self, bins, side_info):
+        reconstruct = self.coding_model.decoder(
+            F.one_hot(bins.long(), num_classes=self.coding_model.code_size), side_info)
         return reconstruct
 
 
 # ---------------------------------------------
 class WZQuantizer:
-    def __init__(self, batch_size=10_000, dataset_length=250_000,
+    def __init__(self, batch_size=1_000,
                  code_bit_size=5.5, metric_report_flag=False):
+        self.train_sample_size = 100_000
         self.metric_report_flag = metric_report_flag
         self.batch_size = batch_size
-        self.dataset_length = int(dataset_length // 2)
 
-        bin_count = int(round(2 ** code_bit_size))
+        self.bin_count = int(round(2 ** code_bit_size))
         self.wz_model = PL_EncoderDecoder_ANN(
-            lr=1e-3, code_size=bin_count, reconst_ld=100)
+            lr=1e-4, code_size=self.bin_count, reconst_ld=100)
 
         self.side_info_datasets = []
 
@@ -95,38 +100,47 @@ class WZQuantizer:
         # from quantizer.simple import simple_quantize
         # return simple_quantize(grad_vector)
 
-        bins = []
+        x = torch.tensor(grad_vector).unsqueeze(1).to('cuda').float()
+        self.wz_model.to('cuda')
+        self.wz_model.eval()
         with torch.no_grad():
-            for s_i in self.side_info_datasets:
-                _, soft_code, _ = self.wz_model.forward(grad_vector, s_i)
-                bins.append(soft_code.argmax(dim=1))
-
-                for i in range(2):
-                    temp = torch.rand(grad_vector.shape).to(grad_vector.device) * 0.02
-                    temp = torch.clip(grad_vector + temp, 0, 1)
-                    _, soft_code, _ = self.wz_model.forward(temp, s_i)
-                    bins.append(soft_code.argmax(dim=1))
-
-        # most voted value
-        bins = torch.stack(bins, dim=1)
-        res = torch.mode(bins, dim=1).values
-        return res
+            bins = self.wz_model.encode(x).to('cpu')
+        self.wz_model.to('cpu')
+        return arithmetic_encode(bins.tolist(), self.bin_count)
 
     def decode(self, quantized_data, previous_data):
         # from quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
-        bins = []
+        reconstructs=[]
+        bins = arithmetic_decode(quantized_data,
+                                 self.bin_count, len(self.side_info_datasets[0]))
+        bins=torch.tensor(bins).to('cuda')
+
+        side_info_list = [*self.side_info_datasets]
+        for s_i in self.side_info_datasets:
+            for i in range(2):
+                x = torch.rand(s_i.shape).to(s_i.device) * 0.02
+                x = torch.clip(s_i + x, -1, 1)
+                side_info_list.append(x)
+
+        self.wz_model.to('cuda')
+        self.wz_model.eval()
         with torch.no_grad():
-            for s_i in self.side_info_datasets:
-                _, soft_code, _ = self.wz_model.forward(grad_vector, s_i)
-                bins.append(soft_code.argmax(dim=1))
-        return bins
+            for s_i in side_info_list:
+                reconstructs += [self.wz_model.decode(bins, s_i.to('cuda'))]
+                s_i.to('cpu')
+        self.wz_model.to('cpu')
+
+        res = torch.stack(reconstructs, dim=0).mean(dim=0).squeeze()
+        res = res.to('cpu').numpy()
+        return res
 
     def train_model(self, side_info_data_1, side_info_data_2):
         # return
 
         # todo utilize later decoded data to train the model further
+        self.side_info_datasets=[]
         self.side_info_datasets.append(torch.tensor(
             side_info_data_1, dtype=torch.float32).unsqueeze(1))
         self.side_info_datasets.append(torch.tensor(
@@ -134,19 +148,41 @@ class WZQuantizer:
 
         trainer = Trainer(
             accelerator="gpu",
-            max_epochs=25,
+            max_epochs=10,
             enable_progress_bar=self.metric_report_flag,
+            log_every_n_steps=1 if self.metric_report_flag else None,
             enable_model_summary=False,
         )
 
-        a = self.side_info_datasets[0].unsqueeze(1)
-        b = self.side_info_datasets[1].unsqueeze(1)
+        a = self.side_info_datasets[0]
+        b = self.side_info_datasets[1]
         combined_dataset = [torch.concat([a, b]), torch.concat([b, a])]
-        dataset = torch.utils.data.TensorDataset(*combined_dataset)
-        train_dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=self.batch_size, shuffle=True)
+        train_dataset = torch.utils.data.TensorDataset(*combined_dataset)
 
-        trainer.fit(self.wz_model, train_dataloaders=train_dataloader)
+
+        if self.train_sample_size > len(train_dataset):
+            self.train_sample_size = len(train_dataset)
+
+        val_dataloader = None
+        if self.metric_report_flag:
+            all_indices = np.arange(len(train_dataset))
+            val_indices = np.random.choice(
+                all_indices, size=int(self.train_sample_size // 2), replace=False)
+            train_indices = np.setdiff1d(all_indices, val_indices)
+
+            temp=train_dataset
+            val_dataset = torch.utils.data.Subset(temp, val_indices)
+            val_dataloader = torch.utils.data.DataLoader(
+                val_dataset, batch_size=self.batch_size)
+
+            train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=self.batch_size,
+            sampler=torch.utils.data.RandomSampler(train_dataset, num_samples=self.train_sample_size),)
+
+        trainer.fit(self.wz_model,
+                    train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
     def plot_bins(self, grad_data=None):
         from matplotlib import pyplot as plt
@@ -212,19 +248,25 @@ class WZQuantizer:
 
 
 if __name__ == "__main__":
-    # Example usage
-    wz_quantizer = WZQuantizer(batch_size=64, dataset_length=1000, code_bit_size=5.5, metric_report_flag=True)
+    torch.set_float32_matmul_precision('medium')
+
+    wz_quantizer = WZQuantizer(batch_size=64, code_bit_size=5.5, metric_report_flag=True)
 
     # Assuming side_info_data_1 and side_info_data_2 are available
-    side_info_data_1 = np.random.rand(1000)
-    side_info_data_2 = np.random.rand(1000)
+    side_info_data_1 = np.random.rand(2000)*2-1
+    side_info_data_2 = side_info_data_1 + np.random.rand(2000)*0.1
 
     wz_quantizer.train_model(side_info_data_1, side_info_data_2)
 
     # Example encoding
-    grad_vector = torch.randn(64, 1)  # Example gradient vector
+    grad_vector = side_info_data_1 + np.random.rand(2000)*0.1
     encoded_bins = wz_quantizer.encode(grad_vector)
-    print("Encoded Bins:", encoded_bins)
+    # print("Encoded Bins:", encoded_bins)
 
-    # Plotting bins
-    wz_quantizer.plot_bins()
+    # Example decoding
+    decoded_data = wz_quantizer.decode(encoded_bins, [])
+    # print("Decoded Data:", decoded_data)
+
+    print('error ',np.mean(np.abs(grad_vector-decoded_data)))
+
+
