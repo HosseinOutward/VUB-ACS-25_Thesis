@@ -83,7 +83,7 @@ def report_decompression_stat(func):
         if r_total_error is None or temp:
             if temp:
                 state_report_per_round.append({
-                    'byte size info per agent': r_byte_size_dict_list,
+                    'KB size info per agent': r_byte_size_dict_list,
                     '% error per layer per agent': r_decomp_error_dict_list,
                     '% total error per agent': r_total_error,
                 })

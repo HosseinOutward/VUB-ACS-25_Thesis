@@ -1,10 +1,10 @@
 import numpy as np
 
 
-def arithmetic_encode(list_of_ints, out_element_bit_size=64):
+def arithmetic_encode(list_of_ints, symbol_count, out_element_bit_size=64):
     encode_dtype = {'64': np.uint64, '32': np.uint32,
                     '16': np.uint16, '8': np.uint8}[str(out_element_bit_size)]
-    symbol_count = len(np.unique(list_of_ints))
+    # symbol_count = len(np.unique(list_of_ints))
     bit_per_symbol = np.log2(symbol_count)
     symbol_per_out_element = int(out_element_bit_size // bit_per_symbol)
     out_element_count = int((len(list_of_ints) + symbol_per_out_element - 1) // symbol_per_out_element)
@@ -14,7 +14,7 @@ def arithmetic_encode(list_of_ints, out_element_bit_size=64):
         chunk = list_of_ints[i:i + symbol_per_out_element]
         out_idx = i // symbol_per_out_element
         acc = 0
-        for j, v in enumerate(np.array(chunk, dtype=int)):
+        for j, v in enumerate(chunk):
             assert v < symbol_count, "Index out of bounds for symbol count"
             acc += int(v) * (symbol_count ** j)
         out_res[out_idx] = acc
