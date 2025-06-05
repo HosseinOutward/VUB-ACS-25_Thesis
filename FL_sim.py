@@ -69,7 +69,7 @@ class FederatedModelWrapper(pl.LightningModule):
 #     return [torch.utils.data.Subset(dataset, idxs) for idxs in client_indices]
 
 
-def report_metric(model, dataloader, name=None, rank=-1):
+def report_metric(model, dataloader, name=None, rank='ALL'):
     # todo utilize self.log with logger instead of this nonsense
     print(f"         {name} loss: ", end='')
 
@@ -78,7 +78,8 @@ def report_metric(model, dataloader, name=None, rank=-1):
 
     if name == 'train':
         print(f'({rank=}) ', end='')
-        dataloader.sampler.offset = rank
+        if dataloader.sampler.offset != rank:
+            dataloader.sampler.offset = rank
 
     with torch.no_grad():
         model.eval()
@@ -151,6 +152,8 @@ def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
 
 
 # ---------------------------------------------------------------------------------
+# todo single dataloader causes thread lock overhead (40% of the run time)
+#  a change of offset, even once, causes thread to check the entire dataset each time
 class CustomSampler(Sampler):
     def __init__(self, dataset, partitions_count, shuffle_whole,
                  shuffle_in_partition, non_iid_flag=False, seed=42):
@@ -179,6 +182,8 @@ class CustomSampler(Sampler):
             for i in range(self.partitions_count)}
 
     def __iter__(self) -> Iterator[int]:
+        if self.offset == 'ALL':
+            return iter(self.shuffle_whole_idx)
         # Generate indices for the current partition
         indices = self.shuffle_whole_idx[self.offset::self.partitions_count]
 
@@ -215,8 +220,6 @@ class Agent:
         
         # set up the DataLoader parameters for this agent
         self.local_model.args_for_f_on_grad['curr_round'] = round_s
-
-        self.local_data_train.sampler.offset = self.agent_id
 
         # train the model
         logger = False
@@ -338,22 +341,23 @@ class FLSimulator:
             print("  - reporting global model metrics")
             if post_training_report:
                 report_metric(self.global_model, self.test_loader, 'test')
-                report_metric(self.global_model, self.shared_train_loader, 'train',
-                              rank=np.random.randint(0, self.num_agents - 1))
+                report_metric(self.global_model, self.shared_train_loader, 'train')
 
             # ------------- Train each agent for the number of epochs -------------
             grad_dict_per_agent = []
-            for i, ag in enumerate(self.agents):
-                print(f"     > training agent {i + 1}/{len(self.agents)}")
+            for ag_id, ag in enumerate(self.agents):
+                print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
+
+                self.shared_train_loader.sampler.offset = ag_id
                 ag.train(epochs=self.client_epochs_per_round, round_s=round_s)
 
                 decoded_agent_broadcast = self.server_rec_process(
-                    i, self.num_agents, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
+                    ag_id, self.num_agents, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
                 grad_dict_per_agent.append(decoded_agent_broadcast)
 
                 if post_training_report:
                     report_metric(ag.local_model, self.test_loader, 'test')
-                    report_metric(ag.local_model, self.shared_train_loader, 'train', rank=i)
+                    report_metric(ag.local_model, self.shared_train_loader, 'train', rank=ag_id)
 
             # Aggregate pl_models from all agents
             self._aggregate_models(grad_dict_per_agent)
@@ -364,5 +368,4 @@ class FLSimulator:
         print("\nfinal global model metrics")
         if post_training_report:
             report_metric(self.global_model, self.test_loader, 'test')
-            report_metric(self.global_model, self.shared_train_loader, 'train',
-                          rank=np.random.randint(0, self.num_agents - 1))
+            report_metric(self.global_model, self.shared_train_loader, 'train')
