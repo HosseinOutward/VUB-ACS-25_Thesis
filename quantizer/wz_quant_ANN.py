@@ -66,9 +66,22 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
             optimizer, step_size=self.lr_step, gamma=0.3)
         return [optimizer], [scheduler]
 
+    def encode(self, grad_vector):
+        x = self.encoder(grad_vector)
+        x = F.softmax(x, dim=-1)
+        return x
 
+    def decode(self, encoded_data, side_info):
+        bin = torch.argmax(encoded_data, dim=-1)
+        reconstruct = self.decoder(F.one_hot(bin, num_classes=self.code_size), side_info)
+        return reconstruct
+
+
+# ---------------------------------------------
 class WZQuantizer:
-    def __init__(self, batch_size, dataset_length=250_000, code_bit_size=5.5):
+    def __init__(self, batch_size=10_000, dataset_length=250_000,
+                 code_bit_size=5.5, metric_report_flag=False):
+        self.metric_report_flag = metric_report_flag
         self.batch_size = batch_size
         self.dataset_length = int(dataset_length // 2)
 
@@ -76,38 +89,142 @@ class WZQuantizer:
         self.wz_model = PL_EncoderDecoder_ANN(
             lr=1e-3, code_size=bin_count, reconst_ld=100)
 
-        self.x_info_dataset = None
-        self.sampled_portion = None
+        self.side_info_datasets = []
 
     def encode(self, grad_vector):
-        return simple_quantize(grad_vector)  # Replace with actual WZ encoding logic
+        # from quantizer.simple import simple_quantize
+        # return simple_quantize(grad_vector)
+
+        bins = []
+        with torch.no_grad():
+            for s_i in self.side_info_datasets:
+                _, soft_code, _ = self.wz_model.forward(grad_vector, s_i)
+                bins.append(soft_code.argmax(dim=1))
+
+                for i in range(2):
+                    temp = torch.rand(grad_vector.shape).to(grad_vector.device) * 0.02
+                    temp = torch.clip(grad_vector + temp, 0, 1)
+                    _, soft_code, _ = self.wz_model.forward(temp, s_i)
+                    bins.append(soft_code.argmax(dim=1))
+
+        # most voted value
+        bins = torch.stack(bins, dim=1)
+        res = torch.mode(bins, dim=1).values
+        return res
 
     def decode(self, quantized_data, previous_data):
-        return simple_dequantize(quantized_data, np.float32)  # Replace with actual WZ decoding logic
+        # from quantizer.simple import simple_dequantize
+        # return simple_dequantize(quantized_data, np.float32)
 
-    def initialize_x_info_dataset(self, data):
-        self.sampled_portion = np.random.choice(
-            list(range(len(data))), self.dataset_length, replace=False)
+        bins = []
+        with torch.no_grad():
+            for s_i in self.side_info_datasets:
+                _, soft_code, _ = self.wz_model.forward(grad_vector, s_i)
+                bins.append(soft_code.argmax(dim=1))
+        return bins
 
-        self.x_info_dataset = torch.tensor(
-            data[self.sampled_portion], dtype=torch.float32).unsqueeze(1)
+    def train_model(self, side_info_data_1, side_info_data_2):
+        # return
 
-    def train_model(self, side_info_data):
-        side_info_dataset = torch.tensor(
-            side_info_data[self.sampled_portion], dtype=torch.float32).unsqueeze(1)
-
-        dataset = torch.utils.data.TensorDataset(self.x_info_dataset, side_info_dataset)
-        train_dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=self.batch_size, shuffle=True)
+        # todo utilize later decoded data to train the model further
+        self.side_info_datasets.append(torch.tensor(
+            side_info_data_1, dtype=torch.float32).unsqueeze(1))
+        self.side_info_datasets.append(torch.tensor(
+            side_info_data_2, dtype=torch.float32).unsqueeze(1))
 
         trainer = Trainer(
             accelerator="gpu",
-            max_epochs=50,
-            enable_progress_bar=True,
+            max_epochs=25,
+            enable_progress_bar=self.metric_report_flag,
             enable_model_summary=False,
         )
+
+        a = self.side_info_datasets[0].unsqueeze(1)
+        b = self.side_info_datasets[1].unsqueeze(1)
+        combined_dataset = [torch.concat([a, b]), torch.concat([b, a])]
+        dataset = torch.utils.data.TensorDataset(*combined_dataset)
+        train_dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=self.batch_size, shuffle=True)
+
         trainer.fit(self.wz_model, train_dataloaders=train_dataloader)
 
-        # clear out self.x_info_dataset
-        del self.x_info_dataset
-        self.x_info_dataset = None
+    def plot_bins(self, grad_data=None):
+        from matplotlib import pyplot as plt
+        import torch.nn.functional as F
+
+        coding_model.to('cuda').eval()
+
+        min_v, max_v = rtrain_x.min().numpy(), rtrain_x.max().numpy()
+        # min_v, max_v = np.percentile(rtrain_x.cpu().numpy(), [1, 99])
+
+        fig, ax = plt.subplots(nrows=1, ncols=2)
+        fig.set_size_inches(20, 5)
+
+        x_step = ((max_v - min_v) / 200)
+        x = torch.tensor(np.arange(min_v, max_v, x_step))
+        x = x.to(torch.float32).to('cuda').unsqueeze(1)
+        y = torch.zeros_like(x).to('cuda')
+        with torch.no_grad():
+            reconstruct, soft_code, prior = coding_model.forward(x, y)
+            bin = soft_code.argmax(dim=1)
+
+        bin = bin.detach().cpu().numpy()
+        x = x.detach().cpu().numpy()
+        ax[0].hist(rtrain_x.numpy()[:len(rtrain_x) // 5],
+                   bins=100, alpha=0.3, color='gray', label='data histogram', density=True)
+        ax[0].plot(x, abs(x - reconstruct.cpu().numpy()))
+        ax[0].plot(x, bin / 2 ** code_size * 3)
+
+        # Seeing the binning with colors
+        unique_v = np.unique(bin)
+        colors = plt.cm.viridis(np.linspace(0, 1, len(unique_v)))
+        for i, val in enumerate(unique_v):
+            mask = (bin == val)
+            ax[0].axvline(x[mask][0], color='black', linestyle='--', linewidth=0.5)
+            temp = [x[mask][0, 0], x[mask][0, 0]]
+            for j in range(1, len(x[mask])):
+                # if the next point of same color is far enough
+                if temp[1] + x_step * 1.1 < x[mask][j][0]:
+                    ax[0].axvspan(*temp, color=colors[i], alpha=0.3)
+                    temp[0] = x[mask][j][0]
+                temp[1] = x[mask][j][0]
+            # Ensure the last span is added
+            ax[0].axvspan(*temp, color=colors[i], alpha=0.3)
+        ax[0].set_xlim(min_v, max_v)
+
+        # __________________________________________________________
+        # Seeing the reconstruction points
+        with torch.no_grad():
+            for i in range(2 ** code_size):
+                y = torch.tensor(np.arange(min_v, max_v, x_step))
+                y = y.to(torch.float32).to('cuda').unsqueeze(1)
+                codes = F.one_hot(
+                    torch.ones([y.shape[0]], dtype=torch.long, device='cuda') * i,
+                    num_classes=2 ** code_size).float()
+                reconstruct = coding_model.coding_model.decoder(codes, y)
+
+                ax[1].plot(y.detach().cpu().numpy(),
+                           reconstruct.detach().cpu().numpy(),
+                           label='bin={}'.format(i))
+        ax[1].set_xlim(min_v, max_v)
+
+        plt.show()
+
+
+if __name__ == "__main__":
+    # Example usage
+    wz_quantizer = WZQuantizer(batch_size=64, dataset_length=1000, code_bit_size=5.5, metric_report_flag=True)
+
+    # Assuming side_info_data_1 and side_info_data_2 are available
+    side_info_data_1 = np.random.rand(1000)
+    side_info_data_2 = np.random.rand(1000)
+
+    wz_quantizer.train_model(side_info_data_1, side_info_data_2)
+
+    # Example encoding
+    grad_vector = torch.randn(64, 1)  # Example gradient vector
+    encoded_bins = wz_quantizer.encode(grad_vector)
+    print("Encoded Bins:", encoded_bins)
+
+    # Plotting bins
+    wz_quantizer.plot_bins()
