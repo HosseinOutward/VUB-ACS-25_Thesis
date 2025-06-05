@@ -273,7 +273,7 @@ class FLSimulator:
                                                True, True, non_iid_flag=non_iid_sampling)
         self.shared_train_loader = torch.utils.data.DataLoader(
             dataset_train, batch_size=batch_size, sampler=sampler,
-            num_workers=10, pin_memory=True, persistent_workers=True)
+            num_workers=10, pin_memory=False, persistent_workers=True)
 
         self.server_rec_process = server_rec_process
 
