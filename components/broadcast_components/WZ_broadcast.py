@@ -1,12 +1,11 @@
-import pickle
 from typing import List, Dict
 import numpy as np
 import torch
 
-from components.compression_reporting import report_compression_stat, report_decompression_stat
-from compressor.entropy_coding import entropy_coding, entropy_decoding
-from quantizer.simple import simple_quantize, simple_dequantize
-from quantizer.wz_quant_ANN import WZQuantizer
+from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
+from components.broadcast_components.quantizer.simple import simple_quantize, simple_dequantize
+from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer
+from components.broadcast_components.reporting_utilities import report_compression_stat, report_decompression_stat
 
 # ------------------
 wz_quantizer = WZQuantizer()
@@ -58,7 +57,7 @@ def wz_encoding_process(worker_grad_dict, agent_id):
 
 
 @report_decompression_stat
-def wz_reconstruction_process(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
+def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, ):
     # return worker_broadcast_data[0]
     encoded_data, min_v, max_v, dtype = worker_broadcast_data
 

@@ -1,7 +1,7 @@
 from pytorch_lightning import Trainer
 
-from quantizer.brent_wz_models import EncoderDecoder
-from compressor.arithmatic_coding import arithmetic_encode, arithmetic_decode
+from components.broadcast_components.quantizer.brent_wz_models import EncoderDecoder
+from components.broadcast_components.compressor.arithmatic_coding import arithmetic_encode, arithmetic_decode
 import torch
 import torch.nn.functional as F
 import numpy as np

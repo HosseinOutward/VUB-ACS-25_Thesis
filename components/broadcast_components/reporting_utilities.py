@@ -1,9 +1,9 @@
 import numpy as np
 import torch
 
-from compressor.entropy_coding import entropy_coding
-from models_to_train import ResNetPLModel
-from quantizer.simple import simple_quantize
+from components.broadcast_components.compressor.entropy_coding import entropy_coding
+from components.broadcast_components.quantizer.simple import simple_quantize
+from components.other_utilities.models_to_train import ResNetPLModel
 
 # ------------------
 r_keys_state = [k for k, v in ResNetPLModel(
@@ -21,7 +21,7 @@ state_report_per_round = []
 
 
 def report_compression_stat(func):
-    from components.components import dict_to_array_and_normalize
+    from components.broadcast_components.WZ_broadcast import dict_to_array_and_normalize
 
     def wrapper(worker_grad_dict, agent_id):
         global r_original_dict_list, r_byte_size_dict_list, \
@@ -55,14 +55,14 @@ def report_compression_stat(func):
 
 
 def report_decompression_stat(func):
-    def wrapper(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
+    def wrapper(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, ):
         global r_original_dict_list, r_byte_size_dict_list, \
             r_decomp_error_dict_list, r_total_error, r_keys_state
 
         assert agent_id == len(r_decomp_error_dict_list[r_keys_state[0]]), \
             "something wrong with the order of execution, agent_id given too soon"
 
-        result_dict = func(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data)
+        result_dict = func(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, )
 
         error_dict = {}
         total_error = 0
@@ -98,7 +98,8 @@ def report_decompression_stat(func):
 
 
 if __name__ == "__main__":
-    from components.components import wz_reconstruction_process, wz_quantizer, wz_encoding_process
+    from components.broadcast_components.WZ_broadcast import (
+            wz_reconstruction_process, wz_quantizer, wz_encoding_process)
     from experiments.resnet_parameter_corr_between_worker import load_grad_files
 
     model_shape_dict = {
