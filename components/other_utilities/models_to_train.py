@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torchmetrics.classification import AUROC
 from torchvision import models
-from FL_sim import FederatedModelWrapper
+from components.FL_sim import FederatedModelWrapper
 
 
 class ResNetPLModel(FederatedModelWrapper):

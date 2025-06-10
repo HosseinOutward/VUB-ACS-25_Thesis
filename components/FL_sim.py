@@ -1,8 +1,8 @@
+import gc
 import gzip
 import os
 from types import LambdaType
 from pytorch_lightning.loggers import CSVLogger
-import lz4.frame
 from typing import Optional, Callable, Dict, List, Iterator, Any
 import numpy as np
 import torch
@@ -74,12 +74,11 @@ def report_metric(model, dataloader, name=None, rank='ALL'):
     print(f"         {name} loss: ", end='')
 
     org_logging_dis_flag = model.logging_disabled
-    model.logging_disabled=True
+    model.logging_disabled = True
 
     if name == 'train':
         print(f'({rank=}) ', end='')
-        if dataloader.sampler.offset != rank:
-            dataloader.sampler.offset = rank
+        dataloader.sampler.set_agent_partition(rank)
 
     with torch.no_grad():
         model.eval()
@@ -98,7 +97,7 @@ def report_metric(model, dataloader, name=None, rank='ALL'):
 
         model.to('cpu')
 
-    model.logging_disabled=org_logging_dis_flag
+    model.logging_disabled = org_logging_dis_flag
 
 
 def fedavg(grad_dict_per_agent, sample_size_per_agent):
@@ -177,13 +176,18 @@ class CustomSampler(Sampler):
 
         self.partitions_count = partitions_count
 
-        self.size_of_partition = {
-            i: len(self.shuffle_whole_idx[i::self.partitions_count])
-            for i in range(self.partitions_count)}
+        self.size_of_partition = [
+            len(self.shuffle_whole_idx[i::self.partitions_count])
+            for i in range(self.partitions_count)]
+
+    def set_agent_partition(self, rank: int|str):
+        if rank!=self.offset:
+            self.offset = rank
 
     def __iter__(self) -> Iterator[int]:
         if self.offset == 'ALL':
             return iter(self.shuffle_whole_idx)
+
         # Generate indices for the current partition
         indices = self.shuffle_whole_idx[self.offset::self.partitions_count]
 
@@ -195,37 +199,37 @@ class CustomSampler(Sampler):
         return iter(indices)
 
     def __len__(self) -> int:
+        if self.offset == 'ALL':
+            return sum(self.size_of_partition)
         return self.size_of_partition[self.offset]
 
 
 # ---------------------------------------------------------------------------------
 class Agent:
-    def __init__(self, agent_id: int,
-                 shared_train_loader: torch.utils.data.DataLoader,
-                 test_loader: torch.utils.data.DataLoader,
+    def __init__(self,
+                 agent_id: int,
+                 local_data_size: int,
                  pre_send_preprocess: Optional[Callable[[Dict, int], Dict]] = None):
         self.local_model: FederatedModelWrapper | None = None
 
         self.agent_id = agent_id
-        self.local_data_train = shared_train_loader
-        self.test_loader = test_loader
 
         self.pre_send_preprocess = pre_send_preprocess
 
-        self.data_size = self.local_data_train.sampler.size_of_partition[agent_id]
+        self.data_size = local_data_size
 
-    def train(self, epochs, round_s):
+    def train(self, train_dataloader, test_dataloader, epochs, round_s):
         assert isinstance(self.local_model, FederatedModelWrapper), \
             "Local model is not set. Call set_local_models() before training."
-        
+
         # set up the DataLoader parameters for this agent
         self.local_model.args_for_f_on_grad['curr_round'] = round_s
 
         # train the model
         logger = False
         if not self.local_model.logging_disabled:
-            logger = CSVLogger(save_dir="experiments/exp_data/run_stats",
-                            name=f"agent_{self.agent_id}_round_{round_s}",)
+            logger = CSVLogger(save_dir="../experiments/exp_data/run_stats",
+                               name=f"agent_{self.agent_id}_round_{round_s}", )
 
         trainer = Trainer(
             max_epochs=epochs,
@@ -235,7 +239,7 @@ class Agent:
             enable_progress_bar=False,
             enable_checkpointing=False,
             enable_model_summary=False, )
-        trainer.fit(self.local_model, self.local_data_train, self.test_loader)
+        trainer.fit(self.local_model, train_dataloader, test_dataloader)
 
         # remove model from GPU memory
         self.local_model.eval()
@@ -253,40 +257,35 @@ class FLSimulator:
                  communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
                  pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_sampling=False,
-                 pre_send_process:Optional[Callable[[Dict, int], Any]] = lambda x,i: x,
-                 server_rec_process:Optional[Callable[[int, Dict, List, Any], Dict]] = lambda i,s,z,x: x):
-
+                 pre_send_process: Optional[Callable[[Dict, int], Any]] = lambda x, i: x,
+                 server_rec_process: Optional[Callable[[Any, int, int, Dict, List], Dict]] = lambda x, i, j, s, z: x):
         if LambdaType in [type(pre_send_process), type(server_rec_process)]:
             assert type(pre_send_process) is LambdaType and type(server_rec_process) is LambdaType
+
+        self.global_model = pl_model
 
         self.num_agents = num_agents
         self.communication_rounds = communication_rounds
         self.client_epochs_per_round = client_epochs_per_round
         self.aggregation_method = aggregation_method
 
-        # Create a shared train DataLoader outside agents
-        self.test_loader = torch.utils.data.DataLoader(
-            dataset_test, batch_size=batch_size * 3, shuffle=False,
-            num_workers=2, pin_memory=True, persistent_workers=True)
-
-        sampler: CustomSampler = CustomSampler(dataset_train, num_agents,
-                                               True, True, non_iid_flag=non_iid_sampling)
-        self.shared_train_loader = torch.utils.data.DataLoader(
-            dataset_train, batch_size=batch_size, sampler=sampler,
-            num_workers=10, pin_memory=False, persistent_workers=True)
-
-        self.server_rec_process = server_rec_process
-
-        self.global_model = pl_model
-
-        self.agents = [Agent(
-                agent_id, self.shared_train_loader, self.test_loader, pre_send_process
-            ) for agent_id in range(num_agents)]
+        self.dataset_train = dataset_train
+        self.dataset_test = dataset_test
+        self.batch_count = batch_size
 
         self.server_optimizer = self.global_model.configure_optimizers()
 
-        temp = self.global_model.named_parameters()
-        self.model_shape_dict = {k: v.shape for k, v in temp if v.requires_grad}
+        self.server_rec_process = server_rec_process
+
+        self.train_sampler = CustomSampler(self.dataset_train, self.num_agents,
+                False, False, non_iid_flag=non_iid_sampling, )
+
+        self.model_shape_dict = {k: v.shape
+                for k, v in self.global_model.named_parameters() if v.requires_grad}
+
+        self.agents = [Agent(
+            agent_id, self.train_sampler.size_of_partition[agent_id], pre_send_process
+        ) for agent_id in range(num_agents)]
 
     def _set_local_models(self):
         # todo find a way for the optimizer configurations to work after grad aggregation
@@ -312,60 +311,78 @@ class FLSimulator:
                 param.grad = grad_to_apply
         self.server_optimizer.step()
 
-    def do_train_global_model_and_set_local_model(self, num_epochs):
+    def do_train_global_model_and_set_local_model(self, shared_train_loader, num_epochs):
         print(f'training global model on all data before simulation starts for {num_epochs} epochs')
-        for rank in range(self.num_agents):
-            self.shared_train_loader.sampler.offset = rank
-            trainer = Trainer(
-                max_epochs=num_epochs,
-                accelerator='cuda',
-                logger=False,
-                enable_progress_bar=False,
-                enable_checkpointing=False,
-                enable_model_summary=False, )
-            trainer.fit(self.global_model, self.shared_train_loader)
+        # self.shared_train_loader.sampler.offset = 'ALL'
+        self.train_sampler.set_agent_partition('ALL')
+        trainer = Trainer(
+            max_epochs=num_epochs,
+            accelerator='cuda',
+            logger=False,
+            enable_progress_bar=False,
+            enable_checkpointing=False,
+            enable_model_summary=False, )
+        trainer.fit(self.global_model, shared_train_loader)
 
         self._set_local_models()
 
     def run_simulation(self, post_training_report=True, pre_training_global_epochs=5):
-        if pre_training_global_epochs!=0:
-            self.do_train_global_model_and_set_local_model(num_epochs=pre_training_global_epochs)
+        shared_train_loader = torch.utils.data.DataLoader(
+            self.dataset_train, batch_size=self.batch_count, sampler=self.train_sampler,
+            num_workers=10, persistent_workers=True)
 
-        # cycle through communication rounds
+        shared_test_loader = torch.utils.data.DataLoader(
+            self.dataset_test, batch_size=self.batch_count * 3, shuffle=False,
+            num_workers=2, persistent_workers=True)
+
+        # pre_training_global_epochs -----------------------------------------------
+        if pre_training_global_epochs != 0:
+            self.do_train_global_model_and_set_local_model(
+                shared_train_loader, num_epochs=pre_training_global_epochs)
+
+        # cycle through communication rounds -----------------------------------------------
         for round_s in range(self.communication_rounds):
-            self._set_local_models()
-
             print(f"\nround {round_s + 1}/{self.communication_rounds} --------------------")
 
-            # report the global model loss and accuracy on entire test set
+            # ------------- report the global model loss and accuracy on entire test set
             print("  - reporting global model metrics")
-            if post_training_report:
-                report_metric(self.global_model, self.test_loader, 'test')
-                report_metric(self.global_model, self.shared_train_loader, 'train')
+            report_metric(self.global_model, shared_test_loader, 'test')
+            report_metric(self.global_model, shared_train_loader, 'train')
 
-            # ------------- Train each agent for the number of epochs -------------
+            # ------------- Train each agent for the number of epochs
             grad_dict_per_agent = []
+            self._set_local_models()
             for ag_id, ag in enumerate(self.agents):
                 print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
 
-                self.shared_train_loader.sampler.offset = ag_id
-                ag.train(epochs=self.client_epochs_per_round, round_s=round_s)
+                # self.shared_train_loader.sampler.offset = ag_id
+                self.train_sampler.set_agent_partition(ag_id)
+                ag.train(shared_train_loader, shared_test_loader,
+                         epochs=self.client_epochs_per_round, round_s=round_s)
+
+                encoded_ag_broadcast = ag.get_worker_broadcast()
 
                 decoded_agent_broadcast = self.server_rec_process(
-                    ag_id, self.num_agents, self.model_shape_dict, grad_dict_per_agent, ag.get_worker_broadcast())
+                    encoded_ag_broadcast,
+                    ag_id, self.num_agents, self.model_shape_dict,
+                    grad_dict_per_agent, )
+
                 grad_dict_per_agent.append(decoded_agent_broadcast)
 
                 if post_training_report:
-                    report_metric(ag.local_model, self.test_loader, 'test')
-                    report_metric(ag.local_model, self.shared_train_loader, 'train', rank=ag_id)
+                    report_metric(ag.local_model, shared_test_loader, 'test')
+                    report_metric(ag.local_model, shared_train_loader, 'train', rank=ag_id)
 
-            # Aggregate pl_models from all agents
+            # ------------- Aggregate pl_models from all agents
             self._aggregate_models(grad_dict_per_agent)
 
-        # Load the aggregated global model to each agent's local model
         self._set_local_models()
 
+        # final global model report -----------------------------------------------
         print("\nfinal global model metrics")
-        if post_training_report:
-            report_metric(self.global_model, self.test_loader, 'test')
-            report_metric(self.global_model, self.shared_train_loader, 'train')
+        report_metric(self.global_model, shared_test_loader, 'test')
+        report_metric(self.global_model, shared_train_loader, 'train')
+
+        del shared_train_loader
+        gc.collect()
+        torch.cuda.empty_cache()
