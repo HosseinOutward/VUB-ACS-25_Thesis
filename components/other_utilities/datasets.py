@@ -25,8 +25,9 @@ class FasterSVHN(SVHN):
                 target = self.target_transform(target)
             self.labels.append(target)
 
-        self.data = torch.stack(self.data).permute(0, 1, 2, 3)
-        self.labels = torch.tensor(self.labels)
+        self.data = np.array(self.data).transpose(0, 1, 2, 3)
+        self.labels = np.array(self.labels)
 
     def __getitem__(self, index: int):
         return self.data[index], self.labels[index]
+
