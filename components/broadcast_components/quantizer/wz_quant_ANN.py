@@ -97,7 +97,7 @@ class WZQuantizer:
         self.side_info_datasets = []
 
     def encode(self, grad_vector):
-        # from quantizer.simple import simple_quantize
+        # from components.broadcast_components.quantizer.simple import simple_quantize
         # return simple_quantize(grad_vector)
 
         x = torch.tensor(grad_vector).unsqueeze(1).to('cuda').float()
@@ -109,7 +109,7 @@ class WZQuantizer:
         return arithmetic_encode(bins.tolist(), self.bin_count)
 
     def decode(self, quantized_data, previous_data):
-        # from quantizer.simple import simple_dequantize
+        # from components.broadcast_components.quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
         reconstructs=[]
@@ -136,6 +136,7 @@ class WZQuantizer:
         res = res.to('cpu').numpy()
         return res
 
+    # todo figure out why we have memory leak with wz
     def train_model(self, side_info_data_1, side_info_data_2):
         # return
 
