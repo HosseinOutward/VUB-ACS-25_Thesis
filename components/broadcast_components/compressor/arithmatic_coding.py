@@ -1,6 +1,7 @@
 import numpy as np
 
 
+# todo send a set of bits to show bins being used and only use existing bins
 def arithmetic_encode(list_of_ints, symbol_count, out_element_bit_size=64):
     encode_dtype = {'64': np.uint64, '32': np.uint32,
                     '16': np.uint16, '8': np.uint8}[str(out_element_bit_size)]
