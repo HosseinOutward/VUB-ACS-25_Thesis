@@ -104,7 +104,7 @@ def _load_and_flatten(args):
     (train_attempt, batch_idx, layer_names,
      path_to_files, curr_round, current_epoch, single_worker) = args
     filename = f"_round_{curr_round}_epoch_{current_epoch}_batch_{batch_idx}_gradients.pt.gz"
-    to_np = lambda x, i: x[i].numpy().ravel()
+    to_np = lambda x, i: x[i].numpy().ravel().copy()  # Add .copy() to create independent arrays
 
     p0 = path_to_files[train_attempt] + f"worker_{0}" + filename
     with gzip.open(p0, "rb") as f:
@@ -119,17 +119,17 @@ def _load_and_flatten(args):
     return {k: (to_np(g0, i), to_np(g1, i)) for i, k in enumerate(layer_names)}
 
 
-def load_grad_files(sample_steps, layer_names, path_to_files,
+def load_grad_files(train_att_batch_idx_sample_steps, layer_names, path_to_files,
                     curr_round, current_epoch=None, single_worker=False):
     sample_dict = {k: [] for k in layer_names}
 
-    if sample_steps.shape[1]==2:
+    if train_att_batch_idx_sample_steps.shape[1]==2:
         assert current_epoch is not None
         jobs = [(ta, bi, layer_names, path_to_files, curr_round,
-             current_epoch, single_worker) for ta, bi in sample_steps]
+             current_epoch, single_worker) for ta, bi in train_att_batch_idx_sample_steps]
     else:
         jobs = [(ta, bi, layer_names, path_to_files, curr_round,
-             ep, single_worker) for ta, ep, bi in sample_steps]
+             ep, single_worker) for ta, ep, bi in train_att_batch_idx_sample_steps]
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()-2) as pool:
         for res in pool.map(_load_and_flatten, jobs, chunksize=1):
@@ -178,4 +178,3 @@ if __name__ == "__main__":
         temp = f"exp_data/resnet_parameter_corr_between_worker/param_sim_vec_{k}.pt.gz"
         with gzip.open(temp, "wb") as f:
             torch.save(result[k], f)
-
