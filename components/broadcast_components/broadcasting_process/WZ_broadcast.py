@@ -10,7 +10,6 @@ from components.broadcast_components.reporting_utilities import ReportingUtiliti
 # ------------------
 # todo: dont use in import file definition
 wz_quantizer = WZQuantizer()
-reporting_util = ReportingUtilities()
 # ------------------
 
 
@@ -38,7 +37,6 @@ def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List
     return res
 
 
-@reporting_util.record_compr_stats
 def wz_encoding_process(worker_grad_dict, agent_id):
     min_v, max_v = [
         [f(v).to('cpu').numpy() for k, v in worker_grad_dict.items()]
@@ -58,7 +56,6 @@ def wz_encoding_process(worker_grad_dict, agent_id):
     return encoded_data, min_v, max_v, dtype
 
 
-@reporting_util.report_compression_wrapper
 def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, ):
     # return worker_broadcast_data[0]
     encoded_data, min_v, max_v, dtype = worker_broadcast_data
