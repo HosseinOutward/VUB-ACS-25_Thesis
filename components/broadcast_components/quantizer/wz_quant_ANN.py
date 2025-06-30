@@ -185,66 +185,96 @@ class WZQuantizer:
         trainer.fit(self.wz_model,
                     train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
-    def plot_bins(self, grad_data=None):
+        del train_dataloader, val_dataloader
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def plot_bins(self, grad_data):
         from matplotlib import pyplot as plt
-        import torch.nn.functional as F
 
-        coding_model.to('cuda').eval()
+        def _setup_zero_side_info(length):
+            """Helper to temporarily set zero side info for visualization"""
+            original_side_info = self.side_info_data_list.copy()
+            self.side_info_data_list = [np.zeros(length)]
+            return original_side_info
 
-        min_v, max_v = rtrain_x.min().numpy(), rtrain_x.max().numpy()
-        # min_v, max_v = np.percentile(rtrain_x.cpu().numpy(), [1, 99])
+        def _restore_side_info(original_side_info):
+            """Helper to restore original side info"""
+            self.side_info_data_list = original_side_info
 
-        fig, ax = plt.subplots(nrows=1, ncols=2)
-        fig.set_size_inches(20, 5)
+        def _plot_bin_regions(ax, x_range, decoded_bins, x_step, colors):
+            """Helper to visualize bin regions with colors"""
+            unique_bins = np.unique(decoded_bins)
 
-        x_step = ((max_v - min_v) / 200)
-        x = torch.tensor(np.arange(min_v, max_v, x_step))
-        x = x.to(torch.float32).to('cuda').unsqueeze(1)
-        y = torch.zeros_like(x).to('cuda')
-        with torch.no_grad():
-            reconstruct, soft_code, prior = coding_model.forward(x, y)
-            bin = soft_code.argmax(dim=1)
+            for i, bin_val in enumerate(unique_bins):
+                bin_positions = x_range[np.array(decoded_bins) == bin_val]
+                if len(bin_positions) == 0:
+                    continue
 
-        bin = bin.detach().cpu().numpy()
-        x = x.detach().cpu().numpy()
-        ax[0].hist(rtrain_x.numpy()[:len(rtrain_x) // 5],
-                   bins=100, alpha=0.3, color='gray', label='data histogram', density=True)
-        ax[0].plot(x, abs(x - reconstruct.cpu().numpy()))
-        ax[0].plot(x, bin / 2 ** code_size * 3)
+                # Mark first bin boundary
+                ax.axvline(bin_positions[0], color='black', linestyle='--', linewidth=0.5)
 
-        # Seeing the binning with colors
-        unique_v = np.unique(bin)
-        colors = plt.cm.viridis(np.linspace(0, 1, len(unique_v)))
-        for i, val in enumerate(unique_v):
-            mask = (bin == val)
-            ax[0].axvline(x[mask][0], color='black', linestyle='--', linewidth=0.5)
-            temp = [x[mask][0, 0], x[mask][0, 0]]
-            for j in range(1, len(x[mask])):
-                # if the next point of same color is far enough
-                if temp[1] + x_step * 1.1 < x[mask][j][0]:
-                    ax[0].axvspan(*temp, color=colors[i], alpha=0.3)
-                    temp[0] = x[mask][j][0]
-                temp[1] = x[mask][j][0]
-            # Ensure the last span is added
-            ax[0].axvspan(*temp, color=colors[i], alpha=0.3)
-        ax[0].set_xlim(min_v, max_v)
+                # Color contiguous bin regions
+                start_pos = bin_positions[0]
+                for j in range(1, len(bin_positions)):
+                    if bin_positions[j] - bin_positions[j - 1] > x_step * 1.1:  # Gap detected
+                        ax.axvspan(start_pos, bin_positions[j - 1], color=colors[i], alpha=0.3)
+                        start_pos = bin_positions[j]
+                # Final span
+                ax.axvspan(start_pos, bin_positions[-1], color=colors[i], alpha=0.3)
 
-        # __________________________________________________________
-        # Seeing the reconstruction points
-        with torch.no_grad():
-            for i in range(2 ** code_size):
-                y = torch.tensor(np.arange(min_v, max_v, x_step))
-                y = y.to(torch.float32).to('cuda').unsqueeze(1)
-                codes = F.one_hot(
-                    torch.ones([y.shape[0]], dtype=torch.long, device='cuda') * i,
-                    num_classes=2 ** code_size).float()
-                reconstruct = coding_model.coding_model.decoder(codes, y)
+        # Ensure grad_data is numpy array for consistency
+        if isinstance(grad_data, torch.Tensor):
+            grad_data = grad_data.cpu().numpy()
+        grad_data = np.asarray(grad_data, dtype=np.float32)
 
-                ax[1].plot(y.detach().cpu().numpy(),
-                           reconstruct.detach().cpu().numpy(),
-                           label='bin={}'.format(i))
-        ax[1].set_xlim(min_v, max_v)
+        # Setup visualization parameters
+        min_v, max_v = grad_data.min(), grad_data.max()
+        x_step = (max_v - min_v) / 200
+        x_range = np.arange(min_v, max_v, x_step)
 
+        # Get encoding/decoding results
+        bins = self.encode(x_range)
+        decoded_bins = arithmetic_decode(bins, self.bin_count, len(x_range))
+
+        # Get reconstruction with zero side info
+        original_side_info = _setup_zero_side_info(len(x_range))
+        reconstructed = self.decode(bins)
+        _restore_side_info(original_side_info)
+
+        # Setup plots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 5))
+
+        # Plot 1: Data histogram with binning analysis
+        sample_size = len(grad_data) // 5
+        ax1.hist(grad_data[:sample_size], bins=100, alpha=0.3, color='gray',
+                 label='data histogram', density=True)
+        ax1.plot(x_range, np.abs(x_range - reconstructed), label='reconstruction error')
+        ax1.plot(x_range, np.array(decoded_bins) / self.bin_count * 3, label='normalized bins')
+
+        # Visualize bin regions
+        colors = plt.cm.viridis(np.linspace(0, 1, len(np.unique(decoded_bins))))
+        _plot_bin_regions(ax1, x_range, decoded_bins, x_step, colors)
+
+        ax1.set_xlim(min_v, max_v)
+        ax1.legend()
+        ax1.set_title('Binning Visualization')
+
+        # Plot 2: Reconstruction curves for each bin (batch process)
+        original_side_info = _setup_zero_side_info(len(x_range))
+
+        for bin_idx in range(self.bin_count):
+            dummy_bins = arithmetic_encode([bin_idx] * len(x_range), self.bin_count)
+            bin_reconstruction = self.decode(dummy_bins)
+            ax2.plot(x_range, bin_reconstruction, label=f'bin={bin_idx}')
+
+        _restore_side_info(original_side_info)
+
+        ax2.set_xlim(min_v, max_v)
+        ax2.legend()
+        ax2.set_title('Reconstruction Curves by Bin')
+
+        plt.tight_layout()
         plt.show()
 
 
@@ -270,4 +300,6 @@ if __name__ == "__main__":
 
     print('error ',np.mean(np.abs(grad_vector-decoded_data)))
 
-
+    # Test the plot_bins method
+    print("Testing plot_bins method...")
+    wz_quantizer.plot_bins(grad_vector)
