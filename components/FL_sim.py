@@ -154,53 +154,52 @@ def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
 # todo single dataloader causes thread lock overhead (40% of the run time)
 #  a change of offset, even once, causes thread to check the entire dataset each time
 class CustomSampler(Sampler):
-    def __init__(self, dataset, partitions_count, shuffle_whole,
+    def __init__(self, dataset_len, partitions_count, shuffle_whole,
                  shuffle_in_partition, non_iid_flag=False, seed=42):
+        assert non_iid_flag is False, "Currently only IID data is supported"
         super().__init__()
 
-        # todo: custom sampler for non-IID data
-        assert non_iid_flag is False, "Currently only IID data is supported"
-
-        self.dataset = dataset
-        self.shuffle_in_partition = shuffle_in_partition
-
-        self.offset = -1
-        self.seed = seed
-
-        self.shuffle_whole_idx = np.arange(len(self.dataset))
-        if shuffle_whole:
-            g = torch.Generator()
-            g.manual_seed(self.seed)
-            self.shuffle_whole_idx = torch.randperm(
-                len(dataset)).numpy()
-
+        # Store only dataset length, not dataset reference
+        self.dataset_len = dataset_len
         self.partitions_count = partitions_count
+        self.shuffle_whole = shuffle_whole
+        self.shuffle_in_partition = shuffle_in_partition
+        self.seed = seed
+        self.offset = 0
 
-        self.size_of_partition = [
-            len(self.shuffle_whole_idx[i::self.partitions_count])
-            for i in range(self.partitions_count)]
+        # Pre-compute partition sizes to avoid recalculation
+        base_size = self.dataset_len // self.partitions_count
+        remainder = self.dataset_len % self.partitions_count
+        self.size_of_partition = {
+            i: base_size + (1 if i < remainder else 0)
+            for i in range(self.partitions_count)
+        }
 
-    def set_agent_partition(self, rank: int|str):
-        if rank!=self.offset:
-            self.offset = rank
+    def get_whole_shuffle_idx(self):
+        if self.shuffle_whole:
+            rng = np.random.RandomState(self.seed)
+            return rng.permutation(self.dataset_len)
+        else:
+            return np.arange(self.dataset_len)
 
-    def __iter__(self) -> Iterator[int]:
+    def __iter__(self):
+        shuffle_whole_idx = self.get_whole_shuffle_idx()
         if self.offset == 'ALL':
-            return iter(self.shuffle_whole_idx)
+            return iter(shuffle_whole_idx)
 
         # Generate indices for the current partition
-        indices = self.shuffle_whole_idx[self.offset::self.partitions_count]
+        indices = shuffle_whole_idx[self.offset::self.partitions_count]
 
-        # shuffle the indices within the partition
+        # Shuffle within partition using numpy (faster and pickles better)
         if self.shuffle_in_partition:
-            in_part_idx = torch.randperm(len(self)).numpy()
-            indices = indices[in_part_idx]
+            rng = np.random.RandomState(self.seed + self.offset)
+            rng.shuffle(indices)
 
         return iter(indices)
 
     def __len__(self) -> int:
         if self.offset == 'ALL':
-            return sum(self.size_of_partition)
+            return self.dataset_len
         return self.size_of_partition[self.offset]
 
 
@@ -277,7 +276,7 @@ class FLSimulator:
 
         self.server_rec_process = server_rec_process
 
-        self.train_sampler = CustomSampler(self.dataset_train, self.num_agents,
+        self.train_sampler = CustomSampler(len(self.dataset_train), self.num_agents,
                 False, False, non_iid_flag=non_iid_sampling, )
 
         self.model_shape_dict = {k: v.shape
