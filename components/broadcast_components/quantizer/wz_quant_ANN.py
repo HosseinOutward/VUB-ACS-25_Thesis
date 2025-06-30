@@ -91,7 +91,7 @@ class WZQuantizer:
 
         self.train_sample_size = 100_000
         self.side_info_data_list = []
-        self.wz_model = None
+        self.wz_model: PL_EncoderDecoder_ANN|None = None
 
     def encode(self, grad_vector):
         # from components.broadcast_components.quantizer.simple import simple_quantize

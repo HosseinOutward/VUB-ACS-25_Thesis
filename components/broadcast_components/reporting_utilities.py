@@ -54,7 +54,7 @@ class ReportingUtilities:
 
         return wrapper
 
-    def report_compression_wrapper(self, func):
+    def report_reconst_wrapper(self, func):
         def wrapper(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, ):
             assert agent_id == len(self.recons_err_perc_dict_list[self.param_keys[0]]), \
                 "something wrong with the order of execution, agent_id given too soon"
@@ -96,9 +96,12 @@ class ReportingUtilities:
 
 if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.WZ_broadcast import (
-        wz_reconstruction_process, wz_quantizer, wz_encoding_process, reporting_util)
+        wz_reconstruction_process, wz_quantizer, wz_encoding_process)
     from experiments.resnet_parameter_corr_between_worker import load_grad_files
 
+    wz_quantizer.metric_report_flag = True
+
+    # --------------------------------
     torch.set_float32_matmul_precision('high')
     import logging
     logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
@@ -107,14 +110,28 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="You defined a `validation_step` but have no `val_dataloader`")
     warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'train_dataloader'")
 
-    wz_quantizer.metric_report_flag = True
 
+    # --------------------------------
+    reporting_util = ReportingUtilities()
+    @reporting_util.record_compr_stats
+    def pre_send_process(worker_grad_dict, agent_id):
+        # worker_broadcast_data = [worker_grad_dict]
+        worker_broadcast_data = wz_encoding_process(worker_grad_dict, agent_id)
+        return worker_broadcast_data
+    @reporting_util.report_reconst_wrapper
+    def server_rec_process(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
+        # result_dict = worker_broadcast_data[0]
+        result_dict = wz_reconstruction_process(
+            agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data)
+        return result_dict
+
+    # --------------------------------
     model_shape_dict = {
         k: v.shape
         for k, v in ResNetPLModel(num_classes=10, resnet_version='resnet18').named_parameters() if v.requires_grad
     }
 
-    # load testing data
+    # load testing data --------------------------------
     temp = np.array([[0, 0], [0, 1], [1, 0], [1, 1]])
     grad_test_data = load_grad_files(
         temp, list(model_shape_dict.keys()),
@@ -128,16 +145,16 @@ if __name__ == "__main__":
     ]
     grad_test_data = [grad_test_data[:len(temp)], grad_test_data[len(temp):]]
 
-    # simulate the WZ encoding and reconstruction process
+    # simulate the WZ encoding and reconstruction process --------------------------------
     for ww in grad_test_data:
         prev = []
         for ag_id in range(len(ww)):
-            broadcast_data = wz_encoding_process(ww[ag_id], ag_id)
-            decoded_agent_broadcast = wz_reconstruction_process(
+            broadcast_data = pre_send_process(ww[ag_id], ag_id)
+            decoded_agent_broadcast = server_rec_process(
                 broadcast_data, ag_id, len(ww), model_shape_dict, prev, )
             prev.append(decoded_agent_broadcast)
 
-    # report
+    # report --------------------------------
     print("Compression Reporting:")
     for i, report in enumerate(reporting_util.state_report_per_round):
         print(f"Round {i}:")
