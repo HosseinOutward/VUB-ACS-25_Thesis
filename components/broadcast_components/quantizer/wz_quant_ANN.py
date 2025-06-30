@@ -1,7 +1,5 @@
 import gc
 
-from pytorch_lightning import Trainer
-
 from components.other_utilities.brent_wz_models import EncoderDecoder
 from components.broadcast_components.compressor.arithmatic_coding import arithmetic_encode, arithmetic_decode
 import torch
@@ -37,8 +35,10 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
         loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
 
-        # clamp loss to avoid NaN
-        # loss = torch.clamp(loss, min=-5, max=5)
+        # avoid nan by reducing loss
+        detached_loss = loss.detach()
+        if detached_loss>10:
+            loss *= 10/detached_loss
 
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
         # train_mse_loss = train_mse_loss / TRAIN_BATCHES
@@ -52,7 +52,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         # self.log(f'{name_prefix}_bits_used',
         #          -np.log2(temp + 1e-12), prog_bar=True)
         self.log(f'{name_prefix}_rate (bits)',
-                 torch.mean(-torch.log2(p_u + 1e-12)).item(), prog_bar=True)
+                 torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
         return loss
 
@@ -70,13 +70,13 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
             optimizer, step_size=self.lr_step, gamma=0.3)
         return [optimizer], [scheduler]
 
-    def encode(self, grad_vector):
+    def encode_net(self, grad_vector):
         x = self.coding_model.encoder(grad_vector)
         x = F.softmax(x, dim=-1)
         x = torch.argmax(x, dim=-1)
         return x
 
-    def decode(self, bins, side_info):
+    def decode_net(self, bins, side_info):
         reconstruct = self.coding_model.decoder(
             F.one_hot(bins.long(), num_classes=self.coding_model.code_size), side_info)
         return reconstruct
@@ -84,13 +84,13 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
 # ---------------------------------------------
 class WZQuantizer:
-    def __init__(self, batch_size=10_000, code_bit_size=3.5, metric_report_flag=False):
+    def __init__(self, metric_report_flag=False, train_sample_size = 100_000):
         self.metric_report_flag = metric_report_flag
-        self.batch_size = batch_size
-        self.bin_count = int(round(2 ** code_bit_size))
 
-        self.train_sample_size = 100_000
+        self.train_sample_size = train_sample_size
         self.side_info_data_list = []
+        self.batch_size = None
+        self.bin_count = None
         self.wz_model: PL_EncoderDecoder_ANN|None = None
 
     def encode(self, grad_vector):
@@ -101,7 +101,7 @@ class WZQuantizer:
         self.wz_model.to('cuda')
         self.wz_model.eval()
         with torch.no_grad():
-            bins = self.wz_model.encode(x).to('cpu')
+            bins = self.wz_model.encode_net(x).to('cpu')
         self.wz_model.to('cpu')
         return arithmetic_encode(bins.tolist(), self.bin_count)
 
@@ -115,8 +115,8 @@ class WZQuantizer:
         self.wz_model.to('cuda')
         self.wz_model.eval()
         with torch.no_grad():
-            side_info_list = torch.tensor(self.side_info_data_list, dtype=torch.float32).T.unsqueeze(-1)
-            reconstructs = [self.wz_model.decode(bins, side_info_list.to('cuda'))]
+            side_info_list = torch.tensor(np.array(self.side_info_data_list), dtype=torch.float32).T.unsqueeze(-1)
+            reconstructs = [self.wz_model.decode_net(bins, side_info_list.to('cuda'))]
         side_info_list.to('cpu')
         self.wz_model.to('cpu')
 
@@ -125,11 +125,16 @@ class WZQuantizer:
         return res
 
     # todo figure out why we have memory leak with wz
-    def train_model(self, input_data, side_info_data_list):
+    def train_model(self, input_data, side_info_data_list, epoch=10,
+            batch_size=10_000, code_bit_size=3.5, lr=1e-3, reconst_ld=100):
         # return
+
+        self.batch_size = batch_size
+        self.bin_count = int(round(2 ** code_bit_size))
+
         self.side_info_data_list.extend(side_info_data_list)
 
-        side_info_data_list = torch.tensor(self.side_info_data_list, dtype=torch.float32).T.unsqueeze(-1)
+        side_info_data_list = torch.tensor(np.array(self.side_info_data_list), dtype=torch.float32).T.unsqueeze(-1)
         input_data = torch.tensor(input_data, dtype=torch.float32).unsqueeze(1)
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
 
@@ -145,7 +150,7 @@ class WZQuantizer:
             val_dataset = torch.utils.data.Subset(train_dataset, val_indices)
             val_dataloader = torch.utils.data.DataLoader(
                 val_dataset, batch_size=self.batch_size * 10,
-                num_workers=2, pin_memory=True, persistent_workers=True)
+                num_workers=0, pin_memory=False, persistent_workers=False)
 
             train_indices = np.setdiff1d(all_indices, val_indices)
             train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
@@ -161,11 +166,16 @@ class WZQuantizer:
         if self.wz_model is not None:
             self.wz_model.to('cpu')
         self.wz_model = PL_EncoderDecoder_ANN(
-            inp_dim=side_info_data_list.shape[1], lr=1e-3, code_size=self.bin_count, reconst_ld=100)
+            inp_dim=side_info_data_list.shape[1], lr=lr, code_size=self.bin_count, reconst_ld=reconst_ld)
 
-        trainer = Trainer(
+        from pytorch_lightning.callbacks import TQDMProgressBar
+        from tqdm import tqdm
+        class NoValidationBar(TQDMProgressBar):
+            def init_validation_tqdm(self): return tqdm(disable=True)
+        trainer = pl.Trainer(
             accelerator="cuda",
-            max_epochs=10,
+            max_epochs=epoch,
+            callbacks=[NoValidationBar()] if self.metric_report_flag else [],
             enable_progress_bar=self.metric_report_flag,
             log_every_n_steps=1 if self.metric_report_flag else None,
             enable_model_summary=False,
@@ -272,20 +282,25 @@ def plot_bins(wz_model, grad_data):
 
 
 if __name__ == "__main__":
+    import logging
+    logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
+    import warnings
+    warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
+    warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
     torch.set_float32_matmul_precision('medium')
 
-    wz_quantizer = WZQuantizer(batch_size=64, code_bit_size=2, metric_report_flag=True)
+    side_info_data = np.random.rand(100000)
+    y = side_info_data + np.random.rand(100000) * 0.1
 
-    side_info_data = np.random.rand(10000)
-    y = side_info_data + np.random.rand(10000) * 0.1
+    wz_quantizer = WZQuantizer(train_sample_size=100_000, metric_report_flag=True)
+    wz_quantizer.train_model(y, [side_info_data],
+                             batch_size=10_000, code_bit_size=1.5, lr=1e-3, reconst_ld=100)
 
-    wz_quantizer.train_model(y, [side_info_data])
-
-    grad_vector = side_info_data + np.random.rand(10000) * 0.1
+    grad_vector = side_info_data + np.random.rand(100000) * 0.1
     encoded_bins = wz_quantizer.encode(grad_vector)
     decoded_data = wz_quantizer.decode(encoded_bins)
     print('error ', np.mean(np.abs(grad_vector - decoded_data)))
 
-    # Test the plot_bins method
     print("Testing plot_bins method...")
-    wz_quantizer.plot_bins(grad_vector)
+    plot_bins(wz_quantizer.wz_model, grad_vector)
+
