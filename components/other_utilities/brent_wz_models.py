@@ -34,7 +34,7 @@ class Decoder(ProbabilisticModel):
                          hidden_units=hidden_dim)
 
     def forward(self, x, y):
-        return super().forward(torch.cat([x, *y.transpose(0,1)], dim=-1))
+        return super().forward(torch.cat([x, y], dim=-1))
 
 
 class Encoder(ProbabilisticModel):
