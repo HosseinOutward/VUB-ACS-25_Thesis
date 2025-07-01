@@ -3,11 +3,13 @@ import numpy as np
 import torch
 
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
-from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer
+from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizerANN
+from components.broadcast_components.quantizer.wz_quant_RNN import WZQuantizerRNN
 
 # ------------------
 # todo: dont use in import file definition
-wz_quantizer = WZQuantizer()
+# wz_quantizer = WZQuantizerANN()
+wz_quantizer = WZQuantizerRNN()
 # ------------------
 
 
@@ -45,6 +47,7 @@ def wz_encoding_process(worker_grad_dict, agent_id):
 
     grad_flat_normal = dict_to_array_and_normalize(worker_grad_dict, min_v, max_v)
 
+
     quantized_data = wz_quantizer.encode(grad_flat_normal)
 
     dtype = quantized_data.dtype
@@ -71,7 +74,8 @@ def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, glo
 
     wz_quantizer.train_new_model(
         res_vector+np.random.normal(0,0.1,model_size),
-        prev_d_flat+[res_vector])
+        prev_d_flat+[res_vector],
+        batch_size=10_000,)
 
     result_dict = recover_shape_and_denormal_to_dict(
         res_vector, global_model_dims, min_v, max_v)

@@ -154,8 +154,8 @@ def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
 # todo single dataloader causes thread lock overhead (40% of the run time)
 #  a change of offset, even once, causes thread to check the entire dataset each time
 class CustomSampler(Sampler):
-    def __init__(self, dataset_len, partitions_count, shuffle_whole,
-                 shuffle_in_partition, non_iid_flag=False, seed=42):
+    def __init__(self, dataset_len, partitions_count,
+                 shuffle_whole, shuffle_in_partition, non_iid_flag=False, seed=42):
         assert non_iid_flag is False, "Currently only IID data is supported"
         super().__init__()
 
@@ -174,6 +174,10 @@ class CustomSampler(Sampler):
             i: base_size + (1 if i < remainder else 0)
             for i in range(self.partitions_count)
         }
+
+    def set_agent_partition(self, rank: int|str):
+        if rank!=self.offset:
+            self.offset = rank
 
     def get_whole_shuffle_idx(self):
         if self.shuffle_whole:
@@ -277,7 +281,7 @@ class FLSimulator:
         self.server_rec_process = server_rec_process
 
         self.train_sampler = CustomSampler(len(self.dataset_train), self.num_agents,
-                False, False, non_iid_flag=non_iid_sampling, )
+                True, True, non_iid_flag=non_iid_sampling, )
 
         self.model_shape_dict = {k: v.shape
                 for k, v in self.global_model.named_parameters() if v.requires_grad}
@@ -358,6 +362,9 @@ class FLSimulator:
                 self.train_sampler.set_agent_partition(ag_id)
                 ag.train(shared_train_loader, shared_test_loader,
                          epochs=self.client_epochs_per_round, round_s=round_s)
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
                 encoded_ag_broadcast = ag.get_worker_broadcast()
 
