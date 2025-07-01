@@ -3,9 +3,7 @@ import numpy as np
 import torch
 
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
-from components.broadcast_components.quantizer.simple import simple_quantize, simple_dequantize
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer
-from components.broadcast_components.reporting_utilities import ReportingUtilities
 
 # ------------------
 # todo: dont use in import file definition
@@ -47,8 +45,7 @@ def wz_encoding_process(worker_grad_dict, agent_id):
 
     grad_flat_normal = dict_to_array_and_normalize(worker_grad_dict, min_v, max_v)
 
-    quantizer = simple_quantize if agent_id <= 1 else wz_quantizer.encode
-    quantized_data = quantizer(grad_flat_normal)
+    quantized_data = wz_quantizer.encode(grad_flat_normal)
 
     dtype = quantized_data.dtype
     encoded_data = entropy_coding(quantized_data)
@@ -62,17 +59,19 @@ def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, glo
 
     quantized_decoded_data = entropy_decoding(encoded_data, dtype)
 
-    if agent_id <= 1:
-        res_vector = simple_dequantize(quantized_decoded_data, np.float32)
-        if agent_id == 1:
-            assert len(previous_data) == 1
-            temp = [
-                [f(v).to('cpu').numpy() for k, v in previous_data[0].items()]
-                for f in [torch.min, torch.max]]
-            prev_data = dict_to_array_and_normalize(previous_data[0], *temp)
-            wz_quantizer.train_model(res_vector, prev_data, )
-    else:
-        res_vector = wz_quantizer.decode(quantized_decoded_data, previous_data)
+    model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
+    prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v) for pd in previous_data]
+    side_info_data_list = prev_d_flat
+
+    if agent_id == 0:
+        side_info_data_list = [np.zeros(model_size, dtype=dtype)]
+        wz_quantizer.load_basic_wz_model()
+
+    res_vector = wz_quantizer.decode(quantized_decoded_data, side_info_data_list)
+
+    wz_quantizer.train_new_model(
+        res_vector+np.random.normal(0,0.1,model_size),
+        prev_d_flat+[res_vector])
 
     result_dict = recover_shape_and_denormal_to_dict(
         res_vector, global_model_dims, min_v, max_v)

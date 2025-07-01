@@ -9,10 +9,11 @@ import pytorch_lightning as pl
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, code_size, lr=1e-4, reconst_ld=100):
+    def __init__(self, inp_dim, side_info_size, code_size, lr=1e-4, reconst_ld=100):
         super(PL_EncoderDecoder_ANN, self).__init__()
         self.coding_model = EncoderDecoder(
-            input_dim=inp_dim, layers=4, hidden_dim=80, code_size=code_size, marginal=True)
+            input_dim=inp_dim, side_info_size=side_info_size,
+            layers=4, hidden_dim=80, code_size=code_size, marginal=False)
         self.reconst_ld = reconst_ld
         self.tau = 1
         self.lr = lr
@@ -36,9 +37,9 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
 
         # avoid nan by reducing loss
-        detached_loss = loss.detach()
-        if detached_loss>10:
-            loss *= 10/detached_loss
+        # detached_loss = loss.detach().item()
+        # if detached_loss>100:
+        #     loss *= 100/detached_loss
 
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
         # train_mse_loss = train_mse_loss / TRAIN_BATCHES
@@ -84,14 +85,22 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
 # ---------------------------------------------
 class WZQuantizer:
-    def __init__(self, metric_report_flag=False, train_sample_size = 100_000):
+    def __init__(self, metric_report_flag=False, train_sample_size=100_000):
         self.metric_report_flag = metric_report_flag
 
         self.train_sample_size = train_sample_size
         self.side_info_data_list = []
         self.batch_size = None
+
         self.bin_count = None
-        self.wz_model: PL_EncoderDecoder_ANN|None = None
+        self.wz_model = None
+        self.load_basic_wz_model()
+
+    def load_basic_wz_model(self):
+        self.bin_count = 4
+        self.wz_model = PL_EncoderDecoder_ANN(inp_dim=1, side_info_size=1, code_size=self.bin_count)
+        # todo add loading from file
+        # self.wz_model.load_from_checkpoint('wz_model')
 
     def encode(self, grad_vector):
         # from components.broadcast_components.quantizer.simple import simple_quantize
@@ -105,17 +114,17 @@ class WZQuantizer:
         self.wz_model.to('cpu')
         return arithmetic_encode(bins.tolist(), self.bin_count)
 
-    def decode(self, quantized_data):
+    def decode(self, quantized_data, side_info_data_list):
         # from components.broadcast_components.quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
-        bins = arithmetic_decode(quantized_data, self.bin_count, len(self.side_info_data_list[0]))
+        bins = arithmetic_decode(quantized_data, self.bin_count, len(side_info_data_list[0]))
         bins = torch.tensor(bins).to('cuda')
 
         self.wz_model.to('cuda')
         self.wz_model.eval()
         with torch.no_grad():
-            side_info_list = torch.tensor(np.array(self.side_info_data_list), dtype=torch.float32).T
+            side_info_list = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
             reconstructs = [self.wz_model.decode_net(bins, side_info_list.to('cuda'))]
         side_info_list.to('cpu')
         self.wz_model.to('cpu')
@@ -124,17 +133,15 @@ class WZQuantizer:
         res = res.to('cpu').numpy()
         return res
 
-    # todo figure out why we have memory leak with wz
-    def train_model(self, input_data, side_info_data_list, epoch=10,
-            batch_size=10_000, code_bit_size=3.5, lr=1e-3, reconst_ld=100):
+    # todo have multiple input data and train on all of them in one run (change sampler)
+    def train_new_model(self, input_data, side_info_data_list, epoch=10,
+                        batch_size=10_000, code_bit_size=3.5, lr=1e-3, reconst_ld=100):
         # return
 
         self.batch_size = batch_size
         self.bin_count = int(round(2 ** code_bit_size))
 
-        self.side_info_data_list.extend(side_info_data_list)
-
-        side_info_data_list = torch.tensor(np.array(self.side_info_data_list), dtype=torch.float32).T
+        side_info_data_list = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
         input_data = torch.tensor(input_data, dtype=torch.float32).unsqueeze(1)
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
 
@@ -156,22 +163,36 @@ class WZQuantizer:
             train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
 
         # ------------------------------
-        random_indices = torch.randint(0, len(train_dataset), (self.train_sample_size,))
-        train_dataset = torch.utils.data.Subset(train_dataset, random_indices)
+        class RandomReplacementSampler(torch.utils.data.Sampler):
+            def __init__(self, dataset_size, samples_per_epoch):
+                super().__init__(data_source=None)
+                self.dataset_size = dataset_size
+                self.samples_per_epoch = samples_per_epoch
+            def __iter__(self):
+                temp = [np.random.randint(0, self.dataset_size) for _ in range(self.samples_per_epoch)]
+                return iter(temp)
+            def __len__(self):
+                return self.samples_per_epoch
+        train_sampler = RandomReplacementSampler(
+            dataset_size=len(train_dataset),
+            samples_per_epoch=self.train_sample_size)
         train_dataloader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=self.batch_size,
+            train_dataset, batch_size=self.batch_size, sampler=train_sampler,
             num_workers=2, pin_memory=True, persistent_workers=True)
 
         # ------------------------------
         if self.wz_model is not None:
             self.wz_model.to('cpu')
         self.wz_model = PL_EncoderDecoder_ANN(
-            inp_dim=side_info_data_list.shape[1], lr=lr, code_size=self.bin_count, reconst_ld=reconst_ld)
+            inp_dim=1, side_info_size=side_info_data_list.shape[1],
+            lr=lr, code_size=self.bin_count, reconst_ld=reconst_ld)
 
+        # disable val progress bar due to pl bug
         from pytorch_lightning.callbacks import TQDMProgressBar
         from tqdm import tqdm
         class NoValidationBar(TQDMProgressBar):
             def init_validation_tqdm(self): return tqdm(disable=True)
+
         trainer = pl.Trainer(
             accelerator="cuda",
             max_epochs=epoch,
@@ -198,6 +219,7 @@ def plot_bins(wz_model, grad_data):
             bins = wz_model.encode_net(x).to('cpu')
         wz_model.to('cpu')
         return bins
+
     def decoding_f(bins, side_info_data_list):
         bins = torch.tensor(bins).to('cuda')
 
@@ -212,6 +234,7 @@ def plot_bins(wz_model, grad_data):
         res = torch.stack(reconstructs, dim=0).mean(dim=0).squeeze()
         res = res.to('cpu').numpy()
         return res
+
     def _plot_bin_regions(ax, x_range, decoded_bins, x_step, colors):
         unique_bins = np.unique(decoded_bins)
 
@@ -243,7 +266,7 @@ def plot_bins(wz_model, grad_data):
     # for plot 2
     bin_count = wz_model.coding_model.code_size
     reconstructed_per_bin = np.array([
-        decoding_f(np.ones(200)*b, [x_range]) for b in range(bin_count)])
+        decoding_f(np.ones(200) * b, [x_range]) for b in range(bin_count)])
 
     # for plot 1
     bins = encoding_f(x_range)
@@ -253,13 +276,15 @@ def plot_bins(wz_model, grad_data):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
     # Plot 1: Data histogram with binning analysis ------------------------
-    counts, bins_edges, patches = ax1.hist(grad_data[np.random.choice(len(grad_data), 20000, replace=False)],
-                                           bins=200, alpha=0.3, color='gray', label='data histogram', density=False)
+    counts, bins_edges, patches = ax1.hist(
+        grad_data[np.random.choice(len(grad_data), 20000, replace=False)],
+        bins=200, alpha=0.3, color='gray', label='data histogram', density=False)
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
     ax1.plot(x_range, np.abs(x_range - recons_for_x_range), label='reconstruction error')
-    ax1.plot(x_range, (np.array(bins)+1) / bin_count, label='normalized encoded_bins')
+    ax1.plot(x_range, (np.array(bins) + 1) / bin_count, label='normalized encoded_bins')
+    ax1.set_xlabel('x_range')
 
     # Visualize bin regions
     colors = plt.cm.viridis(np.linspace(0, 1, len(np.unique(bins))))
@@ -270,6 +295,7 @@ def plot_bins(wz_model, grad_data):
     ax1.set_title('Binning Visualization')
 
     # Plot 2: Reconstruction curves for each bin (batch process) ------------------------
+    # todo merge the 2 plots and change how the sideinfo is given (for example for all 0s as side info)
     for bin_idx in range(bin_count):
         ax2.plot(x_range, reconstructed_per_bin[bin_idx], label=f'bin={bin_idx}')
 
@@ -285,23 +311,23 @@ def plot_bins(wz_model, grad_data):
 
 
 if __name__ == "__main__":
-    import logging
-    logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
-    import warnings
-    warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
-    warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
-    torch.set_float32_matmul_precision('medium')
-
     side_info_data = np.random.normal(0, 1, 100000)
     y = side_info_data + np.random.normal(0, 0.1, 100000)
 
+    # %%
+    import logging
+
+    logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
+    import warnings
+
+    warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
+    warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
+
+    # %%
     wz_quantizer = WZQuantizer(train_sample_size=100_000, metric_report_flag=True)
-    wz_quantizer.train_model(y, [side_info_data],
-                             batch_size=10_000, code_bit_size=1.5, lr=1e-3, reconst_ld=100)
+    wz_quantizer.train_new_model(y, [side_info_data], epoch=25,
+                                 batch_size=10_000, code_bit_size=2, lr=1e-5, reconst_ld=100)
 
-    encoded_bins = wz_quantizer.encode(y)
-    decoded_data = wz_quantizer.decode(encoded_bins)
-    print('error ', np.mean(np.abs(y - decoded_data)))
-
-    print("Testing plot_bins method...")
+    # %%
+    print('error ', np.mean(np.abs(y - wz_quantizer.decode(wz_quantizer.encode(y), [side_info_data]))))
     plot_bins(wz_quantizer.wz_model, y)
