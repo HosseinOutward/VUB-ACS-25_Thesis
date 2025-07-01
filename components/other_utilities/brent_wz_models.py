@@ -29,8 +29,8 @@ class ProbabilisticModel(nn.Module):
 
 class Decoder(ProbabilisticModel):
 
-    def __init__(self, output_dim=1, code_size=4, layers=3, hidden_dim=100):
-        super().__init__(input_dim=code_size + output_dim, output_dim=output_dim, layers=layers,
+    def __init__(self, output_dim=1, side_info_size=1, code_size=4, layers=3, hidden_dim=100):
+        super().__init__(input_dim=code_size + side_info_size, output_dim=output_dim, layers=layers,
                          hidden_units=hidden_dim)
 
     def forward(self, x, y):
@@ -79,19 +79,20 @@ class ConditionalPrior(ProbabilisticModel):
 
 class EncoderDecoder(nn.Module):
 
-    def __init__(self, input_dim=1, layers=3, hidden_dim=100, code_size=2**4, marginal=True):
+    def __init__(self, input_dim=1, side_info_size=1, layers=3, hidden_dim=100, code_size=2**4, marginal=True):
 
         super().__init__()
 
         self.code_size = code_size
 
         self.encoder = Encoder(input_dim=input_dim, code_size=self.code_size, layers=layers, hidden_dim=hidden_dim)
-        self.decoder = Decoder(code_size=self.code_size, output_dim=input_dim, layers=layers, hidden_dim=hidden_dim)
+        self.decoder = Decoder(code_size=self.code_size, side_info_size=side_info_size,
+                               output_dim=input_dim, layers=layers, hidden_dim=hidden_dim)
         if marginal is True:
             self.prior = MarginalPrior(code_size=self.code_size)
         else:
             self.prior = ConditionalPrior(code_size=self.code_size, layers=layers, hidden_dim=hidden_dim,
-                                          input_dim=input_dim)
+                                          input_dim=side_info_size)
 
     def forward(self, x, y, tau=1.0):
 
