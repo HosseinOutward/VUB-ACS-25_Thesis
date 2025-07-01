@@ -1,5 +1,6 @@
 import numpy as np
 
+# todo replace the arithmetic coding with rsna
 
 # todo send a set of bits to show bins being used and only use existing bins
 def arithmetic_encode(list_of_ints, symbol_count, out_element_bit_size=64):

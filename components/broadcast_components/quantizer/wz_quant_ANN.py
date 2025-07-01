@@ -19,15 +19,12 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.lr = lr
         self.lr_step = 40
 
-    def forward(self, x, y, tau=None):
-        return self.coding_model(x, y, tau=tau)
-
     def custom_steps(self, batch, batch_idx, name_prefix):
         tau_t = self.tau * np.exp(
             self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
 
         single_grad_param, side_info = batch
-        reconstruct, bins_probs, prior_probs = self.forward(single_grad_param, side_info, tau=tau_t)
+        reconstruct, bins_probs, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         bin_no = torch.argmax(bins_probs, dim=-1)
         temp = torch.arange(bins_probs.size(0))
@@ -84,7 +81,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
 
 # ---------------------------------------------
-class WZQuantizer:
+class WZQuantizerANN:
     def __init__(self, metric_report_flag=False, train_sample_size=100_000):
         self.metric_report_flag = metric_report_flag
 
@@ -96,11 +93,20 @@ class WZQuantizer:
         self.wz_model = None
         self.load_basic_wz_model()
 
+    def make_model_obj(self, *args, **kwargs):
+        return PL_EncoderDecoder_ANN(*args, **kwargs)
+
     def load_basic_wz_model(self):
         self.bin_count = 4
-        self.wz_model = PL_EncoderDecoder_ANN(inp_dim=1, side_info_size=1, code_size=self.bin_count)
+        self.wz_model = self.make_model_obj(inp_dim=1, side_info_size=1, code_size=self.bin_count)
         # todo add loading from file
         # self.wz_model.load_from_checkpoint('wz_model')
+
+    def symbol_encoding(self, bins):
+        return arithmetic_encode(bins.tolist(), self.bin_count)
+
+    def symbol_decoding(self, quantized_data, vect_size):
+        return arithmetic_decode(quantized_data, self.bin_count, vect_size)
 
     def encode(self, grad_vector):
         # from components.broadcast_components.quantizer.simple import simple_quantize
@@ -112,13 +118,13 @@ class WZQuantizer:
         with torch.no_grad():
             bins = self.wz_model.encode_net(x).to('cpu')
         self.wz_model.to('cpu')
-        return arithmetic_encode(bins.tolist(), self.bin_count)
+        return self.symbol_encoding(bins)
 
     def decode(self, quantized_data, side_info_data_list):
         # from components.broadcast_components.quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
-        bins = arithmetic_decode(quantized_data, self.bin_count, len(side_info_data_list[0]))
+        bins = self.symbol_decoding(quantized_data, len(side_info_data_list[0]))
         bins = torch.tensor(bins).to('cuda')
 
         self.wz_model.to('cuda')
@@ -174,8 +180,7 @@ class WZQuantizer:
             def __len__(self):
                 return self.samples_per_epoch
         train_sampler = RandomReplacementSampler(
-            dataset_size=len(train_dataset),
-            samples_per_epoch=self.train_sample_size)
+            dataset_size=len(train_dataset), samples_per_epoch=self.train_sample_size)
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset, batch_size=self.batch_size, sampler=train_sampler,
             num_workers=2, pin_memory=True, persistent_workers=True)
@@ -183,7 +188,7 @@ class WZQuantizer:
         # ------------------------------
         if self.wz_model is not None:
             self.wz_model.to('cpu')
-        self.wz_model = PL_EncoderDecoder_ANN(
+        self.wz_model = self.make_model_obj(
             inp_dim=1, side_info_size=side_info_data_list.shape[1],
             lr=lr, code_size=self.bin_count, reconst_ld=reconst_ld)
 
@@ -324,8 +329,8 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
 
     # %%
-    wz_quantizer = WZQuantizer(train_sample_size=100_000, metric_report_flag=True)
-    wz_quantizer.train_new_model(y, [side_info_data], epoch=25,
+    wz_quantizer = WZQuantizerANN(train_sample_size=100_000, metric_report_flag=True)
+    wz_quantizer.train_new_model(y, [side_info_data], epoch=10,
                                  batch_size=10_000, code_bit_size=2, lr=1e-5, reconst_ld=100)
 
     # %%
