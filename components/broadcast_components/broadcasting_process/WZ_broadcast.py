@@ -47,8 +47,7 @@ def wz_encoding_process(worker_grad_dict, agent_id):
 
     grad_flat_normal = dict_to_array_and_normalize(worker_grad_dict, min_v, max_v)
 
-
-    quantized_data = wz_quantizer.encode(grad_flat_normal)
+    quantized_data = wz_quantizer.encoding_process(grad_flat_normal)
 
     dtype = quantized_data.dtype
     encoded_data = entropy_coding(quantized_data)
@@ -70,7 +69,7 @@ def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, glo
         side_info_data_list = [np.zeros(model_size, dtype=dtype)]
         wz_quantizer.load_basic_wz_model()
 
-    res_vector = wz_quantizer.decode(quantized_decoded_data, side_info_data_list)
+    res_vector = wz_quantizer.decoding_process(quantized_decoded_data, side_info_data_list)
 
     wz_quantizer.train_new_model(
         res_vector+np.random.normal(0,0.1,model_size),
