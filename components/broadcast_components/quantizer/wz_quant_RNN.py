@@ -55,17 +55,19 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
 class WZQuantizerRNN(WZQuantizerANN):
     def __init__(self, train_sample_size=100_000, metric_report_flag=False):
         super(WZQuantizerRNN, self).__init__(metric_report_flag, train_sample_size, )
-        self.wz_model = PL_EncoderDecoder_RNN(num_planes=1, inp_dim=1, side_info_size=1,
+        self.wz_model = PL_EncoderDecoder_RNN(num_planes=3, inp_dim=1, side_info_size=1,
                                               code_size=2, lr=1e-4, reconst_ld=100)
 
     def make_model_obj(self, *args, **kwargs):
         return PL_EncoderDecoder_RNN(*args, num_planes=3, **kwargs)
 
     def symbol_encoding(self, bins):
-        return [super(WZQuantizerRNN, self).symbol_encoding(b) for b in bins]
+        return super(WZQuantizerRNN, self).symbol_encoding(np.concat(bins.numpy()))
 
     def symbol_decoding(self, quantized_data, vect_size):
-        return [super(WZQuantizerRNN, self).symbol_decoding(qd, vect_size) for qd in quantized_data]
+        res =  super(WZQuantizerRNN, self).symbol_decoding(
+            quantized_data, vect_size*self.wz_model.num_planes)
+        return np.split(res, self.wz_model.num_planes, axis=0)
 
 
 if __name__ == "__main__":
@@ -81,9 +83,9 @@ if __name__ == "__main__":
 
     # %%
     wz_quantizer = WZQuantizerRNN(train_sample_size=100_000, metric_report_flag=True)
-    wz_quantizer.train_new_model(y, [side_info_data], epoch=10,
-                                 batch_size=10_000, code_bit_size=2, lr=1e-5, reconst_ld=100)
+    wz_quantizer.train_new_model(y, [side_info_data], epoch=2,
+                    batch_size=10_000, code_bit_size=2, lr=1e-5, reconst_ld=100)
 
     # %%
-    print('error ', np.mean(np.abs(y - wz_quantizer.decode(wz_quantizer.encode(y), [side_info_data]))))
+    print('error ', np.mean(np.abs(y - wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), [side_info_data]))))
     # plot_bins(wz_quantizer.wz_model, y)

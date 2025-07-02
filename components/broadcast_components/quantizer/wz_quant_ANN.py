@@ -108,40 +108,81 @@ class WZQuantizerANN:
     def symbol_decoding(self, quantized_data, vect_size):
         return arithmetic_decode(quantized_data, self.bin_count, vect_size)
 
-    def encode(self, grad_vector):
+    # todo separate the running of the model for ann and rnn
+    def encoding_process(self, grad_vector, batch_size=500_000):
         # from components.broadcast_components.quantizer.simple import simple_quantize
         # return simple_quantize(grad_vector)
 
-        x = torch.tensor(grad_vector).unsqueeze(1).to('cuda').float()
+        grad_tensor = torch.tensor(grad_vector).float()
+        total_size = len(grad_tensor)
+
         self.wz_model.to('cuda')
         self.wz_model.eval()
+
+        all_bins = []
         with torch.no_grad():
-            bins = self.wz_model.encode_net(x).to('cpu')
+            for i in range(0, total_size, batch_size):
+                end_idx = min(i + batch_size, total_size)
+                batch = grad_tensor[i:end_idx].unsqueeze(1).to('cuda')
+
+                bins_batch = self.wz_model.encode_net(batch).to('cpu')
+                all_bins.append(bins_batch)
+
+                batch.to('cpu')
         self.wz_model.to('cpu')
+        torch.cuda.empty_cache()
+
+        # Concatenate all batches
+        if len(all_bins) <= 1:
+            bins = all_bins[0]
+        else:
+            bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
         return self.symbol_encoding(bins)
 
-    def decode(self, quantized_data, side_info_data_list):
+    # todo separate the running of the model for ann and rnn
+    def decoding_process(self, quantized_data, side_info_data_list, batch_size=500_000):
         # from components.broadcast_components.quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
         bins = self.symbol_decoding(quantized_data, len(side_info_data_list[0]))
-        bins = torch.tensor(bins).to('cuda')
+        bins_tensor = torch.tensor(np.array(bins))
+        total_size = len(bins_tensor[0]) if len(bins_tensor.shape) == 2 else len(bins_tensor)
 
         self.wz_model.to('cuda')
         self.wz_model.eval()
+
+        all_reconstructs = []
+
         with torch.no_grad():
-            side_info_list = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
-            reconstructs = [self.wz_model.decode_net(bins, side_info_list.to('cuda'))]
-        side_info_list.to('cpu')
+            side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
+
+            for i in range(0, total_size, batch_size):
+                end_idx = min(i + batch_size, total_size)
+
+                if len(bins_tensor.shape) != 2:
+                    bins_batch = bins_tensor[i:end_idx].to('cuda')
+                else:
+                    bins_batch = bins_tensor[:,i:end_idx].to('cuda')
+
+                side_info_batch = side_info_array[i:end_idx].to('cuda')
+
+                reconstructs_batch = self.wz_model.decode_net(bins_batch, side_info_batch)
+                all_reconstructs.append(reconstructs_batch.to('cpu'))
+
+                # Clear GPU memory for this batch
+                del bins_batch, side_info_batch
+                torch.cuda.empty_cache()
+
         self.wz_model.to('cpu')
 
-        res = torch.stack(reconstructs, dim=0).mean(dim=0).squeeze()
-        res = res.to('cpu').numpy()
+        all_reconstructs = torch.cat(all_reconstructs, dim=0)
+        res = all_reconstructs.squeeze()
+        res = res.numpy()
         return res
 
     # todo have multiple input data and train on all of them in one run (change sampler)
     def train_new_model(self, input_data, side_info_data_list, epoch=10,
-                        batch_size=10_000, code_bit_size=3.5, lr=1e-3, reconst_ld=100):
+                        batch_size=50_000, code_bit_size=3.5, lr=1e-3, reconst_ld=100):
         # return
 
         self.batch_size = batch_size
@@ -330,9 +371,9 @@ if __name__ == "__main__":
 
     # %%
     wz_quantizer = WZQuantizerANN(train_sample_size=100_000, metric_report_flag=True)
-    wz_quantizer.train_new_model(y, [side_info_data], epoch=10,
+    wz_quantizer.train_new_model(y, [side_info_data], epoch=2,
                                  batch_size=10_000, code_bit_size=2, lr=1e-5, reconst_ld=100)
 
     # %%
-    print('error ', np.mean(np.abs(y - wz_quantizer.decode(wz_quantizer.encode(y), [side_info_data]))))
+    print('error ', np.mean(np.abs(y - wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), [side_info_data]))))
     plot_bins(wz_quantizer.wz_model, y)
