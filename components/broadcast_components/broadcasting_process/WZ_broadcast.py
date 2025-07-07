@@ -6,19 +6,13 @@ from components.broadcast_components.compressor.entropy_coding import entropy_co
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizerANN
 from components.broadcast_components.quantizer.wz_quant_RNN import WZQuantizerRNN
 
-# ------------------
-# todo: dont use in import file definition
-# wz_quantizer = WZQuantizerANN()
-wz_quantizer = WZQuantizerRNN()
-# ------------------
-
 
 def dict_to_array_and_normalize(grad_dict: Dict, min_v: List, max_v: List):
     res = []
     for i, (k, v) in enumerate(grad_dict.items()):
         v = v.ravel() * 1000
         v = (v - min_v[i] * 1000) / (max_v[i] * 1000 - min_v[i] * 1000)
-        v = v*2-1  # normalize to [-1, 1]
+        v = v * 2 - 1  # normalize to [-1, 1]
         res.append(v.to('cpu').numpy())
     res = np.concatenate(res)
     return res
@@ -30,56 +24,90 @@ def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List
     for i, (k, shape) in enumerate(org_shapes_dict.items()):
         end = start + np.prod(shape)
         v = grad_vector[start:end]
-        v = (v+1)/2
+        v = (v + 1) / 2
         v = v * (max_v[i] - min_v[i]) + min_v[i]
         res[k] = v.reshape(shape)
         start = end
     return res
 
 
-def wz_encoding_process(worker_grad_dict, agent_id):
-    min_v, max_v = [
-        [f(v).to('cpu').numpy() for k, v in worker_grad_dict.items()]
-        for f in [torch.min, torch.max]]
+class WZBroadcastProtocol:
+    def __init__(self, agent_count, quantizer_type='RNN', *args, **kwargs):
+        self.side_info_data_list = None
+        self.agent_list_check = []
+        self.warmup = True
+        self.wz_quantizer_class = {'ANN': WZQuantizerANN, 'RNN': WZQuantizerRNN}[quantizer_type]
+        self.wz_quantizer_list: List[WZQuantizerANN] = [
+            self.wz_quantizer_class(count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
+        self.last_recent_grads_list = [None] * agent_count
 
-    # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
-    # return worker_grad_dict, min_v, max_v, 0
+    # %%
+    def wz_encoding_process(self, worker_grad_dict, agent_id):
+        min_v, max_v = [
+            [f(v).to('cpu').numpy() for k, v in worker_grad_dict.items()] for f in [torch.min, torch.max]]
 
-    grad_flat_normal = dict_to_array_and_normalize(worker_grad_dict, min_v, max_v)
+        # min_v, max_v = [
+        #     [f(v.to('cpu').numpy()) for k, v in worker_grad_dict.items()]
+        #     for f in [lambda x: np.percentile(x,0.01), lambda x: np.percentile(x,99.99)] ]
 
-    quantized_data = wz_quantizer.encoding_process(grad_flat_normal)
+        # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
+        # return worker_grad_dict, min_v, max_v, 0
 
-    dtype = quantized_data.dtype
-    encoded_data = entropy_coding(quantized_data)
+        grad_flat_normal = dict_to_array_and_normalize(worker_grad_dict, min_v, max_v)
 
-    return encoded_data, min_v, max_v, dtype
+        quantizer = self.wz_quantizer_list[agent_id]
+        quantized_data = quantizer.encoding_process(grad_flat_normal)
 
+        dtype = quantized_data.dtype
+        encoded_data = entropy_coding(quantized_data)
 
-def wz_reconstruction_process(worker_broadcast_data, agent_id, worker_count, global_model_dims, previous_data, ):
-    # return worker_broadcast_data[0]
-    encoded_data, min_v, max_v, dtype = worker_broadcast_data
+        return encoded_data, min_v, max_v, dtype
 
-    quantized_decoded_data = entropy_decoding(encoded_data, dtype)
+    def wz_reconstruction_process(self, worker_broadcast_data, agent_id,
+                                  worker_count, global_model_dims, previous_data):
+        # assuming that previous_data has order based on agents like 0, 1, 2, 0, 1, 2, ...
+        self.agent_list_check.append(agent_id)
+        assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
 
-    model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
-    prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v) for pd in previous_data]
-    side_info_data_list = prev_d_flat
+        # return worker_broadcast_data[0]
 
-    if agent_id == 0:
-        side_info_data_list = [np.zeros(model_size, dtype=dtype)]
-        wz_quantizer.load_basic_wz_model()
+        quantizer = self.wz_quantizer_list[agent_id]
 
-    res_vector = wz_quantizer.decoding_process(quantized_decoded_data, side_info_data_list)
+        encoded_data, min_v, max_v, dtype = worker_broadcast_data
 
-    wz_quantizer.train_new_model(
-        res_vector+np.random.normal(0,0.1,model_size),
-        prev_d_flat+[res_vector],
-        batch_size=10_000,)
+        quantized_decoded_data = entropy_decoding(encoded_data, dtype)
 
-    result_dict = recover_shape_and_denormal_to_dict(
-        res_vector, global_model_dims, min_v, max_v)
+        model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
-    result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
+        side_info_data_list = [] if self.warmup else self.side_info_data_list
+        res_vector = quantizer.decoding_process(quantized_decoded_data, side_info_data_list, model_size)
 
-    return result_dict
+        result_dict = recover_shape_and_denormal_to_dict(res_vector, global_model_dims, min_v, max_v)
 
+        result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
+
+        if agent_id + 1 >= worker_count:
+            self.warmup = False
+
+        if not self.warmup:
+            self.prep_for_next_agent(agent_id, worker_count, res_vector, previous_data, min_v, max_v)
+
+        return result_dict
+
+    def prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
+        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v) for pd in previous_data]
+        prev_d_flat += [res_vector]
+
+        last_recent_grads_idx = len(prev_d_flat) - worker_count
+        self.side_info_data_list = prev_d_flat[:last_recent_grads_idx] + prev_d_flat[last_recent_grads_idx + 1:]
+        last_recent_grads = prev_d_flat[last_recent_grads_idx]
+
+        next_agent = (agent_id + 1) % worker_count
+        qz = self.wz_quantizer_list[next_agent]
+        self.wz_quantizer_list[next_agent] = self.wz_quantizer_class(
+            count_side_info_data=len(self.side_info_data_list),
+            lr=qz.wz_model.lr, code_bit_size=np.log2(qz.bin_count),
+            metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
+        )
+        self.wz_quantizer_list[next_agent].train_model(
+            last_recent_grads, self.side_info_data_list, batch_size=10_000)
