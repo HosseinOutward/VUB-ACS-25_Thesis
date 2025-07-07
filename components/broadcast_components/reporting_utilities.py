@@ -95,11 +95,8 @@ class ReportingUtilities:
 
 
 if __name__ == "__main__":
-    from components.broadcast_components.broadcasting_process.WZ_broadcast import (
-        wz_reconstruction_process, wz_quantizer, wz_encoding_process)
+    from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
     from experiments.resnet_parameter_corr_between_worker import load_grad_files
-
-    wz_quantizer.metric_report_flag = True
 
     # --------------------------------
     torch.set_float32_matmul_precision('high')
@@ -109,19 +106,21 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
     warnings.filterwarnings("ignore", message="You defined a `validation_step` but have no `val_dataloader`")
     warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'train_dataloader'")
-
+    warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
     # --------------------------------
     reporting_util = ReportingUtilities()
+    broadcast_prot = WZBroadcastProtocol(4,'RNN', train_sample_size=100_000,
+                                        metric_report_flag=True, code_bit_size=2, lr=1e-5)
     @reporting_util.record_compr_stats
     def pre_send_process(worker_grad_dict, agent_id):
         # worker_broadcast_data = [worker_grad_dict]
-        worker_broadcast_data = wz_encoding_process(worker_grad_dict, agent_id)
+        worker_broadcast_data = broadcast_prot.wz_encoding_process(worker_grad_dict, agent_id)
         return worker_broadcast_data
     @reporting_util.report_reconst_wrapper
     def server_rec_process(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
         # result_dict = worker_broadcast_data[0]
-        result_dict = wz_reconstruction_process(
+        result_dict = broadcast_prot.wz_reconstruction_process(
             agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data)
         return result_dict
 
@@ -146,8 +145,8 @@ if __name__ == "__main__":
     grad_test_data = [grad_test_data[:len(temp)], grad_test_data[len(temp):]]
 
     # simulate the WZ encoding and reconstruction process --------------------------------
+    prev = []
     for ww in grad_test_data:
-        prev = []
         for ag_id in range(len(ww)):
             broadcast_data = pre_send_process(ww[ag_id], ag_id)
             decoded_agent_broadcast = server_rec_process(

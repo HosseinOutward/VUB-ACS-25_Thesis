@@ -15,9 +15,13 @@ from torchvision.datasets import VisionDataset
 
 class FederatedModelWrapper(pl.LightningModule):
     def __init__(self,
-                 applied_on_grads_before_optim: Callable[[pl.LightningModule, Dict], None] = lambda x, y: None):
+                 applied_on_grads_before_optim = None):
         super(FederatedModelWrapper, self).__init__()
+
+        if applied_on_grads_before_optim is None:
+            applied_on_grads_before_optim = lambda model, **kwargs: None
         self.applied_on_grads_before_optim = applied_on_grads_before_optim
+
         self.args_for_f_on_grad = {k: None for k in
                                    ['worker_id', 'curr_round', 'current_epoch', 'batch_idx']}
 
@@ -69,7 +73,7 @@ class FederatedModelWrapper(pl.LightningModule):
 #     return [torch.utils.data.Subset(dataset, idxs) for idxs in client_indices]
 
 
-def report_metric(model, dataloader, name=None, rank='ALL'):
+def report_metric(model, dataloader, name=None, rank:str|int='ALL'):
     # todo utilize self.log with logger instead of this nonsense
     print(f"         {name} loss: ", end='')
 
@@ -77,6 +81,7 @@ def report_metric(model, dataloader, name=None, rank='ALL'):
     model.logging_disabled = True
 
     if name == 'train':
+        assert (type(rank) is str and rank == 'ALL') or isinstance(rank, int)
         print(f'({rank=}) ', end='')
         dataloader.sampler.set_agent_partition(rank)
 
@@ -154,8 +159,8 @@ def save_grads_f_applied_on_grads(fl_model: FederatedModelWrapper,
 # todo single dataloader causes thread lock overhead (40% of the run time)
 #  a change of offset, even once, causes thread to check the entire dataset each time
 class CustomSampler(Sampler):
-    def __init__(self, dataset_len, partitions_count,
-                 shuffle_whole, shuffle_in_partition, non_iid_flag=False, seed=42):
+    def __init__(self, dataset_len, partitions_count, shuffle_whole,
+                 shuffle_in_partition, replacement=True, non_iid_flag=False, seed=42):
         assert non_iid_flag is False, "Currently only IID data is supported"
         super().__init__()
 
@@ -164,6 +169,7 @@ class CustomSampler(Sampler):
         self.partitions_count = partitions_count
         self.shuffle_whole = shuffle_whole
         self.shuffle_in_partition = shuffle_in_partition
+        self.replacement = replacement
         self.seed = seed
         self.offset = 0
 
@@ -198,6 +204,9 @@ class CustomSampler(Sampler):
         if self.shuffle_in_partition:
             rng = np.random.RandomState(self.seed + self.offset)
             rng.shuffle(indices)
+
+        if self.replacement:
+            indices = np.random.choice(indices, size=self.size_of_partition[self.offset], replace=True)
 
         return iter(indices)
 
@@ -344,6 +353,7 @@ class FLSimulator:
                 shared_train_loader, num_epochs=pre_training_global_epochs)
 
         # cycle through communication rounds -----------------------------------------------
+        grad_dict_per_agent = []
         for round_s in range(self.communication_rounds):
             print(f"\nround {round_s + 1}/{self.communication_rounds} --------------------")
 
@@ -353,7 +363,6 @@ class FLSimulator:
             report_metric(self.global_model, shared_train_loader, 'train')
 
             # ------------- Train each agent for the number of epochs
-            grad_dict_per_agent = []
             self._set_local_models()
             for ag_id, ag in enumerate(self.agents):
                 print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
