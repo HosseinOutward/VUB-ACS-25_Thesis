@@ -264,106 +264,106 @@ class WZQuantizerANN:
         torch.cuda.empty_cache()
 
 
-def plot_bins(wz_model, grad_data):
+def plot_bins(wz_quantizer: WZQuantizerANN, x_data_, side_info, step_count=1000, training_ind=False):
     from matplotlib import pyplot as plt
 
-    def encoding_f(grad_vector):
-        x = torch.tensor(grad_vector).unsqueeze(1).to('cuda').float()
-        wz_model.to('cuda')
-        wz_model.eval()
-        with torch.no_grad():
-            bins = wz_model.encode_net(x).to('cpu')
-        wz_model.to('cpu')
-        return bins
-
-    def decoding_f(bins, side_info_data_list):
-        bins = torch.tensor(bins).to('cuda')
-
-        wz_model.to('cuda')
-        wz_model.eval()
-        with torch.no_grad():
-            side_info_list = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
-            reconstructs = [wz_model.decode_net(bins, side_info_list.to('cuda'))]
-        side_info_list.to('cpu')
-        wz_model.to('cpu')
-
-        res = torch.stack(reconstructs, dim=0).mean(dim=0).squeeze()
-        res = res.to('cpu').numpy()
-        return res
-
     def _plot_bin_regions(ax, x_range, decoded_bins, x_step, colors):
-        unique_bins = np.unique(decoded_bins)
+        current_bin = decoded_bins[0]
+        last_idx = 0
+        last_split_point = x_range[0]
+        for i, x_v in enumerate(x_range[1:], start=1):
+            if decoded_bins[i] != current_bin:  # change detected
+                split_point = (x_v + x_range[i - 1]) / 2
+                ax.axvline(split_point, color='black', linestyle='--', linewidth=0.5)
+                ax.axvspan(x_range[last_idx], split_point, color=colors[current_bin], alpha=0.3)
 
-        for i, bin_val in enumerate(unique_bins):
-            bin_positions = x_range[np.array(decoded_bins) == bin_val]
-            if len(bin_positions) == 0:
-                continue
+                current_bin = decoded_bins[i]
+                last_idx = i
+                last_split_point = split_point
+        # Final span
+        ax.axvspan(last_split_point, x_range[-1], color=colors[current_bin], alpha=0.3)
 
-            # Mark first bin boundary
-            ax.axvline(bin_positions[0], color='black', linestyle='--', linewidth=0.5)
+    if isinstance(x_data_, torch.Tensor): x_data_ = x_data_.cpu().numpy()
+    ind_list = wz_quantizer.val_indices \
+        if training_ind else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
 
-            # Color contiguous bin regions
-            start_pos = bin_positions[0]
-            for j in range(1, len(bin_positions)):
-                if bin_positions[j] - bin_positions[j - 1] > x_step * 1.1:  # Gap detected
-                    ax.axvspan(start_pos, bin_positions[j - 1], color=colors[i], alpha=0.3)
-                    start_pos = bin_positions[j]
-            # Final span
-            ax.axvspan(start_pos, bin_positions[-1], color=colors[i], alpha=0.3)
+    min_v, max_v = np.percentile(x_data_, 0.01), np.percentile(x_data_, 99.99)
+    true_min_v, true_max_v = x_data_.min(), x_data_.max()
 
-    if isinstance(grad_data, torch.Tensor): grad_data = grad_data.cpu().numpy()
-    grad_data = np.asarray(grad_data, dtype=np.float32)
+    grad_data = np.asarray(x_data_, dtype=np.float32)[ind_list]
+    side_info = [si[ind_list] for si in side_info]
 
-    # Setup visualization parameters
-    min_v, max_v = grad_data.min(), grad_data.max()
-    x_step = (max_v - min_v) / 200
-    x_range = np.arange(min_v, max_v, x_step)[:200]
+    sort_idx = np.argsort(grad_data)
+    grad_data = grad_data[sort_idx]
+    side_info = [si[sort_idx] for si in side_info]
 
-    # for plot 2
-    bin_count = wz_model.coding_model.code_size
-    reconstructed_per_bin = np.array([
-        decoding_f(np.ones(200) * b, [x_range]) for b in range(bin_count)])
+    x_step = (max_v - min_v) / step_count
+    pointer_v = true_min_v
+    spaced_idx = []
+    for i, gd in enumerate(grad_data):
+        # assert pointer_v + x_step * 2 > gd, f"Data has gaps larger than x_step ({(gd-pointer_v)/x_step})"
+        if pointer_v + x_step * 0.95 < gd:
+            pointer_v += gd
+            spaced_idx.append(i)
+    spaced_idx.append(len(grad_data)-1)
+    spaced_idx = np.array(spaced_idx)
+    grad_data = grad_data[spaced_idx]
+    side_info = [si[spaced_idx] for si in side_info]
 
-    # for plot 1
-    bins = encoding_f(x_range)
-    recons_for_x_range = reconstructed_per_bin[bins, np.arange(len(x_range))]
+    # Create x_range for plotting
+    bins = wz_quantizer.encoding_process(grad_data)
+    recons_for_x_range = wz_quantizer.decoding_process(
+        bins, side_info, element_count=len(grad_data))
 
     # Setup plots
+    bin_count = wz_quantizer.bin_count
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
 
     # Plot 1: Data histogram with binning analysis ------------------------
     counts, bins_edges, patches = ax1.hist(
-        grad_data[np.random.choice(len(grad_data), 20000, replace=False)],
+        x_data_[np.random.choice(len(x_data_), 20_000, replace=False)],
         bins=200, alpha=0.3, color='gray', label='data histogram', density=False)
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
-    ax1.plot(x_range, np.abs(x_range - recons_for_x_range), label='reconstruction error')
-    ax1.plot(x_range, (np.array(bins) + 1) / bin_count, label='normalized encoded_bins')
+    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error')
+    ax1.plot(grad_data, (np.array(bins) + 1) / bin_count, label='(normalized) encoded_bins')
     ax1.set_xlabel('x_range')
 
     # Visualize bin regions
-    colors = plt.cm.viridis(np.linspace(0, 1, len(np.unique(bins))))
-    _plot_bin_regions(ax1, x_range, bins, x_step, colors)
+    colors = plt.cm.viridis(np.linspace(0, 1, bin_count))
+    _plot_bin_regions(ax1, grad_data, bins, x_step, colors)
 
-    ax1.set_xlim(min_v, max_v)
+    ax1.set_xlim(true_min_v, true_max_v)
     ax1.legend()
     ax1.set_title('Binning Visualization')
 
     # Plot 2: Reconstruction curves for each bin (batch process) ------------------------
-    # todo merge the 2 plots and change how the sideinfo is given (for example for all 0s as side info)
+    # todo merge the 2 plots and change how the side_info is given (for example for all 0s as side info)
     for bin_idx in range(bin_count):
-        ax2.plot(x_range, reconstructed_per_bin[bin_idx], label=f'bin={bin_idx}')
+        temp = wz_quantizer.decoding_process(
+            np.zeros(len(grad_data)) + bin_idx, side_info, element_count=len(grad_data))
+        ax2.plot(grad_data, temp, label=f'bin={bin_idx}', linewidth=0.5)
 
-    ax2.set_xlabel('side info')
-    ax2.set_ylabel('reconstruction')
+    ax2.set_xlabel('x_range (which is forced to bin, but is paired with related side_info)')
+    ax2.set_ylabel('reconstruction per bin')
 
-    ax2.set_xlim(min_v, max_v)
+    ax2.set_xlim(true_min_v, true_max_v)
     ax2.legend()
-    ax2.set_title('Reconstruction Curves by Bin')
+    ax2.set_title('What if x range was forced to a specific bin, plot per bin')
 
     plt.tight_layout()
     plt.show()
+
+    #%%
+    # x_range = np.linspace(true_min_v, true_max_v, step_count)
+    # for b in range(bin_count):
+    #     temp = wz_quantizer.decoding_process(np.zeros(len(x_range))+b, [x_range],
+    #                                          element_count=len(x_range), symbolic_decoder=False)
+    #     plt.plot(x_range, temp, label=f'bin={b}', linewidth=0.5)
+    # plt.xlabel('side info')
+    # plt.ylabel('reconstruction per bin')
+    # plt.show()
 
 
 if __name__ == "__main__":
