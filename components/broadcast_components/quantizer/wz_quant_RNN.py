@@ -6,14 +6,12 @@ import numpy as np
 
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
-    def __init__(self, num_planes, inp_dim, side_info_size, code_size, lr=1e-4, reconst_ld=100):
-        super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, code_size, lr, reconst_ld)
-
-        self.num_planes = num_planes
+    def __init__(self, num_planes, inp_dim, side_info_size, bins_per_plane, lr=1e-4, reconst_ld=100):
+        super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, bins_per_plane, lr, reconst_ld)
 
         self.coding_model = EncoderDecoderLayeredRNN(
-            input_dim=inp_dim, planes=self.num_planes, side_info_size=side_info_size,
-            layers=4, hidden_dim=80, code_size=code_size, marginal=False)
+            input_dim=inp_dim, planes=num_planes, side_info_size=side_info_size,
+            layers=4, hidden_dim=80, code_size=bins_per_plane, marginal=False)
 
     def custom_steps(self, batch, batch_idx, name_prefix):
         single_grad_param, side_info = batch
@@ -23,7 +21,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         reconstruct, bins, onehot_bin, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         loss = 0.0
-        for i in range(self.num_planes):
+        for i in range(self.coding_model.planes):
             # dist component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
             # loss += (i+1) * reconst_ld * dist
@@ -42,35 +40,48 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         return loss
 
     def encode_net(self, grad_vector):
-        x, _ = self.coding_model.encode(grad_vector)
-        x = torch.stack(x)
-        return x
+        bins, _ = self.coding_model.encode(grad_vector)
+        bins = torch.stack(bins)
+
+        # self.aaaa = bins.detach().cpu().clone()
+
+        bins_per_plane = self.coding_model.bins_per_plane
+        for i, bin_plane in enumerate(bins[1:], 1):
+            bins[i] = bins_per_plane**i * bins[i]
+        bins = torch.sum(bins, dim=0)
+
+        return bins
 
     def decode_net(self, bins, side_info):
-        bin_count = self.coding_model.bins_per_plane
-        codes = [F.one_hot(b, num_classes=bin_count) for b in bins]
+        bins_per_plane = self.coding_model.bins_per_plane
+
+        vectors = []
+        for i in range(self.coding_model.planes):
+            temp = bins % (bins_per_plane**(i+1))
+            bins = bins - temp
+            vectors.append(temp/(bins_per_plane**i))
+        bins = torch.stack(vectors)
+
+        # assert torch.all(self.aaaa == bins.detach().cpu()), "Encoded bins do not match the expected bins."
+
+        codes = [F.one_hot(b.to(int), num_classes=bins_per_plane) for b in bins]
         reconstruct = self.coding_model.decode(codes, side_info)
         return reconstruct[-1]
 
 
 class WZQuantizerRNN(WZQuantizerANN):
-    def __init__(self, *args, **kwargs):
-        super(WZQuantizerRNN, self).__init__(*args, **kwargs)
+    def __init__(self, code_bit_per_plane, num_planes=3, *args, **kwargs):
+        self.num_planes = num_planes
+        super(WZQuantizerRNN, self).__init__(*args, **kwargs, code_bit_size=code_bit_per_plane*num_planes)
 
     def load_basic_model(self):
-        assert self.bin_count == 4
+        assert self.bin_count == 6
         # todo add loading from file
         # self.wz_model.load_from_checkpoint('wz_model')
 
-    def make_model_obj(self, *args, **kwargs):
-        return PL_EncoderDecoder_RNN(*args, num_planes=3, **kwargs)
-
-    def symbol_encoding(self, bins):
-        return super().symbol_encoding(np.concat(bins.numpy()))
-
-    def symbol_decoding(self, quantized_data, vect_size):
-        res = super().symbol_decoding(quantized_data, vect_size * self.wz_model.num_planes)
-        return np.split(res, self.wz_model.num_planes, axis=0)
+    def make_model_obj(self, bin_count, *args, **kwargs):
+        return PL_EncoderDecoder_RNN(
+            *args, **kwargs, num_planes=self.num_planes, bins_per_plane=bin_count//self.num_planes)
 
 
 if __name__ == "__main__":
@@ -81,19 +92,18 @@ if __name__ == "__main__":
 
     # %%
     import logging
-
     logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
     import warnings
-
     warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
+    warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'val_dataloader'")
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
 
     # %%
-    wz_quantizer = WZQuantizerANN(train_sample_size=100_000, metric_report_flag=True,
-                                  code_bit_size=2, lr=1e-5, count_side_info_data=len(side_info_data))
+    wz_quantizer = WZQuantizerRNN(train_sample_size=100_000, metric_report_flag=True,
+                                  code_bit_per_plane=1, lr=1e-5, count_side_info_data=len(side_info_data))
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=10_000)
 
     # %%
     y_pred = wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), side_info_data, len(y))
     print('error ', np.mean(np.abs(y - y_pred)))
-    plot_bins(wz_quantizer.wz_model, y)
+    plot_bins(wz_quantizer, y, side_info_data)
