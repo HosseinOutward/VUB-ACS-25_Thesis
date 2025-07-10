@@ -106,7 +106,7 @@ class WZBroadcastProtocol:
         qz = self.wz_quantizer_list[next_agent]
         self.wz_quantizer_list[next_agent] = self.wz_quantizer_class(
             count_side_info_data=len(self.side_info_data_list),
-            lr=qz.wz_model.lr, code_bit_size=np.log2(qz.bin_count),
+            lr=qz.wz_pl_model.lr, code_bit_size=np.log2(qz.bin_count),
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
         )
         self.wz_quantizer_list[next_agent].train_model(

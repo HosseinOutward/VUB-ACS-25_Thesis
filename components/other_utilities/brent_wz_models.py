@@ -53,7 +53,7 @@ class CustomRNN(nn.Module):
 
 class EncoderDecoderLayeredRNN(nn.Module):
     def __init__(self, input_dim, side_info_size, code_size, planes, layers, hidden_dim, rnn_type='rnn',
-                 shared_encoder=True, shared_decoder=True, shared_priors=False, marginal=False, output_activation=None):
+            shared_encoder=False, shared_decoder=False, shared_priors=False, marginal=False, output_activation=None):
         super().__init__()
 
         bins_per_plane = code_size
