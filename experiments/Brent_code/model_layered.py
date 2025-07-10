@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import LSTM, GRU
 
-from wyner_ziv.customrnn import CustomRNN
+from customrnn import CustomRNN
 
 
 class EncoderDecoderLayeredRNN(nn.Module):

@@ -11,6 +11,7 @@ from model_layered import EncoderDecoderLayeredRNN
 
 
 def main(args):
+    args.debug=True
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Creating model
@@ -37,7 +38,7 @@ def main(args):
         tau_t = args.tau * np.exp(epoch / args.epochs * np.log(0.1 / args.tau))
         print('tau={:.04f}'.format(tau_t))
 
-        for batch_idx in range(TRAIN_BATCHES):
+        for batch_idx in range(int(TRAIN_BATCHES)):
 
             optimizer.zero_grad()
 
@@ -81,7 +82,7 @@ def main(args):
         test_samples = args.samples_per_epoch
         if epoch == args.epochs-1 or (args.debug is False and epoch % args.eval_every_epochs == 0):
             test_samples = args.test_samples
-        test_batches = test_samples // args.batch_size
+        test_batches = int(test_samples // args.batch_size)
 
         model.eval()
         with torch.no_grad():
@@ -140,13 +141,19 @@ def main(args):
                 with torch.no_grad():
                     reconstruct, bins, _, _ = model.forward(x, y)
 
-                [ax[0].plot(x.detach().cpu().numpy(), bin.detach().cpu().numpy(), label='Plane {}'.format(bin_idx), linewidth=1.0)
-                 for bin_idx, bin in reversed(list(enumerate(bins)))]
+                [
+                    ax[0].plot(
+                        x.detach().cpu().numpy(), bin.detach().cpu().numpy(),
+                        label='Plane {}'.format(bin_idx), linewidth=1.0
+                    )
+                        for bin_idx, bin in reversed(list(enumerate(bins)))
+                ]
                 ax[0].legend()
 
                 # Visualizing the joined binner
 
-                combined = torch.sum(torch.stack([bin * args.code_size**(args.planes-i-1) for i, bin in enumerate(bins)], dim=0), dim=0)
+                combined = torch.sum(torch.stack([bin * args.code_size**(args.planes-i-1)
+                                                  for i, bin in enumerate(bins)], dim=0), dim=0)
                 ax[1].plot(x.detach().cpu().numpy(), combined.detach().cpu().numpy(), linewidth=1.0)
 
                 # Seeing the reconstruction points
@@ -164,7 +171,7 @@ def main(args):
                         codes_input.append(hard_codes)
                         if j < args.planes:
                             codes_input.extend([F.one_hot(torch.zeros([y.shape[0]], dtype=torch.long, device=device),
-                                                     num_classes=args.code_size).float() for _ in range(args.planes - j - 1)])
+                                            num_classes=args.code_size).float() for _ in range(args.planes - j - 1)])
 
                         reconstruct = model.decode(codes_input, y)
 

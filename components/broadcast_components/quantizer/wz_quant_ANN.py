@@ -2,7 +2,6 @@ import gc
 from typing import List
 
 from components.other_utilities.brent_wz_models import EncoderDecoder
-from components.broadcast_components.compressor.arithmatic_coding import arithmetic_encode, arithmetic_decode
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -10,17 +9,17 @@ import pytorch_lightning as pl
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count, lr=1e-4, reconst_ld=100):
-        super(PL_EncoderDecoder_ANN, self).__init__()
+    def __init__(self, inp_dim, side_info_size, bin_count, tau=1, lr=1e-4, reconst_ld=100):
+        super().__init__()
         self.coding_model = EncoderDecoder(
             input_dim=inp_dim, side_info_size=side_info_size,
             layers=4, hidden_dim=80, code_size=bin_count, marginal=False)
         self.reconst_ld = reconst_ld
-        self.tau = 1
+        self.tau = tau
         self.lr = lr
         self.lr_step = 40
 
-    def custom_steps(self, batch, batch_idx, name_prefix):
+    def compute_loss_and_log(self, batch, batch_idx, name_prefix):
         tau_t = self.tau * np.exp(
             self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
 
@@ -61,11 +60,11 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
-        loss = self.custom_steps(batch, batch_idx, 'train')
+        loss = self.compute_loss_and_log(batch, batch_idx, 'train')
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.custom_steps(batch, batch_idx, 'val')
+        loss = self.compute_loss_and_log(batch, batch_idx, 'val')
         return loss
 
     def configure_optimizers(self):
@@ -88,20 +87,22 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
 # ---------------------------------------------
 class WZQuantizerANN:
-    def __init__(self, count_side_info_data, code_bit_size, lr=1e-3, reconst_ld=100,
+    def __init__(self, count_side_info_data, bin_count, tau=1, lr=1e-3, reconst_ld=100,
                  metric_report_flag=False, train_sample_size=100_000):
         self.val_indices = None
         self.metric_report_flag = metric_report_flag
 
         self.train_sample_size = train_sample_size
 
-        self.bin_count = int(round(2 ** code_bit_size))
+        self.bin_count = bin_count
+        print(f'bin counts: {self.bin_count} (bit rate: {np.log2(self.bin_count):.2f})')
+
         self.count_side_info_data = count_side_info_data
         if count_side_info_data == 0:
             count_side_info_data += 1
-        self.wz_model = self.make_model_obj(
+        self.wz_pl_model = self.make_model_obj(
             inp_dim=1, side_info_size=count_side_info_data,
-            lr=lr, bin_count=self.bin_count, reconst_ld=reconst_ld)
+            lr=lr, bin_count=self.bin_count, reconst_ld=reconst_ld, tau=tau)
         if count_side_info_data == 0:
             self.load_basic_model()
 
@@ -120,8 +121,8 @@ class WZQuantizerANN:
         grad_tensor = torch.tensor(grad_vector).float()
         total_size = len(grad_tensor)
 
-        self.wz_model.to('cuda')
-        self.wz_model.eval()
+        self.wz_pl_model.to('cuda')
+        self.wz_pl_model.eval()
 
         all_bins = []
         with torch.no_grad():
@@ -129,11 +130,11 @@ class WZQuantizerANN:
                 end_idx = min(i + batch_size, total_size)
                 batch = grad_tensor[i:end_idx].unsqueeze(1).to('cuda')
 
-                bins_batch = self.wz_model.encode_net(batch).to('cpu')
+                bins_batch = self.wz_pl_model.encode_net(batch).to('cpu')
                 all_bins.append(bins_batch)
 
                 batch.to('cpu')
-        self.wz_model.to('cpu')
+        self.wz_pl_model.to('cpu')
         torch.cuda.empty_cache()
 
         # todo separate the running of the model for ann and rnn
@@ -162,8 +163,8 @@ class WZQuantizerANN:
 
         assert total_size == len(side_info_data_list[0])
 
-        self.wz_model.to('cuda')
-        self.wz_model.eval()
+        self.wz_pl_model.to('cuda')
+        self.wz_pl_model.eval()
 
         all_reconstructs = []
 
@@ -180,14 +181,14 @@ class WZQuantizerANN:
 
                 side_info_batch = side_info_array[i:end_idx].to('cuda')
 
-                reconstructs_batch = self.wz_model.decode_net(bins_batch, side_info_batch)
+                reconstructs_batch = self.wz_pl_model.decode_net(bins_batch, side_info_batch)
                 all_reconstructs.append(reconstructs_batch.to('cpu'))
 
                 # Clear GPU memory for this batch
                 del bins_batch, side_info_batch
                 torch.cuda.empty_cache()
 
-        self.wz_model.to('cpu')
+        self.wz_pl_model.to('cpu')
 
         all_reconstructs = torch.cat(all_reconstructs, dim=0)
         res = all_reconstructs.squeeze()
@@ -218,7 +219,7 @@ class WZQuantizerANN:
             val_dataset = torch.utils.data.Subset(train_dataset, self.val_indices)
             val_dataloader = torch.utils.data.DataLoader(
                 val_dataset, batch_size=batch_size * 10,
-                num_workers=2, pin_memory=False, persistent_workers=False)
+                num_workers=2, pin_memory=False, persistent_workers=True)
 
             train_indices = np.setdiff1d(all_indices, self.val_indices)
             train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
@@ -242,7 +243,7 @@ class WZQuantizerANN:
             num_workers=4, pin_memory=True, persistent_workers=True)
 
         # ------------------------------
-        self.wz_model.to('cpu')
+        self.wz_pl_model.to('cpu')
 
         NoValidationBar = None
         if self.metric_report_flag:
@@ -257,12 +258,13 @@ class WZQuantizerANN:
         trainer = pl.Trainer(
             accelerator="cuda",
             max_epochs=epoch,
+            enable_checkpointing=False,
             callbacks=[NoValidationBar()] if self.metric_report_flag else [],
             enable_progress_bar=self.metric_report_flag,
             log_every_n_steps=1 if self.metric_report_flag else None,
             enable_model_summary=False,
         )
-        trainer.fit(self.wz_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+        trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
         del train_dataloader, val_dataloader
         gc.collect()
@@ -387,7 +389,7 @@ if __name__ == "__main__":
 
     # %%
     wz_quantizer = WZQuantizerANN(train_sample_size=100_000, metric_report_flag=True,
-                                  code_bit_size=3, lr=1e-5, count_side_info_data=len(side_info_data))
+                                  bin_count=3, lr=1e-5, count_side_info_data=len(side_info_data))
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=10_000)
 
     # %%
