@@ -245,7 +245,7 @@ class Agent:
 
         trainer = Trainer(
             max_epochs=epochs,
-            accelerator='cuda',
+            accelerator='gpu',
             logger=logger,
             log_every_n_steps=1,
             enable_progress_bar=False,
@@ -329,7 +329,7 @@ class FLSimulator:
         self.train_sampler.set_agent_partition('ALL')
         trainer = Trainer(
             max_epochs=num_epochs,
-            accelerator='cuda',
+            accelerator='gpu',
             logger=False,
             enable_progress_bar=False,
             enable_checkpointing=False,
