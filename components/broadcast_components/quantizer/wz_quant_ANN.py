@@ -19,35 +19,30 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.lr = lr
         self.lr_step = 40
 
-    def compute_loss_and_log(self, batch, batch_idx, name_prefix):
+    def compute_loss(self, batch, batch_idx):
         tau_t = self.tau * np.exp(
             self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
-
         single_grad_param, side_info = batch
         reconstruct, bins_probs, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
-
         bin_no = torch.argmax(bins_probs, dim=-1)
         temp = torch.arange(bins_probs.size(0))
         p_ux = bins_probs[temp, bin_no]
         p_u = prior_probs[temp, bin_no] + 1e-12
-
         loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
+        return loss, reconstruct, single_grad_param, bin_no, p_u, bins_probs, prior_probs
 
-        # avoid nan by reducing loss
-        # detached_loss = loss.detach().item()
-        # if detached_loss>100:
-        #     loss *= 100/detached_loss
+    @staticmethod
+    def mape(pred, target, eps=1e-8):
+        return torch.mean(torch.abs((target - pred) / (target.abs() + eps))) * 100
 
+    def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no, p_u, bins_probs, prior_probs):
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
-        # train_mse_loss = train_mse_loss / TRAIN_BATCHES
-        # train_loss = train_loss / TRAIN_BATCHES
 
-        self.log(f'{name_prefix}_loss',
-                 loss, prog_bar=True)
-        self.log(f'{name_prefix}_x_hat_loss',
-                 F.l1_loss(reconstruct, single_grad_param), prog_bar=True)
-        self.log(f'{name_prefix}_rate (bits)',
-                 torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
+        self.log(f'{name_prefix}_loss', loss, prog_bar=True)
+        recons_loss = self.mape(inp_rec, inp)
+        self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
+        self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
+        self.log(f'{name_prefix}_rate (bits)', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
         practical_p_u = bin_no.detach().cpu().numpy()
         bin_appearance_counts = np.unique(practical_p_u, return_counts=True)
@@ -57,14 +52,24 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         temp = torch.mean(-torch.log2(practical_p_u + 1e-12))
         self.log(f'{name_prefix}_real_bit_r', temp, prog_bar=True)
 
-        return loss
-
     def training_step(self, batch, batch_idx):
-        loss = self.compute_loss_and_log(batch, batch_idx, 'train')
+        res = self.compute_loss(batch, batch_idx)
+
+        self.log_metrics('train_gumble', *res)
+
+        self.eval()
+        with torch.no_grad():
+            self.log_metrics('train', *self.compute_loss(batch, batch_idx))
+        self.train()
+
+        loss = res[0]
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.compute_loss_and_log(batch, batch_idx, 'val')
+        res = self.compute_loss(batch, batch_idx)
+        self.log_metrics('val', *res)
+
+        loss = res[0]
         return loss
 
     def configure_optimizers(self):
@@ -245,24 +250,24 @@ class WZQuantizerANN:
         # ------------------------------
         self.wz_pl_model.to('cpu')
 
+        # disable val progress bar due to pl bug
         NoValidationBar = None
         if self.metric_report_flag:
             print('training wz quantizer')
-
-            # disable val progress bar due to pl bug
             from pytorch_lightning.callbacks import TQDMProgressBar
             from tqdm import tqdm
             class NoValidationBar(TQDMProgressBar):
                 def init_validation_tqdm(self): return tqdm(disable=True)
 
         trainer = pl.Trainer(
-            accelerator="cuda",
-            max_epochs=epoch,
+            accelerator="gpu",
             enable_checkpointing=False,
-            callbacks=[NoValidationBar()] if self.metric_report_flag else [],
+            enable_model_summary=False,
+            max_epochs=epoch,
             enable_progress_bar=self.metric_report_flag,
             log_every_n_steps=1 if self.metric_report_flag else None,
-            enable_model_summary=False,
+            callbacks=[NoValidationBar()] if self.metric_report_flag else [],
+            # logger=
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
