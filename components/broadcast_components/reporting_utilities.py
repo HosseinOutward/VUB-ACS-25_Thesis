@@ -1,3 +1,6 @@
+import sys
+from typing import Dict
+
 import numpy as np
 import torch
 
@@ -96,6 +99,38 @@ class ReportingUtilities:
 
 if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
+from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
+    dict_to_array_and_normalize, recover_shape_and_denormal_to_dict
+from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
+
+
+def get_obj_size(obj):
+    if isinstance(obj, torch.Tensor):
+        return obj.element_size() * obj.nelement()
+    elif isinstance(obj, np.ndarray):
+        return obj.nbytes
+    elif isinstance(obj, (list, tuple)):
+        return sum(get_obj_size(x) for x in obj)
+    elif isinstance(obj, dict):
+        return sum(get_obj_size(k) + get_obj_size(v) for k, v in obj.items())
+    else:
+        return sys.getsizeof(obj)
+
+
+class BroadcastReporter:
+    def __init__(self, broadcast_prot:WZBroadcastProtocol):
+        self.broadcast_protocol = broadcast_prot
+        self.stats = {
+            'wz': {'bytes_sent': [], 'bytes_received': [], 'mse': [], 'mape': []},
+            'raw': {'bytes_sent': [], 'mse': [], 'mape': []},
+            'entropy': {'bytes_sent': [], 'mse': [], 'mape': []}
+        }
+        self.original_grads = None
+
+
+if __name__ == '__main__':
+    import pprint
+    from components.other_utilities.models_to_train import ResNetPLModel
     from experiments.resnet_parameter_corr_between_worker import load_grad_files
 
     # --------------------------------
@@ -109,20 +144,10 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
     # --------------------------------
-    reporting_util = ReportingUtilities()
-    broadcast_prot = WZBroadcastProtocol(4,'RNN', train_sample_size=100_000,
-                                        metric_report_flag=True, code_bit_size=2, lr=1e-5)
-    @reporting_util.record_compr_stats
-    def pre_send_process(worker_grad_dict, agent_id):
-        # worker_broadcast_data = [worker_grad_dict]
-        worker_broadcast_data = broadcast_prot.encoding_process(worker_grad_dict, agent_id)
-        return worker_broadcast_data
-    @reporting_util.report_reconst_wrapper
-    def server_rec_process(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
-        # result_dict = worker_broadcast_data[0]
-        result_dict = broadcast_prot.reconstruction_process(
-            agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data)
-        return result_dict
+    num_agents = 4
+    broadcast_prot = WZBroadcastProtocol(agent_count=num_agents, quantizer_type='RNN',
+        lr=1e-3, bins_per_plane=2, num_planes=3, metric_report_flag=True, train_sample_size=100_000)
+    broadcast_reporter = BroadcastReporter(broadcast_prot)
 
     # --------------------------------
     model_shape_dict = {
@@ -131,6 +156,7 @@ if __name__ == "__main__":
     }
 
     # load testing data --------------------------------
+    # This loads gradients from a previous experiment to simulate workers
     temp = np.array([[0, 0], [0, 1], [1, 0], [1, 1]])
     grad_test_data = load_grad_files(
         temp, list(model_shape_dict.keys()),
@@ -139,25 +165,31 @@ if __name__ == "__main__":
     )
     grad_test_data = [
         {k: torch.tensor(v[i][j]).reshape(model_shape_dict[k]).to('cuda')
-            for k, v in grad_test_data.items()}
+         for k, v in grad_test_data.items()}
         for j in range(2) for i in range(len(list(grad_test_data.values())[0]))
     ]
-    grad_test_data = [grad_test_data[:len(temp)], grad_test_data[len(temp):]]
+    # grad_test_data = [grad_test_data[:len(temp)], grad_test_data[len(temp):]]
+    grad_test_data = grad_test_data[:num_agents]
+
 
     # simulate the WZ encoding and reconstruction process --------------------------------
-    prev = []
-    for ww in grad_test_data:
-        for ag_id in range(len(ww)):
-            broadcast_data = pre_send_process(ww[ag_id], ag_id)
-            decoded_agent_broadcast = server_rec_process(
-                broadcast_data, ag_id, len(ww), model_shape_dict, prev, )
-            prev.append(decoded_agent_broadcast)
+    previous_data = []
+    for agent_id in range(num_agents):
+        # Server to worker communication
+        server_data = broadcast_reporter.to_worker_from_server_data_transfer(agent_id)
+
+        # Worker to server communication
+        worker_grad_dict = grad_test_data[agent_id]
+        worker_data = broadcast_reporter.to_server_from_worker_data_transfer(agent_id, worker_grad_dict, server_data)
+
+        # Server reconstructs the gradients
+        reconstructed_grads = broadcast_reporter.reconstruction_process(
+            agent_id, worker_data, num_agents, model_shape_dict, previous_data
+        )
+        previous_data.append(reconstructed_grads)
 
     # report --------------------------------
     print("Compression Reporting:")
-    for i, report in enumerate(reporting_util.state_report_per_round):
-        print(f"Round {i}:")
-        print("Byte Size Info per Agent:", report['MB size info per agent'])
-        # print("% Error per Layer per Agent:", report['% error per layer per agent'])
-        print("% Total Error per Agent:", report['% total error per agent'])
-        print()
+    stats = broadcast_reporter.get_stats()
+    pprint.pprint(stats)
+
