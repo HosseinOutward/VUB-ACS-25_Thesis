@@ -1,4 +1,4 @@
-from components.broadcast_components.quantizer.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizerANN, plot_bins
+from components.broadcast_components.quantizer.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
 import torch
 import torch.nn.functional as F
@@ -7,11 +7,22 @@ import numpy as np
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, *args, **kwargs):
-        super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, *args, **kwargs, bin_count=bins_per_plane)
+        self.coding_model = None
+
+        super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, *args, **kwargs)
 
         self.coding_model = EncoderDecoderLayeredRNN(
-            input_dim=inp_dim, planes=num_planes, side_info_size=side_info_size,
-            layers=3, hidden_dim=100, code_size=bins_per_plane, marginal=False)
+            input_dim=inp_dim, side_info_size=side_info_size,
+            num_planes=num_planes,  bins_per_plane=bins_per_plane,
+            layers=3, hidden_dim=100, marginal=False)
+
+    @property
+    def num_planes(self):
+        return self.coding_model.num_planes
+
+    @property
+    def bins_per_plane(self):
+        return self.coding_model.bins_per_plane
 
     def compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
@@ -21,7 +32,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         loss = 0.0
         # assert 1 > self.reconst_ld > 0
         p_u = None
-        for i in range(self.coding_model.planes):
+        for i in range(self.coding_model.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
             # dist = dist / torch.mean(single_grad_param ** 2)
@@ -36,62 +47,41 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         unified_bins = self.unify_bins([b.detach() for b in bins])
         return loss, reconstruct[-1], single_grad_param, unified_bins, p_u, bins, prior_probs
 
-    def unify_bins(self, list_bins):
-        list_bins=torch.stack([l.clone() for l in list_bins])
-        bins_per_plane = self.coding_model.bins_per_plane
-        for i, bin_plane in enumerate(list_bins[1:], 1):
-            list_bins[i] = bins_per_plane**i * list_bins[i]
-        bins = torch.sum(list_bins, dim=0)
-        return bins
-
-    def deunify_bins(self, bins, bins_per_plane):
-        bins=bins.clone()
-
-        vectors = []
-        for i in range(self.coding_model.planes):
-            temp = bins % (bins_per_plane**(i+1))
-            bins = bins - temp
-            vectors.append(temp/(bins_per_plane**i))
-        list_bins = torch.stack(vectors)
-        return list_bins
-
     def encode_net(self, grad_vector):
-        bins, _ = self.coding_model.encode(grad_vector)
-        bins = torch.stack(bins)
+        bins_list, _ = self.coding_model.encode(grad_vector)
+        bins_list = torch.stack(bins_list)
 
-        # self.aaaa = bins.detach().cpu().clone()
-        bins = self.unify_bins(bins)
+        assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane**self.coding_model.num_planes
 
-        assert torch.unique(bins).size(0) <= self.coding_model.bins_per_plane**self.coding_model.planes
-
-        return bins
+        return bins_list
 
     def decode_net(self, bins, side_info):
-        bins_per_plane = self.coding_model.bins_per_plane
+        b_p_p = self.coding_model.bins_per_plane
 
-        bins = self.deunify_bins(bins, bins_per_plane)
-        # assert torch.all(self.aaaa == bins.detach().cpu()), "Encoded bins do not match the expected bins."
+        # if bins is a single vector, it means it was unified (wz_rnn outputs list of vectors)
+        if len(bins.size()) == 1:
+            bins = self.deunify_bins(bins)
 
-        codes = [F.one_hot(b.to(int), num_classes=bins_per_plane) for b in bins]
+        codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins]
         reconstruct = self.coding_model.decode(codes, side_info)
         return reconstruct[-1]
 
+    def unify_bins(self, list_bins,):
+        list_bins=torch.stack([l.clone() for l in list_bins])
+        for i, bin_plane in enumerate(list_bins[1:], 1):
+            list_bins[i] = self.coding_model.bins_per_plane**i * list_bins[i]
+        bins = torch.sum(list_bins, dim=0)
+        return bins
 
-class WZQuantizerRNN(WZQuantizerANN):
-    def __init__(self, bins_per_plane, num_planes=3, *args, **kwargs):
-        self.num_planes = num_planes
-        bin_count = bins_per_plane ** num_planes
-        super(WZQuantizerRNN, self).__init__(*args, **kwargs, bin_count=bin_count)
-
-    def load_basic_model(self):
-        assert self.bin_count == 6
-        # todo add loading from file
-        # self.wz_model.load_from_checkpoint('wz_model')
-
-    def make_model_obj(self, bin_count, *args, **kwargs):
-        bins_per_plane = int(round(bin_count ** (1 / self.num_planes)))
-        return PL_EncoderDecoder_RNN(
-            *args, **kwargs, num_planes=self.num_planes, bins_per_plane=bins_per_plane)
+    def deunify_bins(self, bins):
+        bins=bins.clone()
+        vectors = []
+        for i in range(self.num_planes):
+            temp = bins % (self.bins_per_plane**(i+1))
+            bins = bins - temp
+            vectors.append(temp/(self.bins_per_plane**i))
+        list_bins = torch.stack(vectors)
+        return list_bins
 
 
 if __name__ == "__main__":
@@ -108,10 +98,15 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
 
     # %%
-    wz_quantizer = WZQuantizerRNN(train_sample_size=200_000, metric_report_flag=True,
-                        reconst_ld=100, num_planes=3, bins_per_plane=2, lr=1e-3,
-                        count_side_info_data=len(side_info_data))
-    wz_quantizer.train_model(y, side_info_data, epoch=20, batch_size=1_000)
+    side_info_size = len(side_info_data) if len(side_info_data) > 0 else 1
+    pl_model = PL_EncoderDecoder_RNN(
+        inp_dim=1, side_info_size=side_info_size,
+        reconst_ld=100, num_planes=3, bins_per_plane=2, lr=1e-3,
+    )
+    wz_quantizer = WZQuantizer(wz_pl_model=pl_model,
+                                  count_side_info_data=len(side_info_data),
+                                  train_sample_size=200_000, metric_report_flag=True)
+    wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=1_000)
 
     # %%
     y_pred = wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), side_info_data, len(y))

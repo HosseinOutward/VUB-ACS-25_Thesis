@@ -52,13 +52,15 @@ class CustomRNN(nn.Module):
 
 
 class EncoderDecoderLayeredRNN(nn.Module):
-    def __init__(self, input_dim, side_info_size, code_size, planes, layers, hidden_dim, rnn_type='rnn',
-            shared_encoder=False, shared_decoder=False, shared_priors=False, marginal=False, output_activation=None):
+    def __init__(self, input_dim, side_info_size, bins_per_plane, num_planes, layers, hidden_dim, rnn_type='rnn',
+                 shared_encoder=False, shared_decoder=False, shared_priors=False, marginal=False,
+                 output_activation=None):
         super().__init__()
 
-        bins_per_plane = code_size
+        assert bins_per_plane > 1, 'need at least single bit (2 bins) per plane'
+
         self.bins_per_plane = bins_per_plane
-        self.planes = planes
+        self.num_planes = num_planes
         self.shared_decoder = shared_decoder
         self.shared_encoder = shared_encoder
         self.shared_priors = shared_priors
@@ -80,23 +82,23 @@ class EncoderDecoderLayeredRNN(nn.Module):
             self.conditionalRNN = GRU(cond_input_dim, hidden_dim, layers)
 
         if shared_encoder is False:
-            self.binners = nn.ModuleList([nn.Linear(hidden_dim, bins_per_plane) for p in range(planes)])
+            self.binners = nn.ModuleList([nn.Linear(hidden_dim, bins_per_plane) for p in range(num_planes)])
         else:
             self.binner = nn.Linear(hidden_dim, bins_per_plane)
 
         if shared_decoder is False:
-            self.reconstructors = nn.ModuleList([nn.Linear(hidden_dim, input_dim) for p in range(planes)])
+            self.reconstructors = nn.ModuleList([nn.Linear(hidden_dim, input_dim) for p in range(num_planes)])
         else:
             self.reconstructor = nn.Linear(hidden_dim, input_dim)
 
         if shared_priors is False:
-            self.conditionalPriors = nn.ModuleList([nn.Linear(hidden_dim, bins_per_plane) for p in range(planes)])
+            self.conditionalPriors = nn.ModuleList([nn.Linear(hidden_dim, bins_per_plane) for p in range(num_planes)])
         else:
             self.conditionalPrior = nn.Linear(hidden_dim, bins_per_plane)
 
     @property
-    def code_size(self):
-        return self.bins_per_plane
+    def bin_count(self):
+        return self.bins_per_plane**self.num_planes
 
     def encode(self, x, tau=1.):
         if self.training:
@@ -104,13 +106,13 @@ class EncoderDecoderLayeredRNN(nn.Module):
         else:
             softmax = F.softmax
 
-        rnn_inputs = x.unsqueeze(1).repeat(1, self.planes, 1)
+        rnn_inputs = x.unsqueeze(1).repeat(1, self.num_planes, 1)
         rnn_out, _ = self.encoder(rnn_inputs)
         if self.shared_encoder is False:
             soft_codes = [softmax(binner(rnn_out[:, binner_idx]), dim=-1)
                           for binner_idx, binner in enumerate(self.binners)]
         else:
-            soft_codes = [softmax(self.binner(rnn_out[:, binner_idx]), dim=-1) for binner_idx in range(self.planes)]
+            soft_codes = [softmax(self.binner(rnn_out[:, binner_idx]), dim=-1) for binner_idx in range(self.num_planes)]
         bins = [torch.argmax(sc, dim=-1) for sc in soft_codes]
 
         if self.training:
@@ -199,12 +201,12 @@ class EncoderDecoderLayeredRNN(nn.Module):
             reconstructed.append(decoded)
 
             # Update prior inputs
-            if p < self.planes:
+            if p < self.num_planes:
                 if self.marginal:
                     rnn_inputs_prior = torch.cat([torch.zeros_like(hard_codes[0]).unsqueeze(1),
                                                   torch.stack(hard_codes, dim=1)], dim=1).float()
                 else:
-                    rnn_inputs_prior = torch.cat([y.unsqueeze(1).repeat(1, self.planes, 1),
+                    rnn_inputs_prior = torch.cat([y.unsqueeze(1).repeat(1, self.num_planes, 1),
                                                   torch.cat([torch.zeros_like(hard_codes[0]).unsqueeze(1),
                                                              torch.stack(hard_codes, dim=1)], dim=1).float()
                                                   ], dim=-1)
@@ -217,7 +219,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         if self.shared_decoder is False:
             reconstructed = [rec(rnn_d_out[:, rec_idx]) for rec_idx, rec in enumerate(self.reconstructors)]
         else:
-            reconstructed = [self.reconstructor(rnn_d_out[:, rec_idx]) for rec_idx in range(self.planes)]
+            reconstructed = [self.reconstructor(rnn_d_out[:, rec_idx]) for rec_idx in range(self.num_planes)]
 
         if self.output_activation is not None:
             reconstructed = [self.output_activation(rec) for rec in reconstructed]
@@ -235,7 +237,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             rnn_inputs_prior = torch.cat([torch.zeros_like(codes[0]).unsqueeze(1),
                                           torch.stack(codes[:-1], dim=1)], dim=1)
         else:
-            rnn_inputs_prior = torch.cat([y.unsqueeze(1).repeat(1, self.planes, 1),
+            rnn_inputs_prior = torch.cat([y.unsqueeze(1).repeat(1, self.num_planes, 1),
                                           torch.cat([torch.zeros_like(codes[0]).unsqueeze(1),
                                                      torch.stack(codes[:-1], dim=1)], dim=1)
                                           ], dim=-1)
@@ -248,12 +250,12 @@ class EncoderDecoderLayeredRNN(nn.Module):
             priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors)]
             priors = [softmax(p, dim=-1) for p in priors]
         else:
-            priors = [self.conditionalPrior(prior_logits[:, cp_idx]) for cp_idx in range(self.planes)]
+            priors = [self.conditionalPrior(prior_logits[:, cp_idx]) for cp_idx in range(self.num_planes)]
             priors = [softmax(p, dim=-1) for p in priors]
         return priors
 
 
-#%%
+#%% ANN model
 class ProbabilisticModel(nn.Module):
     def __init__(self, input_dim=1, hidden_units=100, output_dim=1, layers=3):
         super().__init__()
@@ -324,20 +326,21 @@ class ConditionalPrior(ProbabilisticModel):
 
 
 class EncoderDecoder(nn.Module):
-    def __init__(self, input_dim=1, side_info_size=1, layers=3, hidden_dim=100, code_size=2 ** 4, marginal=True):
-
+    def __init__(self, input_dim, side_info_size, layers, hidden_dim, bin_count, marginal=True):
         super().__init__()
 
-        self.code_size = code_size
-
-        self.encoder = Encoder(input_dim=input_dim, code_size=self.code_size, layers=layers, hidden_dim=hidden_dim)
-        self.decoder = Decoder(code_size=self.code_size, side_info_size=side_info_size,
+        self.encoder = Encoder(input_dim=input_dim, code_size=bin_count, layers=layers, hidden_dim=hidden_dim)
+        self.decoder = Decoder(code_size=bin_count, side_info_size=side_info_size,
                                output_dim=input_dim, layers=layers, hidden_dim=hidden_dim)
         if marginal is True:
-            self.prior = MarginalPrior(code_size=self.code_size)
+            self.prior = MarginalPrior(code_size=bin_count)
         else:
-            self.prior = ConditionalPrior(code_size=self.code_size, layers=layers, hidden_dim=hidden_dim,
+            self.prior = ConditionalPrior(code_size=bin_count, layers=layers, hidden_dim=hidden_dim,
                                           input_dim=side_info_size)
+
+    @property
+    def bin_count(self):
+        return self.encoder.layers[-1].out_features
 
     def forward(self, x, y, tau=1.0):
 
@@ -352,7 +355,7 @@ class EncoderDecoder(nn.Module):
             reconstruct = self.decoder(soft_code, y)
         else:
             bin = torch.argmax(soft_code, dim=-1)
-            reconstruct = self.decoder(F.one_hot(bin, num_classes=self.code_size), y)
+            reconstruct = self.decoder(F.one_hot(bin, num_classes=self.bin_count), y)
 
         prior = self.prior(y)
 

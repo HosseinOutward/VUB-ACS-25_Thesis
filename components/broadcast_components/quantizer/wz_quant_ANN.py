@@ -1,6 +1,5 @@
 import gc
 from typing import List
-
 from components.other_utilities.brent_wz_models import EncoderDecoder
 import torch
 import torch.nn.functional as F
@@ -9,15 +8,23 @@ import pytorch_lightning as pl
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count, tau=1, lr=1e-4, reconst_ld=100):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1, lr=1e-4, reconst_ld=100, **kwargs):
         super().__init__()
-        self.coding_model = EncoderDecoder(
-            input_dim=inp_dim, side_info_size=side_info_size,
-            layers=4, hidden_dim=80, code_size=bin_count, marginal=False)
+        side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
         self.tau = tau
         self.lr = lr
         self.lr_step = 40
+
+        # if this is a call from super of rnn, don't make the coding model
+        if not hasattr(self, 'coding_model'):
+            self.coding_model = EncoderDecoder(
+                input_dim=inp_dim, side_info_size=side_info_size,
+                layers=4, hidden_dim=80, bin_count=bin_count, marginal=False)
+
+    @property
+    def bin_count(self):
+        return self.coding_model.bin_count
 
     def compute_loss(self, batch, batch_idx):
         tau_t = self.tau * np.exp(
@@ -35,6 +42,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
     def mape(pred, target, eps=1e-8):
         return torch.mean(torch.abs((target - pred) / (target.abs() + eps))) * 100
 
+    # todo reduce workload by reusing the logit bin values before softmax/gumble from loss calc
     def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no, p_u, bins_probs, prior_probs):
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
 
@@ -86,38 +94,28 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
     def decode_net(self, bins, side_info):
         reconstruct = self.coding_model.decoder(
-            F.one_hot(bins.long(), num_classes=self.coding_model.code_size), side_info)
+            F.one_hot(bins.long(), num_classes=self.bin_count), side_info)
         return reconstruct
 
 
 # ---------------------------------------------
-class WZQuantizerANN:
-    def __init__(self, count_side_info_data, bin_count, tau=1, lr=1e-3, reconst_ld=100,
+class WZQuantizer:
+    def __init__(self, wz_pl_model, count_side_info_data,
                  metric_report_flag=False, train_sample_size=100_000):
+        from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
+        assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
+
         self.val_indices = None
         self.metric_report_flag = metric_report_flag
 
         self.train_sample_size = train_sample_size
 
-        self.bin_count = bin_count
-        print(f'bin counts: {self.bin_count} (bit rate: {np.log2(self.bin_count):.2f})')
-
+        self.wz_pl_model = wz_pl_model
         self.count_side_info_data = count_side_info_data
-        if count_side_info_data == 0:
-            count_side_info_data += 1
-        self.wz_pl_model = self.make_model_obj(
-            inp_dim=1, side_info_size=count_side_info_data,
-            lr=lr, bin_count=self.bin_count, reconst_ld=reconst_ld, tau=tau)
-        if count_side_info_data == 0:
-            self.load_basic_model()
 
-    def load_basic_model(self):
-        assert self.bin_count == 4
-        # todo add loading from file
-        # self.wz_model.load_from_checkpoint('wz_model')
-
-    def make_model_obj(self, *args, **kwargs):
-        return PL_EncoderDecoder_ANN(*args, **kwargs)
+    @property
+    def bin_count(self):
+        return self.wz_pl_model.bin_count
 
     def encoding_process(self, grad_vector, batch_size=500_000):
         # from components.broadcast_components.quantizer.simple import simple_quantize
@@ -148,7 +146,6 @@ class WZQuantizerANN:
         else:
             bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
 
-        # quantized_data = self.symbol_encoding(bins) if symbolic_encoder else bins
         quantized_data = bins
         return quantized_data
 
@@ -158,7 +155,6 @@ class WZQuantizerANN:
         # from components.broadcast_components.quantizer.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
-        # bins = self.symbol_decoding(quantized_data, element_count) if symbolic_decoder else quantized_data
         bins_tensor = torch.tensor(np.array(quantized_data))
         total_size = len(bins_tensor[0]) if len(bins_tensor.shape) == 2 else len(bins_tensor)
 
@@ -276,7 +272,7 @@ class WZQuantizerANN:
         torch.cuda.empty_cache()
 
 
-def plot_bins(wz_quantizer: WZQuantizerANN, x_data_, side_info, step_count=1000, training_ind=False):
+def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, training_ind=False):
     from matplotlib import pyplot as plt
 
     def _plot_bin_regions(ax, x_range, decoded_bins, x_step, colors):
@@ -324,6 +320,8 @@ def plot_bins(wz_quantizer: WZQuantizerANN, x_data_, side_info, step_count=1000,
 
     # Create x_range for plotting
     bins = wz_quantizer.encoding_process(grad_data)
+    if len(bins.shape) != 1: # if a list of bins is returned, unify them
+        bins = wz_quantizer.wz_pl_model.unify_bins(bins)
     recons_for_x_range = wz_quantizer.decoding_process(
         bins, side_info, element_count=len(grad_data))
 
@@ -393,8 +391,12 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
 
     # %%
-    wz_quantizer = WZQuantizerANN(train_sample_size=100_000, metric_report_flag=True,
-                                  bin_count=3, lr=1e-5, count_side_info_data=len(side_info_data))
+    pl_model = PL_EncoderDecoder_ANN(
+        inp_dim=1, side_info_size=len(side_info_data), bin_count=3, lr=1e-5
+    )
+    wz_quantizer = WZQuantizer(wz_pl_model=pl_model,
+                               count_side_info_data=len(side_info_data),
+                               train_sample_size=100_000, metric_report_flag=True)
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=10_000)
 
     # %%
