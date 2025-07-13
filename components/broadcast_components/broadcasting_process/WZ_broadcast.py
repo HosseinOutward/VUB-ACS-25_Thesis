@@ -8,19 +8,15 @@ from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, 
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
 
 
-def dict_to_array_and_normalize(grad_dict: Dict):
-    # min_v, max_v = [
-    #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
-
-    clip_range_min, clip_range_max = [
-        [f(v.to('cpu').numpy()) for k, v in grad_dict.items()]
-        for f in [lambda x: np.percentile(x,0.002), lambda x: np.percentile(x,99.998)] ]
-    grad_dict = {k: torch.clip(v, clip_range_min[i], clip_range_max[i])
-                 for i, (k, v) in enumerate(grad_dict.items())}
-
-    min_v, max_v = [
-        [f(v.to('cpu').numpy()) for k, v in grad_dict.items()]
-        for f in [lambda x: np.percentile(x,0.01), lambda x: np.percentile(x,99.99)] ]
+# todo combine bias and weight into one key in dict
+def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
+    if min_v is None and max_v is None:
+        # min_v, max_v = [
+        #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
+        min_v, max_v = [
+            [f(v.to('cpu').numpy()) for k, v in grad_dict.items()]
+            for f in [lambda x: np.percentile(x,0.01), lambda x: np.percentile(x,99.99)] ]
+    assert (min_v is not None and max_v is not None)
 
     res = []
     for i, (k, v) in enumerate(grad_dict.items()):
@@ -45,6 +41,8 @@ def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List
     return res
 
 
+# todo separate the wz model and use dependency injection to pass it to the protocol
+# todo remove the *args, **kwargs for all related classes
 class WZBroadcastProtocol:
     def __init__(self, agent_count, quantizer_type='RNN', *args, **kwargs):
         self.side_info_data_list = None
@@ -54,39 +52,46 @@ class WZBroadcastProtocol:
 
         self.wz_quantizer_list: List[WZQuantizer] = [
             WZQuantizer(
-                wz_pl_model=self.wz_pl_model_class(
-                    inp_dim=1, side_info_size=1, **kwargs),
-                count_side_info_data=0) for _ in range(agent_count)]
+                wz_pl_model=self.wz_pl_model_class(inp_dim=1, side_info_size=1, *args, **kwargs),
+                count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
         self.last_recent_grads_list = [None] * agent_count
 
+    def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+        quantizer_decoder_state_dict, prob_per_bin = encoder_data_sent_by_server
+        broadcast_data = self.encoding_process(agent_id, grad_dict, prob_per_bin)
+        return broadcast_data
+
+    def to_worker_from_server_data_transfer(self, agent_id):
+        quantizer_decoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.decoder.state_dict()
+        prob_per_bin = self.wz_quantizer_list[agent_id].get_bin_probs()
+        return quantizer_decoder_state_dict, prob_per_bin
+
     # %%
-    def wz_encoding_process(self, worker_grad_dict, agent_id):
+    def encoding_process(self, agent_id, worker_grad_dict, prob_per_bin):
         # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
         # return worker_grad_dict, min_v, max_v, 0
 
         grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(worker_grad_dict)
 
         quantizer = self.wz_quantizer_list[agent_id]
-        quantized_data = quantizer.encoding_process(grad_flat_normal)
+        bin_data = quantizer.encoding_process(grad_flat_normal)
 
-        dtype = quantized_data.dtype
-        encoded_data = entropy_coding(quantized_data)
+        encoded_grad_data = bin_data#entropy_coding(bin_data, prob_per_bin)
 
-        return encoded_data, min_v, max_v, dtype
+        return encoded_grad_data, min_v, max_v, bin_data.dtype
 
-    def wz_reconstruction_process(self, worker_broadcast_data, agent_id,
-                                  worker_count, global_model_dims, previous_data):
+    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data):
+        # return worker_broadcast_data[0]
+
+        encoded_data, min_v, max_v, dtype = worker_broadcast_data
+
         # assuming that previous_data has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
 
-        # return worker_broadcast_data[0]
-
         quantizer = self.wz_quantizer_list[agent_id]
 
-        encoded_data, min_v, max_v, dtype = worker_broadcast_data
-
-        quantized_decoded_data = entropy_decoding(encoded_data, dtype)
+        quantized_decoded_data = encoded_data#entropy_decoding(encoded_data, dtype)
 
         model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
@@ -106,7 +111,7 @@ class WZBroadcastProtocol:
         return result_dict
 
     def prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
-        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v) for pd in previous_data]
+        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in previous_data]
         prev_d_flat += [res_vector]
 
         last_recent_grads_idx = len(prev_d_flat) - worker_count
@@ -119,8 +124,8 @@ class WZBroadcastProtocol:
             wz_pl_model=self.wz_pl_model_class(
                 inp_dim=1, side_info_size=len(self.side_info_data_list),
                 lr=qz.wz_pl_model.lr,
-                bins_per_plane=qz.bins_per_plane if hasattr(qz, 'bins_per_plane') else None,
-                num_planes=qz.planes if hasattr(qz, 'planes') else None,
+                bins_per_plane=qz.wz_pl_model.bins_per_plane,
+                num_planes=qz.wz_pl_model.num_planes,
             ),
             count_side_info_data=len(self.side_info_data_list),
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
@@ -142,17 +147,17 @@ if __name__ == "__main__":
 
     worker_count = 4
     rounds = 3
+    seed_everything(42)
 
     # load testing data --------------------------------
-    seed_everything(42)
     model_shape_dict = {
-        f'aaa_{i}': (*np.random.randint(1, 10, size=np.random.randint(3)),
+        f'aaa_{i}': (*np.random.randint(1, 5, size=np.random.randint(3)),
             (np.random.randint(10_000, 100_000)*1000)//1000)
         for i in range(10)
     }
 
     grad_test_data = [
-            [{k: torch.randn(v).to('cuda') * 2 - 1 for k, v in model_shape_dict.items()}
+            [{k: torch.normal(0,1,size=v).to('cuda') * 2 - 1 for k, v in model_shape_dict.items()}
             for _ in range(worker_count)]
         for _ in range(rounds)]
 
@@ -162,9 +167,14 @@ if __name__ == "__main__":
     prev = []
     for round, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
-            broadcast_data = broadcast_prot.wz_encoding_process(grad, ag_id)
-            decoded_agent_broadcast = broadcast_prot.wz_reconstruction_process(
-                broadcast_data, ag_id, worker_count, model_shape_dict, prev, )
+            print(f'Round {round}, Agent {ag_id}')
+            server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
+            encoded_ag_broadcast = broadcast_prot.to_server_from_worker_data_transfer(
+                            ag_id, grad, server_data_sent_to_worker)
+
+            decoded_agent_broadcast = broadcast_prot.reconstruction_process(
+                ag_id, encoded_ag_broadcast, worker_count, model_shape_dict, prev, )
+
             prev.append(decoded_agent_broadcast)
 
     # check output size and correctness
