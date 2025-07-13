@@ -3,8 +3,8 @@ import numpy as np
 import torch
 
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
-from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizerANN
-from components.broadcast_components.quantizer.wz_quant_RNN import WZQuantizerRNN
+from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN
+from components.broadcast_components.quantizer.wz_quant_RNN import WZQuantizerRNN, PL_EncoderDecoder_RNN
 
 
 def dict_to_array_and_normalize(grad_dict: Dict, min_v: List, max_v: List):
@@ -36,9 +36,13 @@ class WZBroadcastProtocol:
         self.side_info_data_list = None
         self.agent_list_check = []
         self.warmup = True
-        self.wz_quantizer_class = {'ANN': WZQuantizerANN, 'RNN': WZQuantizerRNN}[quantizer_type]
-        self.wz_quantizer_list: List[WZQuantizerANN] = [
-            self.wz_quantizer_class(count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
+        self.wz_pl_model_class = {'ANN': PL_EncoderDecoder_ANN, 'RNN': PL_EncoderDecoder_RNN}[quantizer_type]
+
+        self.wz_quantizer_list: List[WZQuantizer] = [
+            WZQuantizer(
+                wz_pl_model=self.wz_pl_model_class(
+                    inp_dim=1, side_info_size=1, **kwargs),
+                count_side_info_data=0) for _ in range(agent_count)]
         self.last_recent_grads_list = [None] * agent_count
 
     # %%
@@ -104,9 +108,14 @@ class WZBroadcastProtocol:
 
         next_agent = (agent_id + 1) % worker_count
         qz = self.wz_quantizer_list[next_agent]
-        self.wz_quantizer_list[next_agent] = self.wz_quantizer_class(
+        self.wz_quantizer_list[next_agent] = WZQuantizer(
+            wz_pl_model=self.wz_pl_model_class(
+                inp_dim=1, side_info_size=len(self.side_info_data_list),
+                lr=qz.wz_pl_model.lr,
+                bins_per_plane=qz.bins_per_plane if hasattr(qz, 'bins_per_plane') else None,
+                num_planes=qz.planes if hasattr(qz, 'planes') else None,
+            ),
             count_side_info_data=len(self.side_info_data_list),
-            lr=qz.wz_pl_model.lr, code_bit_size=np.log2(qz.bin_count),
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
         )
         self.wz_quantizer_list[next_agent].train_model(
