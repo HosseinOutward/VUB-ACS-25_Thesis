@@ -8,7 +8,7 @@ import pytorch_lightning as pl
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1, lr=1e-4, reconst_ld=100, **kwargs):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1, lr=1e-4, reconst_ld=100, *args, **kwargs):
         super().__init__()
         side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
@@ -101,7 +101,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 # ---------------------------------------------
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
-                 metric_report_flag=False, train_sample_size=100_000):
+                 metric_report_flag=False, train_sample_size=100_000, *args, **kwargs):
         from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
         assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
 
@@ -116,6 +116,9 @@ class WZQuantizer:
     @property
     def bin_count(self):
         return self.wz_pl_model.bin_count
+
+    def get_bin_probs(self):
+        return None
 
     def encoding_process(self, grad_vector, batch_size=500_000):
         # from components.broadcast_components.quantizer.simple import simple_quantize

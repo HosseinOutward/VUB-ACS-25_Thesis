@@ -220,14 +220,10 @@ class CustomSampler(Sampler):
 class Agent:
     def __init__(self,
                  agent_id: int,
-                 local_data_size: int,
-                 pre_send_preprocess: Optional[Callable[[Dict, int], Dict]] = None):
+                 local_data_size: int,):
         self.local_model: FederatedModelWrapper | None = None
 
         self.agent_id = agent_id
-
-        self.pre_send_preprocess = pre_send_preprocess
-
         self.data_size = local_data_size
 
     def train(self, train_dataloader, test_dataloader, epochs, round_s):
@@ -257,9 +253,9 @@ class Agent:
         self.local_model.eval()
         self.local_model.to('cpu')
 
-    def get_worker_broadcast(self):
+    def get_worker_broadcast(self, encoder_data_sent_by_server, to_server_data_transfer):
         grad_dict = self.local_model.accu_param_grads
-        broadcast_data = self.pre_send_preprocess(grad_dict, self.agent_id)
+        broadcast_data = to_server_data_transfer(self.agent_id, grad_dict, encoder_data_sent_by_server)
         return broadcast_data
 
 
@@ -268,11 +264,7 @@ class FLSimulator:
     def __init__(self, num_agents: int,
                  communication_rounds: int, client_epochs_per_round: int,
                  batch_size: int, dataset_train: VisionDataset, dataset_test: VisionDataset,
-                 pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_sampling=False,
-                 pre_send_process: Optional[Callable[[Dict, int], Any]] = lambda x, i: x,
-                 server_rec_process: Optional[Callable[[Any, int, int, Dict, List], Dict]] = lambda x, i, j, s, z: x):
-        if LambdaType in [type(pre_send_process), type(server_rec_process)]:
-            assert type(pre_send_process) is LambdaType and type(server_rec_process) is LambdaType
+                 pl_model: FederatedModelWrapper, aggregation_method='fedavg', non_iid_sampling=False,):
 
         self.global_model = pl_model
 
@@ -287,7 +279,6 @@ class FLSimulator:
 
         self.server_optimizer = self.global_model.configure_optimizers()
 
-        self.server_rec_process = server_rec_process
 
         self.train_sampler = CustomSampler(len(self.dataset_train), self.num_agents,
                 True, True, non_iid_flag=non_iid_sampling, )
@@ -296,7 +287,7 @@ class FLSimulator:
                 for k, v in self.global_model.named_parameters() if v.requires_grad}
 
         self.agents = [Agent(
-            agent_id, self.train_sampler.size_of_partition[agent_id], pre_send_process
+            agent_id, self.train_sampler.size_of_partition[agent_id],
         ) for agent_id in range(num_agents)]
 
     def _set_local_models(self):
@@ -338,7 +329,7 @@ class FLSimulator:
 
         self._set_local_models()
 
-    def run_simulation(self, post_training_report=True, pre_training_global_epochs=5):
+    def run_simulation(self, broadcast_prot, post_training_report=True, pre_training_global_epochs=5):
         shared_train_loader = torch.utils.data.DataLoader(
             self.dataset_train, batch_size=self.batch_count, sampler=self.train_sampler,
             num_workers=10, persistent_workers=True)
@@ -353,7 +344,7 @@ class FLSimulator:
                 shared_train_loader, num_epochs=pre_training_global_epochs)
 
         # cycle through communication rounds -----------------------------------------------
-        grad_dict_per_agent = []
+        past_decoded_grad_dict_list = []
         for round_s in range(self.communication_rounds):
             print(f"\nround {round_s + 1}/{self.communication_rounds} --------------------")
 
@@ -375,21 +366,21 @@ class FLSimulator:
                 gc.collect()
                 torch.cuda.empty_cache()
 
-                encoded_ag_broadcast = ag.get_worker_broadcast()
+                server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
+                encoded_ag_broadcast = ag.get_worker_broadcast(
+                    server_data_sent_to_worker, broadcast_prot.to_server_from_worker_data_transfer)
 
-                decoded_agent_broadcast = self.server_rec_process(
-                    encoded_ag_broadcast,
-                    ag_id, self.num_agents, self.model_shape_dict,
-                    grad_dict_per_agent, )
+                decoded_agent_broadcast = broadcast_prot.reconstruction_process(
+                    ag_id, encoded_ag_broadcast, self.num_agents, self.model_shape_dict, past_decoded_grad_dict_list, )
 
-                grad_dict_per_agent.append(decoded_agent_broadcast)
+                past_decoded_grad_dict_list.append(decoded_agent_broadcast)
 
                 if post_training_report:
                     report_metric(ag.local_model, shared_test_loader, 'test')
                     report_metric(ag.local_model, shared_train_loader, 'train', rank=ag_id)
 
             # ------------- Aggregate pl_models from all agents
-            self._aggregate_models(grad_dict_per_agent)
+            self._aggregate_models(past_decoded_grad_dict_list)
 
         self._set_local_models()
 

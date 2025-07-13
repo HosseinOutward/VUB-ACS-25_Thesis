@@ -115,12 +115,12 @@ if __name__ == "__main__":
     @reporting_util.record_compr_stats
     def pre_send_process(worker_grad_dict, agent_id):
         # worker_broadcast_data = [worker_grad_dict]
-        worker_broadcast_data = broadcast_prot.wz_encoding_process(worker_grad_dict, agent_id)
+        worker_broadcast_data = broadcast_prot.encoding_process(worker_grad_dict, agent_id)
         return worker_broadcast_data
     @reporting_util.report_reconst_wrapper
     def server_rec_process(agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data):
         # result_dict = worker_broadcast_data[0]
-        result_dict = broadcast_prot.wz_reconstruction_process(
+        result_dict = broadcast_prot.reconstruction_process(
             agent_id, worker_count, global_model_dims, previous_data, worker_broadcast_data)
         return result_dict
 
