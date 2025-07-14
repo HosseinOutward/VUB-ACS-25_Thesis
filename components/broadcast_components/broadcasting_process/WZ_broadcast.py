@@ -54,9 +54,11 @@ class WZBroadcastProtocol:
                 wz_pl_model=self.wz_pl_model_class(
                     inp_dim=1, side_info_size=1, *args, **kwargs).to(torch.float32),
                 count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
-        for i in range(agent_count):
-            print('********* not loading base model from any file')
+
+        print('********* not loading base model from any file')
+        # for i in range(agent_count):
             # self.wz_quantizer_list[i].wz_pl_model.load_from_checkpoint()
+
         self.last_recent_grads_list = [None] * agent_count
 
     def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
