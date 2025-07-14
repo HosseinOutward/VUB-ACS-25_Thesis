@@ -1,3 +1,5 @@
+from numba.core.types import float32
+
 from components.broadcast_components.quantizer.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
 import torch
@@ -85,8 +87,8 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
 
 
 if __name__ == "__main__":
-    side_info_data = np.random.normal(0, 1, 1_000_000)
-    y = side_info_data + np.random.normal(0, 0.1, 1_000_000)
+    side_info_data = np.random.normal(0, 1, 1_000_000).astype(np.float32)
+    y = side_info_data + np.random.normal(0, 0.1, 1_000_000).astype(np.float32)
     side_info_data = [side_info_data]
 
     # %%

@@ -1,11 +1,34 @@
+import sys
 from typing import List, Dict
 import numpy as np
 import torch
 from lightning import seed_everything
-
-from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
+
+
+def change_dtype_recursive(obj, dtype):
+    if isinstance(obj, torch.Tensor):
+        return obj.to(dtype)
+    elif isinstance(obj, np.ndarray):
+        dtype = {
+            torch.float32: np.float32,
+            torch.float64: np.float64,
+            torch.float16: np.float16,
+            torch.int8: np.int8,
+            torch.int16: np.int16,
+            torch.int32: np.int32,
+            torch.int64: np.int64,
+            torch.uint8: np.uint8,
+            torch.bool: np.bool_,
+        }[dtype]
+        return obj.astype(dtype)
+    elif isinstance(obj, (list, tuple)):
+        return [change_dtype_recursive(x, dtype) for x in obj]
+    elif isinstance(obj, dict):
+        return {k:change_dtype_recursive(v, dtype) for k, v in obj.items()}
+    else:
+        raise TypeError
 
 
 # todo combine bias and weight into one key in dict
@@ -13,8 +36,8 @@ def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
     if min_v is None and max_v is None:
         # min_v, max_v = [
         #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
-        max_v, min_v = [[torch.quantile(v.to(torch.float32), q).cpu().numpy()
-                         for k, v in grad_dict.items()] for q in [0.9999,0.0001]]
+        max_v, min_v = [ [torch.quantile(v, q).cpu().numpy() for k, v in grad_dict.items()]
+                            for q in [0.9999,0.0001] ]
     assert (min_v is not None and max_v is not None)
 
     res = []
@@ -61,20 +84,31 @@ class WZBroadcastProtocol:
 
         self.last_recent_grads_list = [None] * agent_count
 
+    # todo do compression for stuff sent to server
     def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         quantizer_decoder_state_dict, prob_per_bin = encoder_data_sent_by_server
-        broadcast_data = self.encoding_process(agent_id, grad_dict, prob_per_bin)
-        return broadcast_data
+        encoded_grad_data, min_v, max_v, dtype = self.encoding_process(agent_id, grad_dict, prob_per_bin)
 
+        # change the dtype of the encoded data to float16
+        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float16)
+        return encoded_grad_data, min_v, max_v, dtype
+
+    # todo do compression for stuff sent to workers
     def to_worker_from_server_data_transfer(self, agent_id):
-        quantizer_decoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.decoder.state_dict()
-        prob_per_bin = self.wz_quantizer_list[agent_id].get_bin_probs()
-        return quantizer_decoder_state_dict, prob_per_bin
+        quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
+        quantizer_encoder_state_dict = {k: v.to(torch.float16) for k, v in quantizer_encoder_state_dict.items()}
+        prob_per_bin = self.wz_quantizer_list[agent_id].get_bin_probs().to(torch.float16)
+
+        quantizer_encoder_state_dict, prob_per_bin =\
+            change_dtype_recursive([quantizer_encoder_state_dict, prob_per_bin], torch.float16)
+        return quantizer_encoder_state_dict, prob_per_bin
 
     # %%
     def encoding_process(self, agent_id, worker_grad_dict, prob_per_bin):
         # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
         # return worker_grad_dict, min_v, max_v, 0
+
+        worker_grad_dict, prob_per_bin = change_dtype_recursive([worker_grad_dict, prob_per_bin], torch.float32)
 
         grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(worker_grad_dict)
 
@@ -89,6 +123,7 @@ class WZBroadcastProtocol:
         # return worker_broadcast_data[0]
 
         encoded_data, min_v, max_v, dtype = worker_broadcast_data
+        worker_grad_dict, prob_per_bin = change_dtype_recursive([min_v, max_v], torch.float32)
 
         # assuming that previous_data has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
@@ -172,7 +207,7 @@ if __name__ == "__main__":
     prev = []
     for round, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
-            print(f'Round {round}, Agent {ag_id}')
+            print(f'>> Round {round}, Agent {ag_id}')
             server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
             encoded_ag_broadcast = broadcast_prot.to_server_from_worker_data_transfer(
                             ag_id, grad, server_data_sent_to_worker)
