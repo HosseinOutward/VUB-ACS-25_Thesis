@@ -13,9 +13,8 @@ def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
     if min_v is None and max_v is None:
         # min_v, max_v = [
         #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
-        min_v, max_v = [
-            [f(v.to('cpu').numpy()) for k, v in grad_dict.items()]
-            for f in [lambda x: np.percentile(x,0.01), lambda x: np.percentile(x,99.99)] ]
+        max_v, min_v = [[torch.quantile(v.to(torch.float32), q).cpu().numpy()
+                         for k, v in grad_dict.items()] for q in [0.9999,0.0001]]
     assert (min_v is not None and max_v is not None)
 
     res = []
@@ -52,8 +51,12 @@ class WZBroadcastProtocol:
 
         self.wz_quantizer_list: List[WZQuantizer] = [
             WZQuantizer(
-                wz_pl_model=self.wz_pl_model_class(inp_dim=1, side_info_size=1, *args, **kwargs),
+                wz_pl_model=self.wz_pl_model_class(
+                    inp_dim=1, side_info_size=1, *args, **kwargs).to(torch.float32),
                 count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
+        for i in range(agent_count):
+            print('********* not loading base model from any file')
+            # self.wz_quantizer_list[i].wz_pl_model.load_from_checkpoint()
         self.last_recent_grads_list = [None] * agent_count
 
     def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
@@ -106,11 +109,11 @@ class WZBroadcastProtocol:
             self.warmup = False
 
         if not self.warmup:
-            self.prep_for_next_agent(agent_id, worker_count, res_vector, previous_data, min_v, max_v)
+            self._prep_for_next_agent(agent_id, worker_count, res_vector, previous_data, min_v, max_v)
 
         return result_dict
 
-    def prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
+    def _prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
         prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in previous_data]
         prev_d_flat += [res_vector]
 
@@ -126,7 +129,7 @@ class WZBroadcastProtocol:
                 lr=qz.wz_pl_model.lr,
                 bins_per_plane=qz.wz_pl_model.bins_per_plane,
                 num_planes=qz.wz_pl_model.num_planes,
-            ),
+            ).to(torch.float32),
             count_side_info_data=len(self.side_info_data_list),
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
         )

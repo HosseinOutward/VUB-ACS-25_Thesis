@@ -24,12 +24,18 @@ class CustomRNN(nn.Module):
         self.input_layers = nn.ModuleList(input_layers)
         self.transition_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)])
 
+    def to(self, *args, **kwargs):
+        super(CustomRNN, self).to(*args, **kwargs)
+        self.input_layers.to(*args, **kwargs)
+        self.transition_layers.to(*args, **kwargs)
+
     def forward(self, x, h_0=None):
 
         B, T, D = x.shape
 
         if h_0 is None:
-            h_0 = [torch.zeros(B, self.hidden_dim).to(self.transition_layers[0].weight.device) for _ in
+            temp=self.transition_layers[0].weight
+            h_0 = [torch.zeros(B, self.hidden_dim).to(temp.device).to(temp.dtype) for _ in
                    range(self.layers)]
 
         h_outputs = [h_0]
@@ -95,6 +101,15 @@ class EncoderDecoderLayeredRNN(nn.Module):
             self.conditionalPriors = nn.ModuleList([nn.Linear(hidden_dim, bins_per_plane) for p in range(num_planes)])
         else:
             self.conditionalPrior = nn.Linear(hidden_dim, bins_per_plane)
+
+    def to(self, *args, **kwargs):
+        super(EncoderDecoderLayeredRNN, self).to(*args, **kwargs)
+        self.encoder.to(*args, **kwargs)
+        self.decoder.to(*args, **kwargs)
+        self.conditionalRNN.to(*args, **kwargs)
+        self.binner.to(*args, **kwargs)
+        self.reconstructor.to(*args, **kwargs)
+        self.conditionalPriors.to(*args, **kwargs)
 
     @property
     def bin_count(self):
@@ -244,7 +259,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         if self.training:
             rnn_inputs_prior = rnn_inputs_prior.detach()
         else:
-            rnn_inputs_prior = rnn_inputs_prior.float()  # hard codes are LongTensors
+            rnn_inputs_prior = rnn_inputs_prior.to(torch.float32)
         prior_logits, _ = self.conditionalRNN(rnn_inputs_prior)
         if self.shared_priors is False:
             priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors)]

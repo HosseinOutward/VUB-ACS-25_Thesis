@@ -50,7 +50,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         recons_loss = self.mape(inp_rec, inp)
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
-        self.log(f'{name_prefix}_rate (bits)', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
+        self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
         practical_p_u = bin_no.detach().cpu().numpy()
         bin_appearance_counts = np.unique(practical_p_u, return_counts=True)
@@ -124,7 +124,7 @@ class WZQuantizer:
         # from components.broadcast_components.quantizer.simple import simple_quantize
         # return simple_quantize(grad_vector)
 
-        grad_tensor = torch.tensor(grad_vector).float()
+        grad_tensor = torch.tensor(grad_vector).to(torch.float32)
         total_size = len(grad_tensor)
 
         self.wz_pl_model.to('cuda')
@@ -149,8 +149,8 @@ class WZQuantizer:
         else:
             bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
 
-        quantized_data = bins
-        return quantized_data
+        dtype = torch.uint8 if self.bin_count < 2**8 else torch.uint16
+        return bins.to(dtype)
 
     # todo separate the running of the model for ann and rnn
     def decoding_process(self, quantized_data, side_info_data_list,
@@ -259,7 +259,7 @@ class WZQuantizer:
                 def init_validation_tqdm(self): return tqdm(disable=True)
 
         trainer = pl.Trainer(
-            accelerator="gpu",
+            accelerator="cuda",
             enable_checkpointing=False,
             enable_model_summary=False,
             max_epochs=epoch,
