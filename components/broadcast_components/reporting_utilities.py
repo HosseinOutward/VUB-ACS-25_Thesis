@@ -26,7 +26,7 @@ class BroadcastReportingUtilities:
         self.broadcast_protocol = broadcast_prot
         self.stats = {
             'wz': {'mbytes_moved_total': [], 'mbytes_sent_to_worker': [], 'mse': [], 'mape%': []},
-            'raw': {'mbytes_moved_total': [], 'mse': [], 'mape%': []},
+            'raw16': {'mbytes_moved_total': [], 'mse': [], 'mape%': []},
             'entropy': {'mbytes_moved_total': [], 'mse': [], 'mape%': []}
         }
         self.original_grads = None
@@ -69,8 +69,11 @@ class BroadcastReportingUtilities:
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(
             agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data)
 
-        original_flat = np.concatenate([v.flatten().cpu().to(torch.float16) for v in self.original_grads.values()])
-        reconstructed_flat_wz = np.concatenate([v.flatten().cpu() for v in reconstructed_grads.values()])
+        original_flat = np.concatenate([v.flatten().cpu()
+                                        for v in self.original_grads.values()])
+        reconstructed_flat_wz = np.concatenate([v.flatten().cpu()
+                                                for v in reconstructed_grads.values()])
+        assert original_flat.dtype == torch.float16 and reconstructed_flat_wz.dtype == torch.float16
 
         # WZ comparison
         mse_f = lambda x,y: np.mean((x-y) ** 2)
@@ -79,10 +82,10 @@ class BroadcastReportingUtilities:
         self.stats['wz']['mape%'].append(mape_f(original_flat, reconstructed_flat_wz))
 
         # Raw comparison
-        raw_size = get_obj_size(self.original_grads)
-        self.stats['raw']['mbytes_moved_total'].append(raw_size / (1024*1024))
-        self.stats['raw']['mse'].append(0)
-        self.stats['raw']['mape%'].append(0)
+        raw_size = get_obj_size(original_flat)
+        self.stats['raw16']['mbytes_moved_total'].append(raw_size / (1024*1024))
+        self.stats['raw16']['mse'].append(0)
+        self.stats['raw16']['mape%'].append(0)
 
         # Entropy comparison
         entropy_encoded_data = entropy_coding(original_flat)
@@ -135,7 +138,7 @@ if __name__ == '__main__':
     prev = []
     for round, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
-            print(f'Round {round}, Agent {ag_id}')
+            print(f'>> Round {round}, Agent {ag_id}')
             server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
             encoded_ag_broadcast = broadcast_prot.to_server_from_worker_data_transfer(
                             ag_id, grad, server_data_sent_to_worker)

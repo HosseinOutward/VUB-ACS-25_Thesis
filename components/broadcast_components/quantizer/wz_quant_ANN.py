@@ -52,9 +52,8 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
         self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
-        practical_p_u = bin_no.detach().cpu().numpy()
-        bin_appearance_counts = np.unique(practical_p_u, return_counts=True)
-        practical_p_u = torch.tensor(practical_p_u, dtype=torch.float32)
+        bin_appearance_counts = torch.unique(bin_no, return_counts=True)
+        practical_p_u = bin_no.detach().clone().float()
         for b, count in zip(*bin_appearance_counts):
             practical_p_u[practical_p_u == b] = count / len(bin_no)
         temp = torch.mean(-torch.log2(practical_p_u + 1e-12))
@@ -163,7 +162,7 @@ class WZQuantizer:
 
         assert len(side_info_data_list) == self.count_side_info_data
         if self.count_side_info_data == 0:
-            side_info_data_list = [np.zeros(element_count, dtype=np.float32)]
+            side_info_data_list = [np.zeros(element_count)]
 
         assert total_size == len(side_info_data_list[0])
 
@@ -205,9 +204,9 @@ class WZQuantizer:
 
         assert len(side_info_data_list) == self.count_side_info_data
         if self.count_side_info_data == 0:
-            side_info_data_list = [np.zeros(len(input_data), dtype=np.float32)]
-        side_info_data_list = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
-        input_data = torch.tensor(input_data, dtype=torch.float32).unsqueeze(1)
+            side_info_data_list = [np.zeros(len(input_data))]
+        side_info_data_list = torch.tensor(np.array(side_info_data_list)).T
+        input_data = torch.tensor(input_data).unsqueeze(1)
 
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
 
@@ -380,8 +379,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
 
 if __name__ == "__main__":
-    side_info_data = np.random.normal(0, 1, 100000)
-    y = side_info_data + np.random.normal(0, 0.1, 100000)
+    side_info_data = np.random.normal(0, 1, 100000).astype(np.float32)
+    y = side_info_data + np.random.normal(0, 0.1, 100000).astype(np.float32)
     side_info_data = [side_info_data]
     # side_info_data=[]
 

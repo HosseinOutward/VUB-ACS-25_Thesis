@@ -259,7 +259,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         if self.training:
             rnn_inputs_prior = rnn_inputs_prior.detach()
         else:
-            rnn_inputs_prior = rnn_inputs_prior.to(torch.float32)
+            rnn_inputs_prior = rnn_inputs_prior.float()
         prior_logits, _ = self.conditionalRNN(rnn_inputs_prior)
         if self.shared_priors is False:
             priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors)]
