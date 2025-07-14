@@ -16,7 +16,7 @@ def get_obj_size(obj):
     elif isinstance(obj, (list, tuple)):
         return sum(get_obj_size(x) for x in obj)
     elif isinstance(obj, dict):
-        return sum(get_obj_size(k) + get_obj_size(v) for k, v in obj.items())
+        return sum(get_obj_size(v) for k, v in obj.items())
     else:
         return sys.getsizeof(obj)
 
@@ -24,20 +24,29 @@ def get_obj_size(obj):
 class BroadcastReportingUtilities:
     def __init__(self, broadcast_prot:WZBroadcastProtocol):
         self.broadcast_protocol = broadcast_prot
-        self.stats = {
+        self.base_stat_dict = {
             'wz': {'mbytes_moved_total': [], 'mbytes_sent_to_worker': [], 'mse': [], 'mape%': []},
             'raw16': {'mbytes_moved_total': [], 'mse': [], 'mape%': []},
             'entropy': {'mbytes_moved_total': [], 'mse': [], 'mape%': []}
         }
+        self.stats = copy.deepcopy(self.base_stat_dict)
+        self.running_stats = copy.deepcopy(self.base_stat_dict)
         self.original_grads = None
         self.current_agent_id = None
+
+    def reset_running_stats_round_end(self):
+        for method_used in self.running_stats.keys():
+            for k, v in self.running_stats[method_used].items():
+                self.stats[method_used][k].append(v)
+
+        self.running_stats = copy.deepcopy(self.base_stat_dict)
 
     def to_worker_from_server_data_transfer(self, agent_id):
         b_p_res = self.broadcast_protocol.to_worker_from_server_data_transfer(agent_id)
 
         # accounting for received data size
         wz_received_size = get_obj_size(b_p_res)
-        self.stats['wz']['mbytes_sent_to_worker'].append(wz_received_size / (1024*1024))
+        self.running_stats['wz']['mbytes_sent_to_worker'].append(wz_received_size / (1024 * 1024))
 
         return b_p_res
 
@@ -50,9 +59,9 @@ class BroadcastReportingUtilities:
             agent_id, grad_dict, encoder_data_sent_by_server)
 
         # accounting for sent data size
-        self.stats['wz']['mbytes_moved_total'].append(get_obj_size(b_p_res) / (1024*1024) +
-                                                      self.stats['wz']['mbytes_sent_to_worker'][-1])
-        assert len(self.stats['wz']['mbytes_moved_total']) == len(self.stats['wz']['mbytes_sent_to_worker'])
+        self.running_stats['wz']['mbytes_moved_total'].append(get_obj_size(b_p_res) / (1024 * 1024) +
+                                                              self.running_stats['wz']['mbytes_sent_to_worker'][-1])
+        assert len(self.running_stats['wz']['mbytes_moved_total']) == len(self.running_stats['wz']['mbytes_sent_to_worker'])
 
         return b_p_res
 
@@ -63,11 +72,11 @@ class BroadcastReportingUtilities:
         b_p_res = self.broadcast_protocol.encoding_process(agent_id, worker_grad_dict, prob_per_bin)
         return b_p_res
 
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data):
+    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, *args, **kwargs):
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
 
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(
-            agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data)
+            agent_id, worker_broadcast_data, worker_count, *args, **kwargs)
 
         original_flat = np.concatenate([v.flatten().cpu()
                                         for v in self.original_grads.values()])
@@ -78,22 +87,25 @@ class BroadcastReportingUtilities:
         # WZ comparison
         mse_f = lambda x,y: np.mean((x-y) ** 2)
         mape_f = lambda x,y: np.mean(np.abs(x - y)) / np.mean(np.abs(x) + 1e-8) * 100
-        self.stats['wz']['mse'].append(mse_f(original_flat, reconstructed_flat_wz))
-        self.stats['wz']['mape%'].append(mape_f(original_flat, reconstructed_flat_wz))
+        self.running_stats['wz']['mse'].append(mse_f(original_flat, reconstructed_flat_wz))
+        self.running_stats['wz']['mape%'].append(mape_f(original_flat, reconstructed_flat_wz))
 
         # Raw comparison
         raw_size = get_obj_size(original_flat)
-        self.stats['raw16']['mbytes_moved_total'].append(raw_size / (1024*1024))
-        self.stats['raw16']['mse'].append(0)
-        self.stats['raw16']['mape%'].append(0)
+        self.running_stats['raw16']['mbytes_moved_total'].append(raw_size / (1024 * 1024))
+        self.running_stats['raw16']['mse'].append(0)
+        self.running_stats['raw16']['mape%'].append(0)
 
         # Entropy comparison
         entropy_encoded_data = entropy_coding(original_flat)
         recons_entropy = entropy_decoding(entropy_encoded_data, original_flat.dtype)
         entropy_size = get_obj_size(entropy_encoded_data)
-        self.stats['entropy']['mbytes_moved_total'].append(entropy_size / (1024*1024))
-        self.stats['entropy']['mse'].append(mse_f(original_flat, recons_entropy))
-        self.stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mbytes_moved_total'].append(entropy_size / (1024 * 1024))
+        self.running_stats['entropy']['mse'].append(mse_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
+
+        if len(self.running_stats['entropy']['mape%'])==worker_count:
+            self.reset_running_stats_round_end()
 
         return reconstructed_grads
 
@@ -150,4 +162,4 @@ if __name__ == '__main__':
 
     # report --------------------------------
     print("Compression Reporting:")
-    pprint.pprint(broadcast_prot.stats)
+    pprint.pprint(broadcast_prot.running_stats)

@@ -7,6 +7,19 @@ import numpy as np
 import pytorch_lightning as pl
 
 
+def get_real_bin_prob(bin_no, bin_count):
+    temp = bin_no.detach().clone()
+    bin_appearance_counts = torch.unique(temp, return_counts=True)
+    practical_p_u=temp.float()
+    for b, count in zip(*bin_appearance_counts):
+        practical_p_u[practical_p_u == b] = count / len(bin_no)
+
+    bin_prob_vec = [0.0] * bin_count
+    for b, count in zip(*bin_appearance_counts):
+        bin_prob_vec[b] = float((count / len(bin_no)).cpu())
+    return practical_p_u, torch.tensor(bin_prob_vec)
+
+
 class PL_EncoderDecoder_ANN(pl.LightningModule):
     def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1, lr=1e-4, reconst_ld=100, *args, **kwargs):
         super().__init__()
@@ -38,26 +51,18 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
         return loss, reconstruct, single_grad_param, bin_no, p_u, bins_probs, prior_probs
 
-    @staticmethod
-    def mape(pred, target, eps=1e-8):
-        return torch.mean(torch.abs((target - pred) / (target.abs() + eps))) * 100
-
     # todo reduce workload by reusing the logit bin values before softmax/gumble from loss calc
-    def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no, p_u, bins_probs, prior_probs):
+    def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no_vec, p_u, bins_probs, prior_probs):
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
 
         self.log(f'{name_prefix}_loss', loss, prog_bar=True)
-        recons_loss = self.mape(inp_rec, inp)
+        recons_loss = torch.mean(torch.abs((inp - inp_rec) / (inp.abs() + 1e-8))) * 100
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
         self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
-        bin_appearance_counts = torch.unique(bin_no, return_counts=True)
-        practical_p_u = bin_no.detach().clone().float()
-        for b, count in zip(*bin_appearance_counts):
-            practical_p_u[practical_p_u == b] = count / len(bin_no)
-        temp = torch.mean(-torch.log2(practical_p_u + 1e-12))
-        self.log(f'{name_prefix}_real_bit_r', temp, prog_bar=True)
+        practical_p_u, _ = get_real_bin_prob(bin_no_vec, self.bin_count)
+        self.log(f'{name_prefix}_real_bit_r', torch.mean(-torch.log2(practical_p_u + 1e-12)), prog_bar=True)
 
     def training_step(self, batch, batch_idx):
         res = self.compute_loss(batch, batch_idx)
@@ -116,8 +121,8 @@ class WZQuantizer:
     def bin_count(self):
         return self.wz_pl_model.bin_count
 
-    def get_bin_probs(self):
-        return None
+    # def get_bin_probs(self):
+    #     return None
 
     def encoding_process(self, grad_vector, batch_size=500_000):
         # from components.broadcast_components.quantizer.simple import simple_quantize
