@@ -3,7 +3,7 @@ from typing import List, Dict
 import numpy as np
 import torch
 from lightning import seed_everything
-from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN
+from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
 
 
@@ -28,7 +28,7 @@ def change_dtype_recursive(obj, dtype):
     elif isinstance(obj, dict):
         return {k:change_dtype_recursive(v, dtype) for k, v in obj.items()}
     else:
-        raise TypeError
+        raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
 
 
 # todo combine bias and weight into one key in dict
@@ -86,57 +86,64 @@ class WZBroadcastProtocol:
 
     # todo do compression for stuff sent to server
     def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
-        quantizer_decoder_state_dict, prob_per_bin = encoder_data_sent_by_server
-        encoded_grad_data, min_v, max_v, dtype = self.encoding_process(agent_id, grad_dict, prob_per_bin)
+        quantizer_decoder_state_dict = encoder_data_sent_by_server
+
+        #**********
+        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_decoder_state_dict)
+
+        bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
+
+        bin_count = self.wz_quantizer_list[agent_id].bin_count
+        prob_per_bin = [get_real_bin_prob(b, bin_count)[1] for b in bins_vector] \
+            if self.wz_pl_model_class == 'RNN' else get_real_bin_prob(bins_vector, bin_count)[1]
+        bin_vec_compressed = ??(bins_vector, prob_per_bin)
 
         # change the dtype of the encoded data to float16
-        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float16)
-        return encoded_grad_data, min_v, max_v, dtype
+        min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
+        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float8_e4m3fn)
+        return bin_vec_compressed, min_v, max_v, prob_per_bin
 
     # todo do compression for stuff sent to workers
     def to_worker_from_server_data_transfer(self, agent_id):
         quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
-        quantizer_encoder_state_dict = {k: v.to(torch.float16) for k, v in quantizer_encoder_state_dict.items()}
-        prob_per_bin = self.wz_quantizer_list[agent_id].get_bin_probs().to(torch.float16)
 
-        quantizer_encoder_state_dict, prob_per_bin =\
-            change_dtype_recursive([quantizer_encoder_state_dict, prob_per_bin], torch.float16)
-        return quantizer_encoder_state_dict, prob_per_bin
+        quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
+        return quantizer_encoder_state_dict
 
     # %%
-    def encoding_process(self, agent_id, worker_grad_dict, prob_per_bin):
+    def encoding_process(self, agent_id, worker_grad_dict):
         # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
         # return worker_grad_dict, min_v, max_v, 0
 
-        worker_grad_dict, prob_per_bin = change_dtype_recursive([worker_grad_dict, prob_per_bin], torch.float32)
+        worker_grad_dict = change_dtype_recursive(worker_grad_dict, torch.float32)
+        #**********
 
         grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(worker_grad_dict)
 
         quantizer = self.wz_quantizer_list[agent_id]
         bin_data = quantizer.encoding_process(grad_flat_normal)
 
-        encoded_grad_data = bin_data#entropy_coding(bin_data, prob_per_bin)
-
-        return encoded_grad_data, min_v, max_v, bin_data.dtype
+        return bin_data, min_v, max_v
 
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data):
         # return worker_broadcast_data[0]
-
-        encoded_data, min_v, max_v, dtype = worker_broadcast_data
-        worker_grad_dict, prob_per_bin = change_dtype_recursive([min_v, max_v], torch.float32)
 
         # assuming that previous_data has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
 
-        quantizer = self.wz_quantizer_list[agent_id]
+        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
+        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
+        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
+        bin_data = ??(bin_vec_compressed, prob_per_bin)
+        #**********
 
-        quantized_decoded_data = encoded_data#entropy_decoding(encoded_data, dtype)
+        quantizer = self.wz_quantizer_list[agent_id]
 
         model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
         side_info_data_list = [] if self.warmup else self.side_info_data_list
-        res_vector = quantizer.decoding_process(quantized_decoded_data, side_info_data_list, model_size)
+        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
         result_dict = recover_shape_and_denormal_to_dict(res_vector, global_model_dims, min_v, max_v)
 

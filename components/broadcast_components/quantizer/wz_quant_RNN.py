@@ -29,7 +29,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
         tau_t = self.tau * np.exp(self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
-        reconstruct, bins, onehot_bin, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
+        reconstruct, bins_no, soft_codes, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         loss = 0.0
         # assert 1 > self.reconst_ld > 0
@@ -41,13 +41,16 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             loss = loss + self.reconst_ld * dist
 
             # rate component of the loss
-            p_ux = onehot_bin[i][torch.arange(onehot_bin[i].size(0)), bins[i]]
-            p_u = prior_probs[i][torch.arange(onehot_bin[i].size(0)), bins[i]]
+            p_ux = soft_codes[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
+            p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12))) #* (1 - self.reconst_ld)
         loss = loss #/ self.coding_model.planes
 
-        unified_bins = self.unify_bins([b.detach() for b in bins])
-        return loss, reconstruct[-1], single_grad_param, unified_bins, p_u, bins, prior_probs
+        return loss, reconstruct[-1], single_grad_param, bins_no, p_u, soft_codes, prior_probs
+
+    def log_metrics(self, name_prefix, loss, inp_rec, inp, bins_no_mat, p_u, bins_probs, prior_probs):
+        unified_bins = self.unify_bins([b.detach() for b in bins_no_mat])
+        super().log_metrics(name_prefix, loss, inp_rec, inp, unified_bins, p_u, bins_probs, prior_probs)
 
     def encode_net(self, grad_vector):
         bins_list, _ = self.coding_model.encode(grad_vector)
