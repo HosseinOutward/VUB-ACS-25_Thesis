@@ -1,28 +1,59 @@
 from typing import List, Dict
-import numpy as np
 import torch
 from lightning import seed_everything
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
 from components.broadcast_components.compressor.rans import rans_encode, rans_decode
+import pickle
+import gzip
+import numpy as np
 
 
+#%%
+def _convert_item_recursive(item):
+    if isinstance(item, np.ndarray):
+        return item
+    elif isinstance(item, torch.Tensor):
+        return item.cpu().numpy()
+    elif isinstance(item, dict):
+        return {k: _convert_item_recursive(v) for k, v in item.items()}
+    elif isinstance(item, (list, tuple)):
+        return [_convert_item_recursive(x) for x in item]
+    elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
+        # Handle numba lists or other types by converting to numpy array
+        numpy_dtype = eval('np.'+str(item._dtype))
+        return np.array(item, dtype=numpy_dtype)
+    else:
+        # If conversion fails, keep as-is and let pickle handle it
+        # print('** >> Warning: Unable to convert item of type {}. Keeping it as is. << **'.format(type(item)))
+        # return item
+        raise
+
+
+def compress_data_list(data_list):
+    # return data_list
+    serializable_list = _convert_item_recursive(data_list)
+
+    # Serialize and compress
+    pickled_data = pickle.dumps(serializable_list, protocol=pickle.HIGHEST_PROTOCOL)
+    compressed_data = gzip.compress(pickled_data, compresslevel=6)
+    return compressed_data
+
+
+def decompress_data_list(compressed_data):
+    # return compressed_data
+    decompressed_data = gzip.decompress(compressed_data)
+    data_list = pickle.loads(decompressed_data)
+    return data_list
+
+
+#%%
 def change_dtype_recursive(obj, dtype):
     if isinstance(obj, torch.Tensor):
         return obj.to(dtype)
     elif isinstance(obj, np.ndarray):
-        dtype = {
-            torch.float32: np.float32,
-            torch.float64: np.float64,
-            torch.float16: np.float16,
-            torch.int8: np.int8,
-            torch.int16: np.int16,
-            torch.int32: np.int32,
-            torch.int64: np.int64,
-            torch.uint8: np.uint8,
-            torch.bool: np.bool_,
-        }[dtype]
-        return obj.astype(dtype)
+        numpy_dtype = torch.tensor([], dtype=dtype).numpy().dtype
+        return obj.astype(numpy_dtype)
     elif isinstance(obj, (list, tuple)):
         return [change_dtype_recursive(x, dtype) for x in obj]
     elif isinstance(obj, dict):
@@ -31,6 +62,7 @@ def change_dtype_recursive(obj, dtype):
         raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
 
 
+#%%
 # todo combine bias and weight into one key in dict
 def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
     if min_v is None and max_v is None:
@@ -84,11 +116,12 @@ class WZBroadcastProtocol:
 
         self.last_recent_grads_list = [None] * agent_count
 
-    # todo do compression for stuff sent to server
     def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
-        quantizer_decoder_state_dict = encoder_data_sent_by_server
+        quantizer_decoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
 
         #**********
+        quantizer_decoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
+                                        for k, v in quantizer_decoder_state_dict.items()}
         self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_decoder_state_dict)
 
         bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
@@ -107,16 +140,16 @@ class WZBroadcastProtocol:
         min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
         prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
 
-        return bin_vec_compressed, min_v, max_v, prob_per_bin
+        return compress_data_list((bin_vec_compressed, min_v, max_v, prob_per_bin))
 
-    # todo do compression for stuff sent to workers
     def to_worker_from_server_data_transfer(self, agent_id):
         quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
 
         quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
-        return quantizer_encoder_state_dict
+        return compress_data_list(quantizer_encoder_state_dict)
 
     # %%
+    # todo use the basic warmup quantizer to compress and decompress the later encoder state dict
     def encoding_process(self, agent_id, worker_grad_dict):
         # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
         # return worker_grad_dict, min_v, max_v, 0
@@ -144,7 +177,7 @@ class WZBroadcastProtocol:
         model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
         # decompress the data received from the worker
-        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
+        bin_vec_compressed, min_v, max_v, prob_per_bin = decompress_data_list(worker_broadcast_data)
         prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
         min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
 
@@ -193,7 +226,7 @@ class WZBroadcastProtocol:
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
         )
         self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.side_info_data_list, batch_size=10_000)
+            last_recent_grads, self.side_info_data_list, batch_size=15_000)
 
 
 if __name__ == "__main__":
@@ -219,9 +252,14 @@ if __name__ == "__main__":
     }
 
     grad_test_data = [
-            [{k: torch.normal(0,1,size=v).to('cuda') * 2 - 1 for k, v in model_shape_dict.items()}
-            for _ in range(worker_count)]
+            [{k: torch.normal(0,1,size=v).to('cuda') for k, v in model_shape_dict.items()}
+                for _ in range(worker_count)]
         for _ in range(rounds)]
+
+    for i in range(1,rounds):
+        for j in range(1, worker_count):
+            for k, v in grad_test_data[i][j].items():
+                grad_test_data[i][j][k] = grad_test_data[i-1][j-1][k] + v * 0.1
 
     # simulate the WZ encoding and reconstruction process --------------------------------
     broadcast_prot = WZBroadcastProtocol(worker_count,'RNN',
