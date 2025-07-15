@@ -1,6 +1,5 @@
 import copy
 
-import numba.core.types
 import numpy as np
 import torch
 from lightning import seed_everything
@@ -114,6 +113,22 @@ class BroadcastReportingUtilities:
 
         return reconstructed_grads
 
+    def plot_stats(self):
+        import matplotlib.pyplot as plt
+
+        for method, stats in self.stats.items():
+            plt.figure(figsize=(10, 6))
+            plt.plot(stats['mbytes_moved_total'], label='Bytes Moved Total')
+            plt.plot(stats['mbytes_sent_to_worker'], label='Bytes Sent to Worker')
+            plt.plot(stats['mse'], label='MSE')
+            plt.plot(stats['mape%'], label='MAPE %')
+            plt.title(f'Broadcast Protocol Statistics - {method}')
+            plt.xlabel('Round')
+            plt.ylabel('Value')
+            plt.legend()
+            plt.grid()
+            plt.show()
+
 
 if __name__ == '__main__':
     import pprint
@@ -152,8 +167,8 @@ if __name__ == '__main__':
             for k, v in grad_test_data[i][j].items():
                 grad_test_data[i][j][k] = grad_test_data[i-1][j-1][k] + v * 0.1
 
-    broadcast_prot_base = WZBroadcastProtocol(worker_count,'RNN',
-            train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=2)
+    broadcast_prot_base = WZBroadcastProtocol(worker_count,'RNN', tau=5,
+            train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=4)
     broadcast_prot = BroadcastReportingUtilities(broadcast_prot_base)
 
     # simulate the WZ encoding and reconstruction process --------------------------------

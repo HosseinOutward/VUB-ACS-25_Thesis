@@ -1,5 +1,3 @@
-from numba.core.types import float32
-
 from components.broadcast_components.quantizer.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
 import torch

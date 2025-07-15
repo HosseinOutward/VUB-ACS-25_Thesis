@@ -3,7 +3,7 @@ import torch
 from lightning import seed_everything
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
-from components.broadcast_components.compressor.rans import rans_encode, rans_decode
+from components.broadcast_components.compressor.rans_coding import rans_encode, rans_decode
 import pickle
 import gzip
 import numpy as np
@@ -110,9 +110,9 @@ class WZBroadcastProtocol:
                     inp_dim=1, side_info_size=1, *args, **kwargs).to(torch.float32),
                 count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
 
-        print('********* not loading base model from any file')
-        # for i in range(agent_count):
-            # self.wz_quantizer_list[i].wz_pl_model.load_from_checkpoint()
+        path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
+        for i in range(agent_count):
+            self.wz_quantizer_list[i].wz_pl_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
         self.last_recent_grads_list = [None] * agent_count
 
@@ -121,12 +121,13 @@ class WZBroadcastProtocol:
 
         #**********
         quantizer_decoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
-                                        for k, v in quantizer_decoder_state_dict.items()}
+                                         for k, v in quantizer_decoder_state_dict.items()}
         self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_decoder_state_dict)
 
+        #**********
         bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
 
-        # compress the bins_vector using RANS
+        #********** compress the bins_vector using RANS
         bin_count = self.wz_quantizer_list[agent_id].bin_count
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
             prob_per_bin = [get_real_bin_prob(b, bin_count)[1].numpy() for b in bins_vector]
@@ -178,12 +179,12 @@ class WZBroadcastProtocol:
 
         # decompress the data received from the worker
         bin_vec_compressed, min_v, max_v, prob_per_bin = decompress_data_list(worker_broadcast_data)
+
         prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
         min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
 
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
-            bin_data = [rans_decode(bvc, prob_per_bin[i], model_size)
-                        for i, bvc in enumerate(bin_vec_compressed)]
+            bin_data = [rans_decode(bvc, prob_per_bin[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
         else:
             bin_data = rans_decode(bin_vec_compressed, prob_per_bin, model_size)
 
@@ -221,12 +222,13 @@ class WZBroadcastProtocol:
                 lr=qz.wz_pl_model.lr,
                 bins_per_plane=qz.wz_pl_model.bins_per_plane,
                 num_planes=qz.wz_pl_model.num_planes,
+                tau=qz.wz_pl_model.tau,
             ).to(torch.float32),
             count_side_info_data=len(self.side_info_data_list),
             metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
         )
         self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.side_info_data_list, batch_size=15_000)
+            last_recent_grads, self.side_info_data_list, epoch=20, batch_size=15_000)
 
 
 if __name__ == "__main__":
@@ -263,7 +265,7 @@ if __name__ == "__main__":
 
     # simulate the WZ encoding and reconstruction process --------------------------------
     broadcast_prot = WZBroadcastProtocol(worker_count,'RNN',
-                train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=2)
+                train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=4)
     prev = []
     for round, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
