@@ -264,6 +264,7 @@ class WZQuantizer:
 
         trainer = pl.Trainer(
             accelerator="cuda",
+            num_sanity_val_steps=0,
             enable_checkpointing=False,
             enable_model_summary=False,
             max_epochs=epoch,

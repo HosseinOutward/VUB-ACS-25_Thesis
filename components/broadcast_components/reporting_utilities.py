@@ -66,7 +66,8 @@ class BroadcastReportingUtilities:
         # accounting for sent data size
         self.running_stats['wz']['mbytes_moved_total'].append(get_obj_size(b_p_res) / (1024 * 1024) +
                                                               self.running_stats['wz']['mbytes_sent_to_worker'][-1])
-        assert len(self.running_stats['wz']['mbytes_moved_total']) == len(self.running_stats['wz']['mbytes_sent_to_worker'])
+        assert len(self.running_stats['wz']['mbytes_moved_total']) ==\
+                len(self.running_stats['wz']['mbytes_sent_to_worker'])
 
         return b_p_res
 
@@ -79,7 +80,6 @@ class BroadcastReportingUtilities:
 
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, *args, **kwargs):
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
-        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
 
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(
             agent_id, worker_broadcast_data, worker_count, *args, **kwargs)
@@ -131,21 +131,26 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
     # --------------------------------
-    worker_count = 2
-    rounds = 2
+    worker_count = 5
+    rounds = 5
     seed_everything(42)
 
     # load testing data --------------------------------
     model_shape_dict = {
         f'aaa_{i}': (*np.random.randint(1, 5, size=np.random.randint(3)),
-            (np.random.randint(10_000, 100_000)*1000)//1000)
+            (np.random.randint(1_000, 10_000)//1000)*1000)
         for i in range(10)
     }
 
     grad_test_data = [
-            [{k: torch.normal(0,1,size=v).to('cuda') * 2 - 1 for k, v in model_shape_dict.items()}
-            for _ in range(worker_count)]
+            [{k: torch.normal(0,1,size=v).to('cuda') for k, v in model_shape_dict.items()}
+                for _ in range(worker_count)]
         for _ in range(rounds)]
+
+    for i in range(1,rounds):
+        for j in range(1, worker_count):
+            for k, v in grad_test_data[i][j].items():
+                grad_test_data[i][j][k] = grad_test_data[i-1][j-1][k] + v * 0.1
 
     broadcast_prot_base = WZBroadcastProtocol(worker_count,'RNN',
             train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=2)
