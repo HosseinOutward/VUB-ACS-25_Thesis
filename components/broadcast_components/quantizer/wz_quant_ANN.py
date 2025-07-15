@@ -367,7 +367,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ax2.set_ylabel('reconstruction per bin')
 
     ax2.set_xlim(true_min_v, true_max_v)
-    ax2.legend(loc="upper right")
+    # ax2.legend(loc="upper right")
     ax2.set_title('What if x range was forced to a specific bin, plot per bin')
 
     plt.tight_layout()
