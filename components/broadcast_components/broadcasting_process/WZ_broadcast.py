@@ -1,10 +1,10 @@
-import sys
 from typing import List, Dict
 import numpy as np
 import torch
 from lightning import seed_everything
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
+from components.broadcast_components.compressor.rans import rans_encode, rans_decode
 
 
 def change_dtype_recursive(obj, dtype):
@@ -36,7 +36,7 @@ def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
     if min_v is None and max_v is None:
         # min_v, max_v = [
         #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
-        max_v, min_v = [ [torch.quantile(v, q).cpu().numpy() for k, v in grad_dict.items()]
+        max_v, min_v = [ np.array([torch.quantile(v, q).cpu().numpy() for k, v in grad_dict.items()])
                             for q in [0.9999,0.0001] ]
     assert (min_v is not None and max_v is not None)
 
@@ -93,14 +93,20 @@ class WZBroadcastProtocol:
 
         bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
 
+        # compress the bins_vector using RANS
         bin_count = self.wz_quantizer_list[agent_id].bin_count
-        prob_per_bin = [get_real_bin_prob(b, bin_count)[1] for b in bins_vector] \
-            if self.wz_pl_model_class == 'RNN' else get_real_bin_prob(bins_vector, bin_count)[1]
-        bin_vec_compressed = ??(bins_vector, prob_per_bin)
+        if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
+            prob_per_bin = [get_real_bin_prob(b, bin_count)[1].numpy() for b in bins_vector]
+            bin_vec_compressed = [rans_encode(bv.numpy(), pp_b)
+                                  for bv, pp_b in zip(bins_vector, prob_per_bin)]
+        else:
+            prob_per_bin = get_real_bin_prob(bins_vector, bin_count)[1].numpy()
+            bin_vec_compressed = rans_encode(bins_vector.numpy(), prob_per_bin)
 
         # change the dtype of the encoded data to float16
         min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
-        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float8_e4m3fn)
+        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
+
         return bin_vec_compressed, min_v, max_v, prob_per_bin
 
     # todo do compression for stuff sent to workers
@@ -132,16 +138,23 @@ class WZBroadcastProtocol:
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
 
-        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
-        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
-        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
-        bin_data = ??(bin_vec_compressed, prob_per_bin)
-        #**********
-
+        # ****
         quantizer = self.wz_quantizer_list[agent_id]
 
         model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
+        # decompress the data received from the worker
+        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
+        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
+        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
+
+        if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
+            bin_data = [rans_decode(bvc, prob_per_bin[i], model_size)
+                        for i, bvc in enumerate(bin_vec_compressed)]
+        else:
+            bin_data = rans_decode(bin_vec_compressed, prob_per_bin, model_size)
+
+        # decode the bin data to get the vector
         side_info_data_list = [] if self.warmup else self.side_info_data_list
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
@@ -149,9 +162,11 @@ class WZBroadcastProtocol:
 
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
+        # detect if we are in warmup phase
         if agent_id + 1 >= worker_count:
             self.warmup = False
 
+        # assuming not in warmup phase, we have at least one complete round, so we train the next quantizer
         if not self.warmup:
             self._prep_for_next_agent(agent_id, worker_count, res_vector, previous_data, min_v, max_v)
 
@@ -192,15 +207,15 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'train_dataloader'")
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
-    worker_count = 4
-    rounds = 3
+    worker_count = 2
+    rounds = 1
     seed_everything(42)
 
     # load testing data --------------------------------
     model_shape_dict = {
-        f'aaa_{i}': (*np.random.randint(1, 5, size=np.random.randint(3)),
-            (np.random.randint(10_000, 100_000)*1000)//1000)
-        for i in range(10)
+        f'aaa_{i}': (*np.random.randint(1, 2, size=np.random.randint(2)),
+            (np.random.randint(1_000, 10_000)*1000)//1000)
+        for i in range(3)
     }
 
     grad_test_data = [

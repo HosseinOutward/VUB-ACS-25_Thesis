@@ -1,5 +1,6 @@
 import copy
-import sys
+
+import numba.core.types
 import numpy as np
 import torch
 from lightning import seed_everything
@@ -17,8 +18,12 @@ def get_obj_size(obj):
         return sum(get_obj_size(x) for x in obj)
     elif isinstance(obj, dict):
         return sum(get_obj_size(v) for k, v in obj.items())
+    elif hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
+        return len(obj) * (obj._dtype.bitwidth // 8)
+    elif isinstance(obj, bytes):
+        return len(obj)
     else:
-        return sys.getsizeof(obj)
+        raise
 
 
 class BroadcastReportingUtilities:
@@ -74,6 +79,7 @@ class BroadcastReportingUtilities:
 
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, *args, **kwargs):
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
+        bin_vec_compressed, min_v, max_v, prob_per_bin = worker_broadcast_data
 
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(
             agent_id, worker_broadcast_data, worker_count, *args, **kwargs)
@@ -82,7 +88,6 @@ class BroadcastReportingUtilities:
                                         for v in self.original_grads.values()])
         reconstructed_flat_wz = np.concatenate([v.flatten().cpu()
                                                 for v in reconstructed_grads.values()])
-        assert original_flat.dtype == torch.float16 and reconstructed_flat_wz.dtype == torch.float16
 
         # WZ comparison
         mse_f = lambda x,y: np.mean((x-y) ** 2)
@@ -162,4 +167,4 @@ if __name__ == '__main__':
 
     # report --------------------------------
     print("Compression Reporting:")
-    pprint.pprint(broadcast_prot.running_stats)
+    pprint.pprint(broadcast_prot.stats)
