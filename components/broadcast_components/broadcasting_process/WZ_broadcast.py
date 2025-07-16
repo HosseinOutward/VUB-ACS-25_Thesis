@@ -198,6 +198,15 @@ class WZBroadcastProtocol:
 
         return result_dict
 
+    def model_transfer_to_worker_from_server(self, server_model_state_dict):
+        res = change_dtype_recursive(server_model_state_dict, torch.float16)
+        compressed = compress_data_list(res)
+
+        res = decompress_data_list(compressed)
+        res = change_dtype_recursive(res, torch.float32)
+        recons = {k: torch.tensor(v) for k, v in res.items()}
+        return recons, compressed
+
     def _prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
         prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in previous_data]
         prev_d_flat += [res_vector]

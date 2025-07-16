@@ -290,10 +290,13 @@ class FLSimulator:
             agent_id, self.train_sampler.size_of_partition[agent_id],
         ) for agent_id in range(num_agents)]
 
-    def _set_local_models(self):
+    def _set_local_models(self, model_transfer_to_worker_from_server):
         # todo find a way for the optimizer configurations to work after grad aggregation
         for ag in self.agents:
-            ag.local_model = self.global_model.clone()
+            model = self.global_model.clone()
+            temp = model_transfer_to_worker_from_server(model.state_dict())[0]
+            model.load_state_dict(temp)
+            ag.local_model = model
             ag.local_model.args_for_f_on_grad['worker_id'] = ag.agent_id
 
     # todo doesnt work
@@ -314,7 +317,8 @@ class FLSimulator:
                 param.grad = grad_to_apply
         self.server_optimizer.step()
 
-    def do_train_global_model_and_set_local_model(self, shared_train_loader, num_epochs):
+    def do_train_global_model_and_set_local_model(self, shared_train_loader, num_epochs,
+                                                  model_transfer_to_worker_from_server):
         print(f'training global model on all data before simulation starts for {num_epochs} epochs')
         # self.shared_train_loader.sampler.offset = 'ALL'
         self.train_sampler.set_agent_partition('ALL')
@@ -327,7 +331,7 @@ class FLSimulator:
             enable_model_summary=False, )
         trainer.fit(self.global_model, shared_train_loader)
 
-        self._set_local_models()
+        self._set_local_models(model_transfer_to_worker_from_server)
 
     def run_simulation(self, broadcast_prot, post_training_report=True, pre_training_global_epochs=5):
         shared_train_loader = torch.utils.data.DataLoader(
@@ -341,7 +345,8 @@ class FLSimulator:
         # pre_training_global_epochs -----------------------------------------------
         if pre_training_global_epochs != 0:
             self.do_train_global_model_and_set_local_model(
-                shared_train_loader, num_epochs=pre_training_global_epochs)
+                shared_train_loader, pre_training_global_epochs,
+                broadcast_prot.model_transfer_to_worker_from_server)
 
         # cycle through communication rounds -----------------------------------------------
         past_decoded_grad_dict_list = []
@@ -354,7 +359,7 @@ class FLSimulator:
             report_metric(self.global_model, shared_train_loader, 'train')
 
             # ------------- Train each agent for the number of epochs
-            self._set_local_models()
+            self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
             for ag_id, ag in enumerate(self.agents):
                 print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
 
@@ -382,7 +387,7 @@ class FLSimulator:
             # ------------- Aggregate pl_models from all agents
             self._aggregate_models(past_decoded_grad_dict_list)
 
-        self._set_local_models()
+        self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
 
         # final global model report -----------------------------------------------
         print("\nfinal global model metrics")

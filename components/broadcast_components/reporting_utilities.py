@@ -4,7 +4,8 @@ import numpy as np
 import torch
 from lightning import seed_everything
 
-from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
+from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
+    change_dtype_recursive, compress_data_list
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
 
 
@@ -29,9 +30,10 @@ class BroadcastReportingUtilities:
     def __init__(self, broadcast_prot:WZBroadcastProtocol):
         self.broadcast_protocol = broadcast_prot
         self.base_stat_dict = {
-            'wz': {'mbytes_moved_total': [], 'mbytes_sent_to_worker': [], 'mse': [], 'mape%': []},
-            'raw16': {'mbytes_moved_total': [], 'mse': [], 'mape%': []},
-            'entropy': {'mbytes_moved_total': [], 'mse': [], 'mape%': []}
+            'wz': {'mbytes_moved_total': [], 'mbytes_sent_to_worker': [], 'mse': [],
+                   'mape%': [], 'mbytes_sent_for_aggre': []},
+            'raw16': {'mbytes_moved_total': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
+            'entropy': {'mbytes_moved_total': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
         }
         self.stats = copy.deepcopy(self.base_stat_dict)
         self.running_stats = copy.deepcopy(self.base_stat_dict)
@@ -83,7 +85,7 @@ class BroadcastReportingUtilities:
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(
             agent_id, worker_broadcast_data, worker_count, *args, **kwargs)
 
-        original_flat = np.concatenate([v.flatten().cpu()
+        original_flat = np.concatenate([v.flatten().cpu().to(torch.float16)
                                         for v in self.original_grads.values()])
         reconstructed_flat_wz = np.concatenate([v.flatten().cpu()
                                                 for v in reconstructed_grads.values()])
@@ -112,6 +114,22 @@ class BroadcastReportingUtilities:
             self.reset_running_stats_round_end()
 
         return reconstructed_grads
+
+    def model_transfer_to_worker_from_server(self, server_model_state_dict):
+        recons, compr = self.broadcast_protocol.model_transfer_to_worker_from_server(server_model_state_dict)
+
+        wz_size = get_obj_size(recons)
+        self.running_stats['wz']['mbytes_sent_for_aggre'].append(wz_size / (1024 * 1024))
+
+        raw_size = get_obj_size(server_model_state_dict)
+        self.running_stats['wz']['mbytes_sent_for_aggre'].append(raw_size / (1024 * 1024))
+
+        res = change_dtype_recursive(server_model_state_dict, torch.float16)
+        res = compress_data_list(res)
+        entropy_size = get_obj_size(res)
+        self.running_stats['wz']['mbytes_sent_for_aggre'].append(entropy_size / (1024 * 1024))
+
+        return recons, compr
 
     def plot_stats(self):
         import matplotlib.pyplot as plt
