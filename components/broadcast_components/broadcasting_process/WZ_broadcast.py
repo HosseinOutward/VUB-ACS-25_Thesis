@@ -3,7 +3,7 @@ import torch
 from lightning import seed_everything
 from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
-from components.broadcast_components.compressor.rans_coding import rans_encode, rans_decode
+from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 import pickle
 import gzip
 import numpy as np
@@ -137,13 +137,13 @@ class WZBroadcastProtocol:
             prob_per_bin = [get_real_bin_prob(b, bin_count)[1].numpy() for b in bins_vector]
             prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
             temp=change_dtype_recursive(prob_per_bin, torch.float32)
-            bin_vec_compressed = [rans_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
+            bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
         else:
             bin_count = self.wz_quantizer_list[agent_id].bin_count
             prob_per_bin = get_real_bin_prob(bins_vector, bin_count)[1].numpy()
             prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
             temp=change_dtype_recursive(prob_per_bin, torch.float32)
-            bin_vec_compressed = rans_encode(bins_vector.numpy(), temp)
+            bin_vec_compressed = rans_batch_encode(bins_vector.numpy(), temp)
 
         # change the dtype of the encoded data to float16
         min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
@@ -176,9 +176,9 @@ class WZBroadcastProtocol:
         min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
 
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
-            bin_data = [rans_decode(bvc, prob_per_bin[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
+            bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
         else:
-            bin_data = rans_decode(bin_vec_compressed, prob_per_bin, model_size)
+            bin_data = rans_batch_decode(bin_vec_compressed, prob_per_bin, model_size)
 
         # decode the bin data to get the vector
         side_info_data_list = [] if self.warmup else self.side_info_data_list
