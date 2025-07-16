@@ -128,18 +128,22 @@ class WZBroadcastProtocol:
         bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
 
         #********** compress the bins_vector using RANS
-        bin_count = self.wz_quantizer_list[agent_id].bin_count
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
+            bin_count = self.wz_quantizer_list[agent_id].wz_pl_model.bins_per_plane
             prob_per_bin = [get_real_bin_prob(b, bin_count)[1].numpy() for b in bins_vector]
+            prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
+            temp=change_dtype_recursive(prob_per_bin, torch.float32)
             bin_vec_compressed = [rans_encode(bv.numpy(), pp_b)
-                                  for bv, pp_b in zip(bins_vector, prob_per_bin)]
+                                  for bv, pp_b in zip(bins_vector, temp)]
         else:
+            bin_count = self.wz_quantizer_list[agent_id].bin_count
             prob_per_bin = get_real_bin_prob(bins_vector, bin_count)[1].numpy()
-            bin_vec_compressed = rans_encode(bins_vector.numpy(), prob_per_bin)
+            prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
+            temp=change_dtype_recursive(prob_per_bin, torch.float32)
+            bin_vec_compressed = rans_encode(bins_vector.numpy(), temp)
 
         # change the dtype of the encoded data to float16
         min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
-        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
 
         return compress_data_list((bin_vec_compressed, min_v, max_v, prob_per_bin))
 
