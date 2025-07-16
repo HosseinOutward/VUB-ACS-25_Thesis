@@ -125,7 +125,11 @@ class WZBroadcastProtocol:
         self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_decoder_state_dict)
 
         #**********
-        bins_vector, min_v, max_v = self.encoding_process(agent_id, grad_dict)
+        grad_dict = change_dtype_recursive(grad_dict, torch.float32)
+        grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(grad_dict)
+
+        quantizer = self.wz_quantizer_list[agent_id]
+        bins_vector = quantizer.encoding_process(grad_flat_normal)
 
         #********** compress the bins_vector using RANS
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
@@ -133,8 +137,7 @@ class WZBroadcastProtocol:
             prob_per_bin = [get_real_bin_prob(b, bin_count)[1].numpy() for b in bins_vector]
             prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
             temp=change_dtype_recursive(prob_per_bin, torch.float32)
-            bin_vec_compressed = [rans_encode(bv.numpy(), pp_b)
-                                  for bv, pp_b in zip(bins_vector, temp)]
+            bin_vec_compressed = [rans_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
         else:
             bin_count = self.wz_quantizer_list[agent_id].bin_count
             prob_per_bin = get_real_bin_prob(bins_vector, bin_count)[1].numpy()
@@ -154,21 +157,6 @@ class WZBroadcastProtocol:
         return compress_data_list(quantizer_encoder_state_dict)
 
     # %%
-    # todo use the basic warmup quantizer to compress and decompress the later encoder state dict
-    def encoding_process(self, agent_id, worker_grad_dict):
-        # worker_grad_dict={k:v*1.1 for k, v in worker_grad_dict.items()}
-        # return worker_grad_dict, min_v, max_v, 0
-
-        worker_grad_dict = change_dtype_recursive(worker_grad_dict, torch.float32)
-        #**********
-
-        grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(worker_grad_dict)
-
-        quantizer = self.wz_quantizer_list[agent_id]
-        bin_data = quantizer.encoding_process(grad_flat_normal)
-
-        return bin_data, min_v, max_v
-
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data):
         # return worker_broadcast_data[0]
 
