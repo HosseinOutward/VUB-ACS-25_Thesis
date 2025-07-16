@@ -30,10 +30,10 @@ class BroadcastReportingUtilities:
     def __init__(self, broadcast_prot:WZBroadcastProtocol):
         self.broadcast_protocol = broadcast_prot
         self.base_stat_dict = {
-            'wz': {'mbytes_moved_total': [], 'mbytes_sent_to_worker': [], 'mse': [],
+            'wz': {'mbytes_recived': [], 'mbytes_sent_to_worker': [], 'mse': [],
                    'mape%': [], 'mbytes_sent_for_aggre': []},
-            'raw16': {'mbytes_moved_total': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
-            'entropy': {'mbytes_moved_total': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
+            'raw16': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
+            'entropy': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
         }
         self.stats = copy.deepcopy(self.base_stat_dict)
         self.running_stats = copy.deepcopy(self.base_stat_dict)
@@ -65,9 +65,8 @@ class BroadcastReportingUtilities:
             agent_id, grad_dict, encoder_data_sent_by_server)
 
         # accounting for sent data size
-        self.running_stats['wz']['mbytes_moved_total'].append(get_obj_size(b_p_res) / (1024 * 1024) +
-                                                              self.running_stats['wz']['mbytes_sent_to_worker'][-1])
-        assert len(self.running_stats['wz']['mbytes_moved_total']) ==\
+        self.running_stats['wz']['mbytes_recived'].append(get_obj_size(b_p_res) / (1024 * 1024))
+        assert len(self.running_stats['wz']['mbytes_recived']) ==\
                 len(self.running_stats['wz']['mbytes_sent_to_worker'])
 
         return b_p_res
@@ -98,7 +97,7 @@ class BroadcastReportingUtilities:
 
         # Raw comparison
         raw_size = get_obj_size(original_flat)
-        self.running_stats['raw16']['mbytes_moved_total'].append(raw_size / (1024 * 1024))
+        self.running_stats['raw16']['mbytes_recived'].append(raw_size / (1024 * 1024))
         self.running_stats['raw16']['mse'].append(0)
         self.running_stats['raw16']['mape%'].append(0)
 
@@ -106,7 +105,7 @@ class BroadcastReportingUtilities:
         entropy_encoded_data = entropy_coding(original_flat)
         recons_entropy = entropy_decoding(entropy_encoded_data, original_flat.dtype)
         entropy_size = get_obj_size(entropy_encoded_data)
-        self.running_stats['entropy']['mbytes_moved_total'].append(entropy_size / (1024 * 1024))
+        self.running_stats['entropy']['mbytes_recived'].append(entropy_size / (1024 * 1024))
         self.running_stats['entropy']['mse'].append(mse_f(original_flat, recons_entropy))
         self.running_stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
 
@@ -118,34 +117,110 @@ class BroadcastReportingUtilities:
     def model_transfer_to_worker_from_server(self, server_model_state_dict):
         recons, compr = self.broadcast_protocol.model_transfer_to_worker_from_server(server_model_state_dict)
 
-        wz_size = get_obj_size(recons)
+        wz_size = get_obj_size(compr)
         self.running_stats['wz']['mbytes_sent_for_aggre'].append(wz_size / (1024 * 1024))
 
         raw_size = get_obj_size(server_model_state_dict)
-        self.running_stats['wz']['mbytes_sent_for_aggre'].append(raw_size / (1024 * 1024))
+        self.running_stats['raw16']['mbytes_sent_for_aggre'].append(raw_size / (1024 * 1024))
 
         res = change_dtype_recursive(server_model_state_dict, torch.float16)
         res = compress_data_list(res)
         entropy_size = get_obj_size(res)
-        self.running_stats['wz']['mbytes_sent_for_aggre'].append(entropy_size / (1024 * 1024))
+        self.running_stats['entropy']['mbytes_sent_for_aggre'].append(entropy_size / (1024 * 1024))
 
         return recons, compr
 
-    def plot_stats(self):
-        import matplotlib.pyplot as plt
 
-        for method, stats in self.stats.items():
-            plt.figure(figsize=(10, 6))
-            plt.plot(stats['mbytes_moved_total'], label='Bytes Moved Total')
-            plt.plot(stats['mbytes_sent_to_worker'], label='Bytes Sent to Worker')
-            plt.plot(stats['mse'], label='MSE')
-            plt.plot(stats['mape%'], label='MAPE %')
-            plt.title(f'Broadcast Protocol Statistics - {method}')
-            plt.xlabel('Round')
-            plt.ylabel('Value')
-            plt.legend()
-            plt.grid()
-            plt.show()
+def plot_stats(stat_dict):
+    import matplotlib.pyplot as plt
+
+    # sort stat_dict by these keys ['wz', 'entropy', 'raw16']
+    temp = ['wz', 'entropy', 'raw16']
+    assert all(k in stat_dict for k in temp), f"Some Key not found in stat_dict: {stat_dict.keys()}"
+    stat_dict = {k: stat_dict[k] for k in temp}
+
+    num_subplots = 3
+    fig, ax = plt.subplots(num_subplots, 1, figsize=(12, 6 * num_subplots), sharex=True)
+
+    colors_per_method = {
+        'wz': 'tab:blue',
+        'raw16': 'tab:purple',
+        'entropy': 'tab:green',
+    }
+    symbol_per_metric = {
+        'mbytes_recived': 'o',
+        'mbytes_sent_to_worker': 's',
+        'mbytes_sent_for_aggre': 'D',
+        'mse': 'x',
+        'mape%': '^',
+    }
+    lines_per_metric = {
+        'mbytes_recived': '-',
+        'mbytes_sent_to_worker': '--',
+        'mbytes_sent_for_aggre': '-.',
+        'mse': ':',
+        'mape%': '-',
+    }
+
+    #%%
+    # Plotting data transfer sizes on the first subplot (ax[1])
+    temp = np.sum(stat_dict['wz']['mbytes_recived'])*0
+    for method, metrics in stat_dict.items():
+        for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
+            if k_transfer in metrics:
+                temp += np.sum(metrics[k_transfer], axis=1)
+        ax[0].plot(temp, label=f'Total transfer - {method}', marker='o', color=colors_per_method[method], alpha=0.9)
+
+    ax[0].set_ylabel('MB')
+    ax[0].legend(loc='upper left')
+    ax[0].grid(True)
+    ax[0].set_title('Total Data Transfer Size')
+    #%%
+    for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre']:
+        for method, metrics in stat_dict.items():
+            plt_name = {
+                'mbytes_recived': 'Worker to Server',
+                'mbytes_sent_for_aggre': '(Aggregation) Server to Worker',
+            }[k_transfer]
+            ax[1].plot(np.sum(metrics[k_transfer], axis=1), label=f'{plt_name} - {method}',
+                       linestyle=lines_per_metric[k_transfer], marker=symbol_per_metric[k_transfer],
+                       color=colors_per_method[method], alpha=0.9)
+    temp = stat_dict['wz']['mbytes_sent_to_worker']
+    ax[1].plot(np.sum(temp, axis=1), linestyle=lines_per_metric[k_transfer],
+               label=f'{'Server to Worker'} - {'wz'}', alpha=0.9)
+
+    ax[1].set_ylabel('MB')
+    ax[1].legend(loc='upper left')
+    ax[1].grid(True)
+    ax[1].set_title('Breakdown of Data Transfer Size')
+
+    #%%
+    # Plotting MSE and MAPE on the second subplot (ax[2]) with a shared x-axis
+    ax2 = ax[2].twinx()
+    for k_transfer in ['mse', 'mape%']:
+        for method, metrics in stat_dict.items():
+            ax2.plot(np.mean(metrics[k_transfer], axis=1), label=f'{k_transfer.upper()} - {method}',
+                     linestyle=lines_per_metric[k_transfer], marker=symbol_per_metric[k_transfer],
+                     color=colors_per_method[method], alpha=0.9)
+
+    ax[2].set_xlabel('Rounds')
+    ax[2].set_ylabel('MSE', color='tab:blue')
+    ax[2].tick_params(axis='y', labelcolor='tab:blue')
+    ax[2].grid(True, which='both', axis='y', linestyle='-.', linewidth=0.5)
+
+    ax2.set_ylabel('MAPE %', color='tab:orange')
+    ax2.tick_params(axis='y', labelcolor='tab:orange')
+
+    ax[2].set_title('MSE and MAPE% Comparison')
+
+    # Combine legends from both y-axes
+    lines, labels = ax[2].get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines + lines2, labels + labels2, loc='best')
+
+    #%%
+    fig.tight_layout()
+    plt.show()
 
 
 if __name__ == '__main__':
@@ -176,8 +251,8 @@ if __name__ == '__main__':
     }
 
     grad_test_data = [
-            [{k: torch.normal(0,1,size=v).to('cuda') for k, v in model_shape_dict.items()}
-                for _ in range(worker_count)]
+        [{k: torch.normal(0,1,size=v).to('cuda') for k, v in model_shape_dict.items()}
+            for _ in range(worker_count)]
         for _ in range(rounds)]
 
     for i in range(1,rounds):
@@ -204,5 +279,4 @@ if __name__ == '__main__':
             prev.append(decoded_agent_broadcast)
 
     # report --------------------------------
-    print("Compression Reporting:")
-    pprint.pprint(broadcast_prot.stats)
+    plot_stats(broadcast_prot.stats)
