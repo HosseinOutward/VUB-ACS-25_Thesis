@@ -370,6 +370,7 @@ class FLSimulator:
 
                 gc.collect()
                 torch.cuda.empty_cache()
+                print(f"             + initiating broadcast")
 
                 server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
                 encoded_ag_broadcast = ag.get_worker_broadcast(
@@ -394,6 +395,6 @@ class FLSimulator:
         report_metric(self.global_model, shared_test_loader, 'test')
         report_metric(self.global_model, shared_train_loader, 'train')
 
-        del shared_train_loader
+        del shared_train_loader, shared_test_loader
         gc.collect()
         torch.cuda.empty_cache()
