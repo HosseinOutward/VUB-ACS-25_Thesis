@@ -1,5 +1,8 @@
 import gc
 from typing import List
+
+from pytorch_lightning.loggers import CSVLogger
+
 from components.other_utilities.brent_wz_models import EncoderDecoder
 import torch
 import torch.nn.functional as F
@@ -269,9 +272,9 @@ class WZQuantizer:
             enable_model_summary=False,
             max_epochs=epoch,
             enable_progress_bar=self.metric_report_flag,
-            log_every_n_steps=1 if self.metric_report_flag else None,
+            log_every_n_steps=1,
             callbacks=[NoValidationBar()] if self.metric_report_flag else [],
-            # logger=
+            logger=
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
