@@ -108,12 +108,13 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 # ---------------------------------------------
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
-                 metric_report_flag=False, train_sample_size=100_000, *args, **kwargs):
-        from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
+                 enable_progress_bar=False, train_sample_size=100_000, user_logger=None, *args, **kwargs):
+        from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
         assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
 
         self.val_indices = None
-        self.metric_report_flag = metric_report_flag
+        self.enable_progress_bar = enable_progress_bar
+        self.user_logger = user_logger
 
         self.train_sample_size = train_sample_size
 
@@ -128,7 +129,7 @@ class WZQuantizer:
     #     return None
 
     def encoding_process(self, grad_vector, batch_size=500_000):
-        # from components.broadcast_components.quantizer.simple import simple_quantize
+        # from components.broadcast_components.WZ_models.simple import simple_quantize
         # return simple_quantize(grad_vector)
 
         grad_tensor = torch.tensor(grad_vector).to(torch.float32)
@@ -162,7 +163,7 @@ class WZQuantizer:
     # todo separate the running of the model for ann and rnn
     def decoding_process(self, quantized_data, side_info_data_list,
                          element_count, batch_size=500_000):
-        # from components.broadcast_components.quantizer.simple import simple_dequantize
+        # from components.broadcast_components.WZ_models.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
         bins_tensor = torch.tensor(np.array(quantized_data))
@@ -223,7 +224,7 @@ class WZQuantizer:
 
         # --------------- val dataloader ---------------
         val_dataloader = None
-        if self.metric_report_flag:
+        if self.enable_progress_bar:
             all_indices = np.arange(len(train_dataset))
 
             self.val_indices = np.random.choice(all_indices, size=int(self.train_sample_size // 3), replace=False)
@@ -258,8 +259,9 @@ class WZQuantizer:
 
         # disable val progress bar due to pl bug
         NoValidationBar = None
-        if self.metric_report_flag:
-            print('training wz quantizer')
+        if self.enable_progress_bar:
+            print('          - training wz models')
+
             from pytorch_lightning.callbacks import TQDMProgressBar
             from tqdm import tqdm
             class NoValidationBar(TQDMProgressBar):
@@ -270,11 +272,11 @@ class WZQuantizer:
             num_sanity_val_steps=0,
             enable_checkpointing=False,
             enable_model_summary=False,
-            max_epochs=epoch,
-            enable_progress_bar=self.metric_report_flag,
             log_every_n_steps=1,
-            callbacks=[NoValidationBar()] if self.metric_report_flag else [],
-            logger=
+            max_epochs=epoch,
+            enable_progress_bar=self.enable_progress_bar,
+            callbacks=[NoValidationBar()] if self.enable_progress_bar else [],
+            logger=self.user_logger
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
@@ -407,7 +409,7 @@ if __name__ == "__main__":
     )
     wz_quantizer = WZQuantizer(wz_pl_model=pl_model,
                                count_side_info_data=len(side_info_data),
-                               train_sample_size=100_000, metric_report_flag=True)
+                               train_sample_size=100_000, enable_progress_bar=True)
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=10_000)
 
     # %%

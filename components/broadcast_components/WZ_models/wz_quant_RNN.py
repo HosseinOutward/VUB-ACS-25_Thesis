@@ -1,4 +1,4 @@
-from components.broadcast_components.quantizer.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
+from components.broadcast_components.WZ_models.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
 import torch
 import torch.nn.functional as F
@@ -9,6 +9,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, *args, **kwargs):
         self.coding_model = None
 
+        side_info_size = side_info_size if side_info_size != 0 else 1
         super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, *args, **kwargs)
 
         self.coding_model = EncoderDecoderLayeredRNN(
@@ -107,8 +108,8 @@ if __name__ == "__main__":
         reconst_ld=100, num_planes=3, bins_per_plane=2, lr=1e-3,
     )
     wz_quantizer = WZQuantizer(wz_pl_model=pl_model,
-                                  count_side_info_data=len(side_info_data),
-                                  train_sample_size=200_000, metric_report_flag=True)
+                               count_side_info_data=len(side_info_data),
+                               train_sample_size=200_000, enable_progress_bar=True)
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=1_000)
 
     # %%
