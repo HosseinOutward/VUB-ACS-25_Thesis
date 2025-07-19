@@ -1,6 +1,8 @@
 from typing import List, Dict
 import torch
 from lightning import seed_everything
+
+from components.FL_sim import RawBroadcastProtocol
 from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
@@ -97,7 +99,7 @@ def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List
 
 # todo separate the wz model and use dependency injection to pass it to the protocol
 # todo remove the *args, **kwargs for all related classes
-class WZBroadcastProtocol:
+class WZBroadcastProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer:WZQuantizer):
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
         self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer for _ in range(agent_count)]
@@ -192,6 +194,7 @@ class WZBroadcastProtocol:
         self.previous_data_list.append(result_dict)
         return result_dict
 
+    # todo only send recons. change reporting to not need compressed data
     def model_transfer_to_worker_from_server(self, server_model_state_dict):
         res = change_dtype_recursive(server_model_state_dict, torch.float16)
         compressed = compress_data_list(res)

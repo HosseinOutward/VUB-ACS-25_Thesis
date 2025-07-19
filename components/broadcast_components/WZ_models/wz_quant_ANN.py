@@ -1,13 +1,12 @@
 import gc
 from typing import List
-
-from pytorch_lightning.loggers import CSVLogger
-
 from components.other_utilities.brent_wz_models import EncoderDecoder
 import torch
 import torch.nn.functional as F
 import numpy as np
 import pytorch_lightning as pl
+
+from components.other_utilities.user_logger import UnifiedLoggingClass
 
 
 def get_real_bin_prob(bin_no, bin_count):
@@ -108,7 +107,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 # ---------------------------------------------
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
-                 enable_progress_bar=False, train_sample_size=100_000, user_logger=None, *args, **kwargs):
+                 enable_progress_bar=False, train_sample_size=100_000, user_logger:UnifiedLoggingClass=None, *args, **kwargs):
         from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
         assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
 
@@ -267,6 +266,10 @@ class WZQuantizer:
             class NoValidationBar(TQDMProgressBar):
                 def init_validation_tqdm(self): return tqdm(disable=True)
 
+        logger = None
+        if self.user_logger:
+            logger = self.user_logger.get_wz_csv_logger()
+
         trainer = pl.Trainer(
             accelerator="cuda",
             num_sanity_val_steps=0,
@@ -276,7 +279,7 @@ class WZQuantizer:
             max_epochs=epoch,
             enable_progress_bar=self.enable_progress_bar,
             callbacks=[NoValidationBar()] if self.enable_progress_bar else [],
-            logger=self.user_logger
+            logger=logger
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
