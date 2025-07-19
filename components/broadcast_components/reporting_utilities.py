@@ -1,9 +1,8 @@
 import copy
-
+from copy import deepcopy
 import numpy as np
 import torch
 from lightning import seed_everything
-
 from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
     change_dtype_recursive, compress_data_list
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
@@ -26,14 +25,14 @@ def get_obj_size(obj):
         raise
 
 
-class BroadcastReportingUtilities:
+class BroadcastMetricGatheringUtilities:
     def __init__(self, broadcast_prot:WZBroadcastProtocol):
         self.broadcast_protocol = broadcast_prot
         self.base_stat_dict = {
             'wz': {'mbytes_recived': [], 'mbytes_sent_to_worker': [], 'mse': [],
-                   'mape%': [], 'mbytes_sent_for_aggre': []},
-            'raw16': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
-            'entropy': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mbytes_sent_for_aggre': []},
+                   'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
+            'raw16': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
+            'entropy': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
         }
         self.stats = copy.deepcopy(self.base_stat_dict)
         self.running_stats = copy.deepcopy(self.base_stat_dict)
@@ -57,8 +56,8 @@ class BroadcastReportingUtilities:
 
         self.running_stats = copy.deepcopy(self.base_stat_dict)
 
-    def to_worker_from_server_data_transfer(self, agent_id):
-        b_p_res = self.broadcast_protocol.to_worker_from_server_data_transfer(agent_id)
+    def to_worker_prep_data_for_transfer(self, agent_id):
+        b_p_res = self.broadcast_protocol.to_worker_prep_data_for_transfer(agent_id)
 
         # accounting for received data size
         wz_received_size = get_obj_size(b_p_res)
@@ -66,12 +65,12 @@ class BroadcastReportingUtilities:
 
         return b_p_res
 
-    def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         # deep copy to avoid modification of original gradients
         self.original_grads = copy.deepcopy(grad_dict)
         self.current_agent_id = agent_id
 
-        b_p_res = self.broadcast_protocol.to_server_from_worker_data_transfer(
+        b_p_res = self.broadcast_protocol.to_server_prep_data_for_transfer(
             agent_id, grad_dict, encoder_data_sent_by_server)
 
         # accounting for sent data size
@@ -88,11 +87,11 @@ class BroadcastReportingUtilities:
         b_p_res = self.broadcast_protocol.encoding_process(agent_id, worker_grad_dict, prob_per_bin)
         return b_p_res
 
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, *args, **kwargs):
+    def reconstruction_process(self, *args, **kwargs):
+        agent_id = kwargs.get('agent_id') if 'agent_id' in kwargs else args[0]
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
 
-        reconstructed_grads = self.broadcast_protocol.reconstruction_process(
-            agent_id, worker_broadcast_data, worker_count, *args, **kwargs)
+        reconstructed_grads = self.broadcast_protocol.reconstruction_process(*args, **kwargs)
 
         original_flat = np.concatenate([v.flatten().cpu().to(torch.float16)
                                         for v in self.original_grads.values()])
@@ -101,15 +100,18 @@ class BroadcastReportingUtilities:
 
         # WZ comparison
         mse_f = lambda x,y: np.mean((x-y) ** 2)
-        mape_f = lambda x,y: np.mean(np.abs(x - y)) / np.mean(np.abs(x) + 1e-8) * 100
+        mae_f = lambda x,y: np.mean(np.abs(x - y))
+        mape_f = lambda x,y: mae_f(x, y) / np.mean(np.abs(x) + 1e-8) * 100
         self.running_stats['wz']['mse'].append(mse_f(original_flat, reconstructed_flat_wz))
         self.running_stats['wz']['mape%'].append(mape_f(original_flat, reconstructed_flat_wz))
+        self.running_stats['wz']['mae'].append(mae_f(original_flat, reconstructed_flat_wz))
 
         # Raw comparison
         raw_size = get_obj_size(original_flat)
         self.running_stats['raw16']['mbytes_recived'].append(raw_size / (1024 * 1024))
         self.running_stats['raw16']['mse'].append(0)
         self.running_stats['raw16']['mape%'].append(0)
+        self.running_stats['raw16']['mae'].append(0)
 
         # Entropy comparison
         entropy_encoded_data = entropy_coding(original_flat)
@@ -118,6 +120,7 @@ class BroadcastReportingUtilities:
         self.running_stats['entropy']['mbytes_recived'].append(entropy_size / (1024 * 1024))
         self.running_stats['entropy']['mse'].append(mse_f(original_flat, recons_entropy))
         self.running_stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mae'].append(mae_f(original_flat, recons_entropy))
 
         if len(self.running_stats['entropy']['mape%'])==worker_count:
             self.reset_running_stats_round_end()
@@ -147,7 +150,7 @@ def plot_stats(stat_dict):
     # sort stat_dict by these keys ['wz', 'entropy', 'raw16']
     temp = ['wz', 'entropy', 'raw16']
     assert all(k in stat_dict for k in temp), f"Some Key not found in stat_dict: {stat_dict.keys()}"
-    stat_dict = {k: stat_dict[k] for k in temp}
+    stat_dict = {k: deepcopy(stat_dict[k]) for k in temp}
 
     num_subplots = 3
     fig, ax = plt.subplots(num_subplots, 1, figsize=(15, 4 * num_subplots), sharex=True)
@@ -192,7 +195,7 @@ def plot_stats(stat_dict):
         for z_order, (method, metrics) in enumerate(stat_dict.items()):
             plt_name = {
                 'mbytes_recived': 'Worker to Server',
-                'mbytes_sent_for_aggre': '(Aggregation) Server to Worker',
+                'mbytes_sent_for_aggre': 'Server to Worker (global model)',
             }[k_transfer]
             temp = np.sum(metrics[k_transfer], axis=1)
             offset = z_order*temp*0.01
@@ -201,7 +204,7 @@ def plot_stats(stat_dict):
                        color=colors_per_method[method], alpha=0.9, zorder=len(stat_dict) - z_order)
     temp = stat_dict['wz']['mbytes_sent_to_worker']
     ax[1].plot(np.sum(temp, axis=1), linestyle=lines_per_metric[k_transfer],
-               label=f'{'Server to Worker'} - {'wz'}', alpha=0.9, zorder=len(stat_dict))
+               label=f'{'Server to Worker (wz encoder)'} - {'wz'}', alpha=0.9, zorder=len(stat_dict))
 
     ax[1].set_ylabel('MB')
     ax[1].legend(loc='upper left')
@@ -239,60 +242,22 @@ def plot_stats(stat_dict):
 
 
 if __name__ == '__main__':
-    import pprint
-    from components.other_utilities.models_to_train import ResNetPLModel
-    from experiments.resnet_parameter_corr_between_worker import load_grad_files
+    from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, _test_main
+    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
-    # --------------------------------
-    torch.set_float32_matmul_precision('medium')
-    import logging
-    logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
-    import warnings
-    warnings.filterwarnings("ignore", message="Starting from v1.9.0, `tensorboardX` has been removed")
-    warnings.filterwarnings("ignore", message="You defined a `validation_step` but have no `val_dataloader`")
-    warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'train_dataloader'")
-    warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
-
-    # --------------------------------
     worker_count = 2
-    rounds = 2
-    seed_everything(42)
 
-    # load testing data --------------------------------
-    model_shape_dict = {
-        f'aaa_{i}': (*np.random.randint(1, 5, size=np.random.randint(3)),
-            (np.random.randint(1_000, 10_000)//1000)*1000)
-        for i in range(2)
-    }
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
+                                     bins_per_plane=4, lr=1e-5).to(torch.float32)
+    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
+    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
-    grad_test_data = [
-        [{k: torch.normal(0,1,size=v).to('cuda') for k, v in model_shape_dict.items()}
-            for _ in range(worker_count)]
-        for _ in range(rounds)]
+    base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
+                                    count_side_info_data=0, enable_progress_bar=True)
+    broadcast_prot_base = WZBroadcastProtocol(worker_count, base_quantizer)
+    broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base)
 
-    for i in range(1,rounds):
-        for j in range(1, worker_count):
-            for k, v in grad_test_data[i][j].items():
-                grad_test_data[i][j][k] = grad_test_data[i-1][j-1][k] + v * 0.1
-
-    broadcast_prot_base = WZBroadcastProtocol(worker_count,'RNN', tau=5,
-            train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=4)
-    broadcast_prot = BroadcastReportingUtilities(broadcast_prot_base)
-
-    # simulate the WZ encoding and reconstruction process --------------------------------
-    prev = []
-    for round, grad_per_round in enumerate(grad_test_data):
-        for ag_id, grad in enumerate(grad_per_round):
-            print(f'>> Round {round}, Agent {ag_id}')
-            server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
-            encoded_ag_broadcast = broadcast_prot.to_server_from_worker_data_transfer(
-                            ag_id, grad, server_data_sent_to_worker)
-
-            decoded_agent_broadcast = broadcast_prot.reconstruction_process(
-                ag_id, encoded_ag_broadcast, worker_count, model_shape_dict, prev, )
-
-            prev.append(decoded_agent_broadcast)
-        broadcast_prot.write_to_folder()
+    _test_main(broadcast_prot, worker_count)
 
     # report --------------------------------
     plot_stats(broadcast_prot.stats)

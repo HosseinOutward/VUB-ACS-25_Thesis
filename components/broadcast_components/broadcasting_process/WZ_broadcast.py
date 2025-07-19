@@ -1,8 +1,8 @@
 from typing import List, Dict
 import torch
 from lightning import seed_everything
-from components.broadcast_components.quantizer.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
-from components.broadcast_components.quantizer.wz_quant_RNN import PL_EncoderDecoder_RNN
+from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
+from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 import pickle
 import gzip
@@ -98,31 +98,23 @@ def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List
 # todo separate the wz model and use dependency injection to pass it to the protocol
 # todo remove the *args, **kwargs for all related classes
 class WZBroadcastProtocol:
-    def __init__(self, agent_count, quantizer_type='RNN', *args, **kwargs):
-        self.side_info_data_list = None
-        self.agent_list_check = []
-        self.warmup = True
-        self.wz_pl_model_class = {'ANN': PL_EncoderDecoder_ANN, 'RNN': PL_EncoderDecoder_RNN}[quantizer_type]
-
-        self.wz_quantizer_list: List[WZQuantizer] = [
-            WZQuantizer(
-                wz_pl_model=self.wz_pl_model_class(
-                    inp_dim=1, side_info_size=1, *args, **kwargs).to(torch.float32),
-                count_side_info_data=0, *args, **kwargs) for _ in range(agent_count)]
-
-        path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
-        for i in range(agent_count):
-            self.wz_quantizer_list[i].wz_pl_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
+    def __init__(self, agent_count, wz_base_quantizer:WZQuantizer):
+        self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
+        self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer for _ in range(agent_count)]
 
         self.last_recent_grads_list = [None] * agent_count
+        self.current_side_info_list = None
+        self.agent_list_check = []
+        self.warmup = True
+        self.previous_data_list = []
 
-    def to_server_from_worker_data_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
-        quantizer_decoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
+    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+        quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
 
         #**********
-        quantizer_decoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
-                                         for k, v in quantizer_decoder_state_dict.items()}
-        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_decoder_state_dict)
+        quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
+                                         for k, v in quantizer_encoder_state_dict.items()}
+        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(quantizer_encoder_state_dict)
 
         #**********
         grad_dict = change_dtype_recursive(grad_dict, torch.float32)
@@ -150,19 +142,20 @@ class WZBroadcastProtocol:
 
         return compress_data_list((bin_vec_compressed, min_v, max_v, prob_per_bin))
 
-    def to_worker_from_server_data_transfer(self, agent_id):
+    def to_worker_prep_data_for_transfer(self, agent_id):
         quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
 
         quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
         return compress_data_list(quantizer_encoder_state_dict)
 
     # %%
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims, previous_data):
+    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
         # return worker_broadcast_data[0]
 
-        # assuming that previous_data has order based on agents like 0, 1, 2, 0, 1, 2, ...
+        # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
+        assert len(self.agent_list_check)-1==len(self.previous_data_list)
 
         # ****
         quantizer = self.wz_quantizer_list[agent_id]
@@ -181,7 +174,7 @@ class WZBroadcastProtocol:
             bin_data = rans_batch_decode(bin_vec_compressed, prob_per_bin, model_size)
 
         # decode the bin data to get the vector
-        side_info_data_list = [] if self.warmup else self.side_info_data_list
+        side_info_data_list = [] if self.warmup else self.current_side_info_list
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
         result_dict = recover_shape_and_denormal_to_dict(res_vector, global_model_dims, min_v, max_v)
@@ -192,10 +185,11 @@ class WZBroadcastProtocol:
         if agent_id + 1 >= worker_count:
             self.warmup = False
 
-        # assuming not in warmup phase, we have at least one complete round, so we train the next quantizer
+        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
         if not self.warmup:
-            self._prep_for_next_agent(agent_id, worker_count, res_vector, previous_data, min_v, max_v)
+            self._prep_for_next_agent(agent_id, worker_count, res_vector, min_v, max_v)
 
+        self.previous_data_list.append(result_dict)
         return result_dict
 
     def model_transfer_to_worker_from_server(self, server_model_state_dict):
@@ -207,32 +201,33 @@ class WZBroadcastProtocol:
         recons = {k: torch.tensor(v) for k, v in res.items()}
         return recons, compressed
 
-    def _prep_for_next_agent(self, agent_id, worker_count, res_vector, previous_data, min_v, max_v):
-        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in previous_data]
+    def _prep_for_next_agent(self, agent_id, worker_count, res_vector, min_v, max_v):
+        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in self.previous_data_list]
         prev_d_flat += [res_vector]
 
         last_recent_grads_idx = len(prev_d_flat) - worker_count
-        self.side_info_data_list = prev_d_flat[:last_recent_grads_idx] + prev_d_flat[last_recent_grads_idx + 1:]
         last_recent_grads = prev_d_flat[last_recent_grads_idx]
+        self.current_side_info_list = prev_d_flat[:last_recent_grads_idx] + prev_d_flat[last_recent_grads_idx + 1:]
 
         next_agent = (agent_id + 1) % worker_count
         qz = self.wz_quantizer_list[next_agent]
         self.wz_quantizer_list[next_agent] = WZQuantizer(
             wz_pl_model=self.wz_pl_model_class(
-                inp_dim=1, side_info_size=len(self.side_info_data_list),
+                inp_dim=1, side_info_size=len(self.current_side_info_list),
                 lr=qz.wz_pl_model.lr,
                 bins_per_plane=qz.wz_pl_model.bins_per_plane,
                 num_planes=qz.wz_pl_model.num_planes,
                 tau=qz.wz_pl_model.tau,
             ).to(torch.float32),
-            count_side_info_data=len(self.side_info_data_list),
-            metric_report_flag=qz.metric_report_flag, train_sample_size=qz.train_sample_size
+            count_side_info_data=len(self.current_side_info_list), enable_progress_bar=qz.enable_progress_bar,
+            train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
         )
+
         self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.side_info_data_list, epoch=20, batch_size=15_000)
+            last_recent_grads, self.current_side_info_list, epoch=20, batch_size=15_000)
 
 
-if __name__ == "__main__":
+def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
     # --------------------------------
     torch.set_float32_matmul_precision('medium')
     import logging
@@ -243,8 +238,6 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="Consider setting `persistent_workers=True` in 'train_dataloader'")
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
-    worker_count = 2
-    rounds = 1
     seed_everything(42)
 
     # load testing data --------------------------------
@@ -265,22 +258,34 @@ if __name__ == "__main__":
                 grad_test_data[i][j][k] = grad_test_data[i-1][j-1][k] + v * 0.1
 
     # simulate the WZ encoding and reconstruction process --------------------------------
-    broadcast_prot = WZBroadcastProtocol(worker_count,'RNN',
-                train_sample_size=100_000, metric_report_flag=True, lr=1e-5, num_planes=3, bins_per_plane=4)
-    prev = []
     for round, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
             print(f'>> Round {round}, Agent {ag_id}')
-            server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
-            encoded_ag_broadcast = broadcast_prot.to_server_from_worker_data_transfer(
+            _ = broadcast_prot.model_transfer_to_worker_from_server(grad)
+
+            print('          - Preparing data for transfer to worker...')
+            server_data_sent_to_worker = broadcast_prot.to_worker_prep_data_for_transfer(ag_id)
+
+            print('          - Preparing data for transfer to server...')
+            encoded_ag_broadcast = broadcast_prot.to_server_prep_data_for_transfer(
                             ag_id, grad, server_data_sent_to_worker)
 
+            print('          - reconstructing data received...')
             decoded_agent_broadcast = broadcast_prot.reconstruction_process(
-                ag_id, encoded_ag_broadcast, worker_count, model_shape_dict, prev, )
-
-            prev.append(decoded_agent_broadcast)
+                ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
 
     # check output size and correctness
     for i, grad in enumerate(grad_test_data[-1]):
         assert all([k in grad for k in model_shape_dict.keys()])
         assert all([v.shape == model_shape_dict[k] for k, v in grad.items()])
+
+if __name__ == "__main__":
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
+                                     bins_per_plane=4, lr=1e-5).to(torch.float32)
+    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
+    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
+
+    base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
+                                    count_side_info_data=0, enable_progress_bar=True)
+    broadcast_prot = WZBroadcastProtocol(worker_count, base_quantizer)
+    _test_main(broadcast_prot)

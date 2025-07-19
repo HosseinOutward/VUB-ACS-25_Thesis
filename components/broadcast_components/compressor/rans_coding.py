@@ -1,4 +1,3 @@
-
 import numpy as np
 import rans.rANSCoder as rans
 import numba.typed
@@ -7,18 +6,14 @@ batch_size=100_000
 
 
 def rans_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.ndarray:
-    # return data_symbols
-
     encoder = rans.Encoder()
-    for s in data_symbols.copy():
-        encoder.encode_symbol(probs_per_bin.copy(), s)
+    for s in data_symbols:
+        encoder.encode_symbol(probs_per_bin, s)
     res = encoder.get_encoded()
     return np.array(res, dtype=eval(f'np.{res._dtype}'))
 
 
 def rans_decode(encoded_state, freqs:np.ndarray, length_decoded:int):
-    # return encoded_state
-
     if isinstance(encoded_state, np.ndarray):
         encoded_state = numba.typed.List(encoded_state)
     assert str(encoded_state._dtype)=='uint32'
@@ -26,11 +21,13 @@ def rans_decode(encoded_state, freqs:np.ndarray, length_decoded:int):
     decoder = rans.Decoder(encoded_state.copy())
     decoded_data = []
     for _ in range(length_decoded):
-        decoded_data.insert(0, decoder.decode_symbol(freqs.copy()))
-    return np.array(decoded_data)
+        decoded_data.append(decoder.decode_symbol(freqs.copy()))
+    return np.array(decoded_data[::-1])
 
 
 def rans_batch_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.ndarray:
+    # return data_symbols
+
     from multiprocessing import Pool
     from functools import partial
     import os
@@ -44,6 +41,8 @@ def rans_batch_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.n
 
 
 def rans_batch_decode(encoded_state, freqs:np.ndarray, length_decoded:int) -> np.ndarray:
+    # return encoded_state
+
     from multiprocessing import Pool
     import os
 
@@ -75,10 +74,19 @@ if __name__ == '__main__':
             [uq/len(data) for uq in np.unique(data, return_counts=True)[1]]
         ).astype(np.float16).astype(np.float32)
 
+    # Test single encode/decode
+    print('\nTesting single encode/decode...')
     t0 = time.time()
-    # encoded = rans_encode(data, probs)
-    # decoded = rans_decode(encoded, probs, len(data))
+    for i in range(0, len(data)+batch_size-1, batch_size):
+        encoded = rans_encode(data[i:i+batch_size], probs)
+        decoded = rans_decode(encoded, probs, len(data[i:i+batch_size]))
+    t1 = time.time()
 
+    print("speed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',)
+
+    # Test single encode/decode
+    print('\n\n************\ntesting pooling...')
+    t0 = time.time()
     temp=rans_batch_encode(data, probs)
     decoded = rans_batch_decode(temp, probs, len(data))
     t1 = time.time()
