@@ -39,6 +39,16 @@ class BroadcastReportingUtilities:
         self.running_stats = copy.deepcopy(self.base_stat_dict)
         self.original_grads = None
         self.current_agent_id = None
+        self.current_round_id = 0
+
+    def write_to_folder(self):
+        import pickle
+        self.current_round_id+=1
+        stats = self.stats
+        #write to pickle
+        folder_path = f'experiments/exp_data/run_stats_new/stats/{self.current_round_id}.pkl'
+        with open(folder_path, 'wb') as f:
+            pickle.dump(stats, f)
 
     def reset_running_stats_round_end(self):
         for method_used in self.running_stats.keys():
@@ -140,7 +150,7 @@ def plot_stats(stat_dict):
     stat_dict = {k: stat_dict[k] for k in temp}
 
     num_subplots = 3
-    fig, ax = plt.subplots(num_subplots, 1, figsize=(12, 6 * num_subplots), sharex=True)
+    fig, ax = plt.subplots(num_subplots, 1, figsize=(15, 4 * num_subplots), sharex=True)
 
     colors_per_method = {
         'wz': 'tab:blue',
@@ -163,7 +173,7 @@ def plot_stats(stat_dict):
     }
 
     #%%
-    # Plotting data transfer sizes on the first subplot (ax[1])
+    # Plotting data transfer sizes on the first subplot (ax[0])
     temp = np.sum(stat_dict['wz']['mbytes_recived'])*0
     for method, metrics in stat_dict.items():
         for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
@@ -175,19 +185,23 @@ def plot_stats(stat_dict):
     ax[0].legend(loc='upper left')
     ax[0].grid(True)
     ax[0].set_title('Total Data Transfer Size')
+
     #%%
+    # Plotting breakdown of data transfer sizes on the second subplot (ax[1])
     for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre']:
-        for method, metrics in stat_dict.items():
+        for z_order, (method, metrics) in enumerate(stat_dict.items()):
             plt_name = {
                 'mbytes_recived': 'Worker to Server',
                 'mbytes_sent_for_aggre': '(Aggregation) Server to Worker',
             }[k_transfer]
-            ax[1].plot(np.sum(metrics[k_transfer], axis=1), label=f'{plt_name} - {method}',
+            temp = np.sum(metrics[k_transfer], axis=1)
+            offset = z_order*temp*0.01
+            ax[1].plot(temp+offset, label=f'{plt_name} - {method}',
                        linestyle=lines_per_metric[k_transfer], marker=symbol_per_metric[k_transfer],
-                       color=colors_per_method[method], alpha=0.9)
+                       color=colors_per_method[method], alpha=0.9, zorder=len(stat_dict) - z_order)
     temp = stat_dict['wz']['mbytes_sent_to_worker']
     ax[1].plot(np.sum(temp, axis=1), linestyle=lines_per_metric[k_transfer],
-               label=f'{'Server to Worker'} - {'wz'}', alpha=0.9)
+               label=f'{'Server to Worker'} - {'wz'}', alpha=0.9, zorder=len(stat_dict))
 
     ax[1].set_ylabel('MB')
     ax[1].legend(loc='upper left')
@@ -198,10 +212,11 @@ def plot_stats(stat_dict):
     # Plotting MSE and MAPE on the second subplot (ax[2]) with a shared x-axis
     ax2 = ax[2].twinx()
     for k_transfer in ['mse', 'mape%']:
-        for method, metrics in stat_dict.items():
-            ax2.plot(np.mean(metrics[k_transfer], axis=1), label=f'{k_transfer.upper()} - {method}',
+        for z_order, (method, metrics) in enumerate(stat_dict.items()):
+            ax_to_plot_on = ax[2] if k_transfer == 'mse' else ax2
+            ax_to_plot_on.plot(np.mean(metrics[k_transfer], axis=1), label=f'{k_transfer.upper()} - {method}',
                      linestyle=lines_per_metric[k_transfer], marker=symbol_per_metric[k_transfer],
-                     color=colors_per_method[method], alpha=0.9)
+                     color=colors_per_method[method], alpha=0.9, zorder=len(stat_dict) - z_order)
 
     ax[2].set_xlabel('Rounds')
     ax[2].set_ylabel('MSE', color='tab:blue')
@@ -239,15 +254,15 @@ if __name__ == '__main__':
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have")
 
     # --------------------------------
-    worker_count = 5
-    rounds = 5
+    worker_count = 2
+    rounds = 2
     seed_everything(42)
 
     # load testing data --------------------------------
     model_shape_dict = {
         f'aaa_{i}': (*np.random.randint(1, 5, size=np.random.randint(3)),
             (np.random.randint(1_000, 10_000)//1000)*1000)
-        for i in range(10)
+        for i in range(2)
     }
 
     grad_test_data = [
@@ -277,6 +292,7 @@ if __name__ == '__main__':
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict, prev, )
 
             prev.append(decoded_agent_broadcast)
+        broadcast_prot.write_to_folder()
 
     # report --------------------------------
     plot_stats(broadcast_prot.stats)

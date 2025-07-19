@@ -104,6 +104,10 @@ def report_metric(model, dataloader, name=None, rank:str|int='ALL'):
 
     model.logging_disabled = org_logging_dis_flag
 
+    # write line to csv file
+    with open(f"round_end.csv", "a") as f:
+        f.write(f"{rank}, {name}, {loss_log:.3f}, {auc_log:.3f}\n")
+
 
 def fedavg(grad_dict_per_agent, sample_size_per_agent):
     print("Aggregating gradients using FedAvg...")
@@ -236,7 +240,7 @@ class Agent:
         # train the model
         logger = False
         if not self.local_model.logging_disabled:
-            logger = CSVLogger(save_dir="../experiments/exp_data/run_stats",
+            logger = CSVLogger(save_dir="experiments/exp_data/run_stats_new",
                                name=f"agent_{self.agent_id}_round_{round_s}", )
 
         trainer = Trainer(
@@ -333,7 +337,7 @@ class FLSimulator:
 
         self._set_local_models(model_transfer_to_worker_from_server)
 
-    def run_simulation(self, broadcast_prot, post_training_report=True, pre_training_global_epochs=5):
+    def run_simulation(self, broadcast_prot, post_training_report=True, pre_training_global_epochs=0):
         shared_train_loader = torch.utils.data.DataLoader(
             self.dataset_train, batch_size=self.batch_count, sampler=self.train_sampler,
             num_workers=10, persistent_workers=True)
@@ -361,29 +365,40 @@ class FLSimulator:
             # ------------- Train each agent for the number of epochs
             self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
             for ag_id, ag in enumerate(self.agents):
-                print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
+                while True:
+                    try:
+                        print(f"     > training agent {ag_id + 1}/{len(self.agents)}")
 
-                # self.shared_train_loader.sampler.offset = ag_id
-                self.train_sampler.set_agent_partition(ag_id)
-                ag.train(shared_train_loader, shared_test_loader,
-                         epochs=self.client_epochs_per_round, round_s=round_s)
+                        # self.shared_train_loader.sampler.offset = ag_id
+                        self.train_sampler.set_agent_partition(ag_id)
+                        ag.train(shared_train_loader, shared_test_loader,
+                                 epochs=self.client_epochs_per_round, round_s=round_s)
 
-                gc.collect()
-                torch.cuda.empty_cache()
-                print(f"             + initiating broadcast")
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        print(f"             + initiating broadcast")
 
-                server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
-                encoded_ag_broadcast = ag.get_worker_broadcast(
-                    server_data_sent_to_worker, broadcast_prot.to_server_from_worker_data_transfer)
+                        server_data_sent_to_worker = broadcast_prot.to_worker_from_server_data_transfer(ag_id)
+                        encoded_ag_broadcast = ag.get_worker_broadcast(
+                            server_data_sent_to_worker, broadcast_prot.to_server_from_worker_data_transfer)
 
-                decoded_agent_broadcast = broadcast_prot.reconstruction_process(
-                    ag_id, encoded_ag_broadcast, self.num_agents, self.model_shape_dict, past_decoded_grad_dict_list, )
+                        decoded_agent_broadcast = broadcast_prot.reconstruction_process(
+                            ag_id, encoded_ag_broadcast, self.num_agents,
+                            self.model_shape_dict, past_decoded_grad_dict_list, )
 
-                past_decoded_grad_dict_list.append(decoded_agent_broadcast)
+                        past_decoded_grad_dict_list.append(decoded_agent_broadcast)
 
-                if post_training_report:
-                    report_metric(ag.local_model, shared_test_loader, 'test')
-                    report_metric(ag.local_model, shared_train_loader, 'train', rank=ag_id)
+                        if post_training_report:
+                            report_metric(ag.local_model, shared_test_loader, 'test')
+                            report_metric(ag.local_model, shared_train_loader, 'train', rank=ag_id)
+                    except Exception as e:
+                        print(f"Error during training or broadcasting for agent {ag_id}: {e}")
+                        # If an error occurs, we break out of the loop to avoid infinite retries
+                    break
+                try:
+                    broadcast_prot.write_to_folder()
+                except Exception as e:
+                    print(f"Error writing broadcast data: {e}")
 
             # ------------- Aggregate pl_models from all agents
             self._aggregate_models(past_decoded_grad_dict_list)
