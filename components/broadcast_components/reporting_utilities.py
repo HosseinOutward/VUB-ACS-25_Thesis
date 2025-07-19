@@ -6,6 +6,7 @@ from lightning import seed_everything
 from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
     change_dtype_recursive, compress_data_list
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
+from components.other_utilities.user_logger import UnifiedLoggingClass
 
 
 def get_obj_size(obj):
@@ -26,7 +27,7 @@ def get_obj_size(obj):
 
 
 class BroadcastMetricGatheringUtilities:
-    def __init__(self, broadcast_prot:WZBroadcastProtocol):
+    def __init__(self, broadcast_prot:WZBroadcastProtocol, user_logger:UnifiedLoggingClass=None):
         self.broadcast_protocol = broadcast_prot
         self.base_stat_dict = {
             'wz': {'mbytes_recived': [], 'mbytes_sent_to_worker': [], 'mse': [],
@@ -38,16 +39,7 @@ class BroadcastMetricGatheringUtilities:
         self.running_stats = copy.deepcopy(self.base_stat_dict)
         self.original_grads = None
         self.current_agent_id = None
-        self.current_round_id = 0
-
-    def write_to_folder(self):
-        import pickle
-        self.current_round_id+=1
-        stats = self.stats
-        #write to pickle
-        folder_path = f'experiments/exp_data/run_stats_new/stats/{self.current_round_id}.pkl'
-        with open(folder_path, 'wb') as f:
-            pickle.dump(stats, f)
+        self.user_logger = user_logger
 
     def reset_running_stats_round_end(self):
         for method_used in self.running_stats.keys():
@@ -55,6 +47,10 @@ class BroadcastMetricGatheringUtilities:
                 self.stats[method_used][k].append(v)
 
         self.running_stats = copy.deepcopy(self.base_stat_dict)
+
+        # log at round start
+        if self.user_logger:
+            self.user_logger.broadcast_reporting(self.stats)
 
     def to_worker_prep_data_for_transfer(self, agent_id):
         b_p_res = self.broadcast_protocol.to_worker_prep_data_for_transfer(agent_id)
@@ -122,6 +118,7 @@ class BroadcastMetricGatheringUtilities:
         self.running_stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
         self.running_stats['entropy']['mae'].append(mae_f(original_flat, recons_entropy))
 
+        # detect end of round
         if len(self.running_stats['entropy']['mape%'])==worker_count:
             self.reset_running_stats_round_end()
 
@@ -242,8 +239,9 @@ def plot_stats(stat_dict):
 
 
 if __name__ == '__main__':
-    from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, _test_main
+    from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+    from components.broadcast_components.broadcasting_process.WZ_broadcast import _test_main
 
     worker_count = 2
 
