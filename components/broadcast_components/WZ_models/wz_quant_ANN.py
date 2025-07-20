@@ -107,8 +107,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 # ---------------------------------------------
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
-                 enable_progress_bar=False, train_sample_size=100_000, user_logger:UnifiedLoggingClass=None, *args, **kwargs):
-        from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+                 enable_progress_bar=False, train_sample_size=100_000, user_logger:UnifiedLoggingClass=None,):
         assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
 
         self.val_indices = None
@@ -222,18 +221,16 @@ class WZQuantizer:
             self.train_sample_size = len(train_dataset)
 
         # --------------- val dataloader ---------------
-        val_dataloader = None
-        if self.enable_progress_bar:
-            all_indices = np.arange(len(train_dataset))
+        all_indices = np.arange(len(train_dataset))
 
-            self.val_indices = np.random.choice(all_indices, size=int(self.train_sample_size // 3), replace=False)
-            val_dataset = torch.utils.data.Subset(train_dataset, self.val_indices)
-            val_dataloader = torch.utils.data.DataLoader(
-                val_dataset, batch_size=batch_size * 10,
-                num_workers=2, pin_memory=False, persistent_workers=True)
+        self.val_indices = np.random.choice(all_indices, size=int(self.train_sample_size // 3), replace=False)
+        val_dataset = torch.utils.data.Subset(train_dataset, self.val_indices)
+        val_dataloader = torch.utils.data.DataLoader(
+            val_dataset, batch_size=batch_size * 10,
+            num_workers=2, pin_memory=False, persistent_workers=True)
 
-            train_indices = np.setdiff1d(all_indices, self.val_indices)
-            train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
+        train_indices = np.setdiff1d(all_indices, self.val_indices)
+        train_dataset = torch.utils.data.Subset(train_dataset, train_indices)
 
         # ------------------------------
 

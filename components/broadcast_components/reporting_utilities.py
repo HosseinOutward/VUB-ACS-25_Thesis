@@ -2,7 +2,6 @@ import copy
 from copy import deepcopy
 import numpy as np
 import torch
-from lightning import seed_everything
 from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
     change_dtype_recursive, compress_data_list
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
@@ -29,35 +28,38 @@ def get_obj_size(obj):
 class BroadcastMetricGatheringUtilities:
     def __init__(self, broadcast_prot:WZBroadcastProtocol, user_logger:UnifiedLoggingClass=None):
         self.broadcast_protocol = broadcast_prot
-        self.base_stat_dict = {
-            'wz': {'mbytes_recived': [], 'mbytes_sent_to_worker': [], 'mse': [],
-                   'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
-            'raw16': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
-            'entropy': {'mbytes_recived': [], 'mse': [], 'mape%': [], 'mae': [], 'mbytes_sent_for_aggre': []},
+        self.base_stat_dict:dict[str, dict[str, float|None]] = {
+            'wz': {'mbytes_recived': None, 'mbytes_sent_to_worker': None, 'mse': None,
+                   'mape%': None, 'mae': None, 'mbytes_sent_for_aggre': None},
+            'raw16': {'mbytes_recived': None, 'mse': None, 'mape%': None, 'mae': None, 'mbytes_sent_for_aggre': None},
+            'entropy': {'mbytes_recived': None, 'mse': None, 'mape%': None, 'mae': None, 'mbytes_sent_for_aggre': None},
         }
-        self.stats = copy.deepcopy(self.base_stat_dict)
         self.running_stats = copy.deepcopy(self.base_stat_dict)
+        self.round_stats = {k: {kk: [] for kk in v} for k, v in copy.deepcopy(self.base_stat_dict).items()}
+        self.entire_stats = copy.deepcopy(self.round_stats)
         self.original_grads = None
         self.current_agent_id = None
         self.user_logger = user_logger
 
-    def reset_running_stats_round_end(self):
+    def _reset_running_stats_step_end(self, round_end=False):
         for method_used in self.running_stats.keys():
             for k, v in self.running_stats[method_used].items():
-                self.stats[method_used][k].append(v)
+                self.round_stats[method_used][k].append(v)
+
+        if round_end:
+            for method_used in self.round_stats.keys():
+                for k, v in self.round_stats[method_used].items():
+                    self.entire_stats[method_used][k].append(v)
+            self.round_stats = {k: {kk: [] for kk in v} for k, v in copy.deepcopy(self.base_stat_dict).items()}
 
         self.running_stats = copy.deepcopy(self.base_stat_dict)
-
-        # log at round start
-        if self.user_logger:
-            self.user_logger.broadcast_reporting(self.stats)
 
     def to_worker_prep_data_for_transfer(self, agent_id):
         b_p_res = self.broadcast_protocol.to_worker_prep_data_for_transfer(agent_id)
 
         # accounting for received data size
         wz_received_size = get_obj_size(b_p_res)
-        self.running_stats['wz']['mbytes_sent_to_worker'].append(wz_received_size / (1024 * 1024))
+        self.running_stats['wz']['mbytes_sent_to_worker']=wz_received_size / (1024 * 1024)
 
         return b_p_res
 
@@ -70,21 +72,13 @@ class BroadcastMetricGatheringUtilities:
             agent_id, grad_dict, encoder_data_sent_by_server)
 
         # accounting for sent data size
-        self.running_stats['wz']['mbytes_recived'].append(get_obj_size(b_p_res) / (1024 * 1024))
-        assert len(self.running_stats['wz']['mbytes_recived']) ==\
-                len(self.running_stats['wz']['mbytes_sent_to_worker'])
+        self.running_stats['wz']['mbytes_recived']=(get_obj_size(b_p_res) / (1024 * 1024))
 
-        return b_p_res
-
-    def encoding_process(self, agent_id, worker_grad_dict, prob_per_bin):
-        # deep copy to avoid modification of original gradients
-        self.original_grads = copy.deepcopy(worker_grad_dict)
-
-        b_p_res = self.broadcast_protocol.encoding_process(agent_id, worker_grad_dict, prob_per_bin)
         return b_p_res
 
     def reconstruction_process(self, *args, **kwargs):
         agent_id = kwargs.get('agent_id') if 'agent_id' in kwargs else args[0]
+        worker_count = kwargs.get('worker_count') if 'worker_count' in kwargs else args[2]
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
 
         reconstructed_grads = self.broadcast_protocol.reconstruction_process(*args, **kwargs)
@@ -95,32 +89,35 @@ class BroadcastMetricGatheringUtilities:
                                                 for v in reconstructed_grads.values()])
 
         # WZ comparison
-        mse_f = lambda x,y: np.mean((x-y) ** 2)
-        mae_f = lambda x,y: np.mean(np.abs(x - y))
-        mape_f = lambda x,y: mae_f(x, y) / np.mean(np.abs(x) + 1e-8) * 100
-        self.running_stats['wz']['mse'].append(mse_f(original_flat, reconstructed_flat_wz))
-        self.running_stats['wz']['mape%'].append(mape_f(original_flat, reconstructed_flat_wz))
-        self.running_stats['wz']['mae'].append(mae_f(original_flat, reconstructed_flat_wz))
+        mse_f = lambda x,y: float(np.mean((x-y) ** 2))
+        mae_f = lambda x,y: float(np.mean(np.abs(x - y)))
+        mape_f = lambda x,y: float(mae_f(x, y) / np.mean(np.abs(x) + 1e-8) * 100)
+        self.running_stats['wz']['mse']=mse_f(original_flat, reconstructed_flat_wz)
+        self.running_stats['wz']['mape%']=mape_f(original_flat, reconstructed_flat_wz)
+        self.running_stats['wz']['mae']=mae_f(original_flat, reconstructed_flat_wz)
 
         # Raw comparison
         raw_size = get_obj_size(original_flat)
-        self.running_stats['raw16']['mbytes_recived'].append(raw_size / (1024 * 1024))
-        self.running_stats['raw16']['mse'].append(0)
-        self.running_stats['raw16']['mape%'].append(0)
-        self.running_stats['raw16']['mae'].append(0)
+        self.running_stats['raw16']['mbytes_recived']=(raw_size / (1024 * 1024))
+        self.running_stats['raw16']['mse']=(0)
+        self.running_stats['raw16']['mape%']=(0)
+        self.running_stats['raw16']['mae']=(0)
 
         # Entropy comparison
         entropy_encoded_data = entropy_coding(original_flat)
         recons_entropy = entropy_decoding(entropy_encoded_data, original_flat.dtype)
         entropy_size = get_obj_size(entropy_encoded_data)
-        self.running_stats['entropy']['mbytes_recived'].append(entropy_size / (1024 * 1024))
-        self.running_stats['entropy']['mse'].append(mse_f(original_flat, recons_entropy))
-        self.running_stats['entropy']['mape%'].append(mape_f(original_flat, recons_entropy))
-        self.running_stats['entropy']['mae'].append(mae_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mbytes_recived']=(entropy_size / (1024 * 1024))
+        self.running_stats['entropy']['mse']=(mse_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mape%']=(mape_f(original_flat, recons_entropy))
+        self.running_stats['entropy']['mae']=(mae_f(original_flat, recons_entropy))
 
         # detect end of round
-        if len(self.running_stats['entropy']['mape%'])==worker_count:
-            self.reset_running_stats_round_end()
+        self._reset_running_stats_step_end(round_end=(agent_id == worker_count-1))
+
+        # log at round start
+        if self.user_logger:
+            self.user_logger.broadcast_reporting(self.running_stats)
 
         return reconstructed_grads
 
@@ -128,15 +125,15 @@ class BroadcastMetricGatheringUtilities:
         recons, compr = self.broadcast_protocol.model_transfer_to_worker_from_server(server_model_state_dict)
 
         wz_size = get_obj_size(compr)
-        self.running_stats['wz']['mbytes_sent_for_aggre'].append(wz_size / (1024 * 1024))
+        self.running_stats['wz']['mbytes_sent_for_aggre']=(wz_size / (1024 * 1024))
 
         raw_size = get_obj_size(server_model_state_dict)
-        self.running_stats['raw16']['mbytes_sent_for_aggre'].append(raw_size / (1024 * 1024))
+        self.running_stats['raw16']['mbytes_sent_for_aggre']=(raw_size / (1024 * 1024))
 
         res = change_dtype_recursive(server_model_state_dict, torch.float16)
         res = compress_data_list(res)
         entropy_size = get_obj_size(res)
-        self.running_stats['entropy']['mbytes_sent_for_aggre'].append(entropy_size / (1024 * 1024))
+        self.running_stats['entropy']['mbytes_sent_for_aggre']=(entropy_size / (1024 * 1024))
 
         return recons, compr
 
@@ -258,4 +255,4 @@ if __name__ == '__main__':
     _test_main(broadcast_prot, worker_count)
 
     # report --------------------------------
-    plot_stats(broadcast_prot.stats)
+    plot_stats(broadcast_prot.round_stats)

@@ -1,5 +1,4 @@
 import gc
-from pytorch_lightning.loggers import CSVLogger
 from typing import Optional, Dict, List, Any
 import numpy as np
 import torch
@@ -65,7 +64,7 @@ class FederatedModelWrapper(pl.LightningModule):
     def get_loss_etc(self, batch) -> (torch.Tensor, List[Any]):
         raise NotImplementedError
 
-    def _log_metrics(self, etc, stage: str):
+    def _log_metrics(self, loss, etc, stage: str):
         raise NotImplementedError
 
     def on_before_optimizer_step(self, *args, **kwargs):
@@ -90,12 +89,12 @@ class FederatedModelWrapper(pl.LightningModule):
         self.current_step_info['batch_idx'] = batch_idx
 
         loss, etc = self.get_loss_etc(batch)
-        self._log_metrics(etc, stage='train')
+        self._log_metrics(loss, etc, stage='train')
         return loss
 
     def validation_step(self, batch, batch_idx):
         loss, etc = self.get_loss_etc(batch)
-        self._log_metrics(etc, stage='val')
+        self._log_metrics(loss, etc, stage='val')
         return loss
 
     def configure_optimizers(self):
@@ -390,11 +389,15 @@ def _main_test():
             logits = self.model(x)
             temp = (torch.sigmoid(logits), y)
             loss = torch.nn.functional.mse_loss(*temp)
-            acc = torch.mean((torch.abs((torch.sigmoid(logits.detach()) > 0.5).float()
-                                        - temp[1].float())<0.0001).float()).item()
+            loss_detach = loss.detach()
+            loss = loss if loss < 1000 else loss/loss_detach * 1000
+
+            acc = torch.mean((torch.abs((
+                torch.sigmoid(logits.detach()) > 0.5).float() - temp[1].float())<0.0001).float()).item()
             return loss, (acc, )
-        def _log_metrics(self, etc, stage: str):
-            pass
+        def _log_metrics(self, loss, etc, stage: str):
+            self.log(f"{stage}_loss", loss, on_step=True, on_epoch=False, prog_bar=False)
+            self.log(f"{stage}_acc", etc[0], on_step=True, on_epoch=False, prog_bar=False)
         def clone(self, copy=None):
             return super(SimpleModel, self).clone(copy=SimpleModel())
 
