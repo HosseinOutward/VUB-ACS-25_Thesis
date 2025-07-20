@@ -74,10 +74,14 @@ def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
                             for q in [0.9999,0.0001] ]
     assert (min_v is not None and max_v is not None)
 
+    for i in range(len(min_v)):
+        if min_v[i] == max_v[i]:
+            max_v[i] = min_v[i]+1
+
     res = []
     for i, (k, v) in enumerate(grad_dict.items()):
-        v = v.ravel() * 1000
-        v = (v - min_v[i] * 1000) / (max_v[i] * 1000 - min_v[i] * 1000)
+        v = v.ravel()
+        v = (v - min_v[i]) / (max_v[i] - min_v[i])
         v = v * 2 - 1  # normalize to [-1, 1]
         res.append(v.to('cpu').numpy())
     res = np.concatenate(res)

@@ -39,9 +39,9 @@ class ResNetPLModel(FederatedModelWrapper):
         etc = (auc,)
         return loss, etc
 
-    def _log_metrics(self, etc, stage: str):
-        self.log(f'{stage}_loss', etc[0], on_step=True, on_epoch=True, prog_bar=True)
-        self.log(f'{stage}_auc', etc[1], on_step=True, on_epoch=True, prog_bar=True)
+    def _log_metrics(self, loss, etc, stage: str):
+        self.log(f'{stage}_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log(f'{stage}_auc', etc[0], on_step=True, on_epoch=True, prog_bar=True)
 
     def clone(self, copy=None):
         new_model = ResNetPLModel(num_classes=self.num_classes, lr=self.lr, resnet_version=self.resnet_version)
