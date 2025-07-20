@@ -357,7 +357,7 @@ class FLSimulator:
 
         # final global model report -----------------------------------------------
         print("\nfinal global model metrics")
-        self._log_report(self.global_model, shared_train_loader, shared_test_loader, 'end', 'global')
+        self._log_report(self.global_model, shared_train_loader, shared_test_loader, 3, 'global')
 
         #  -----------------------------------------------
         del shared_train_loader, shared_test_loader
@@ -396,8 +396,8 @@ def _main_test():
                 torch.sigmoid(logits.detach()) > 0.5).float() - temp[1].float())<0.0001).float()).item()
             return loss, (acc, )
         def _log_metrics(self, loss, etc, stage: str):
-            self.log(f"{stage}_loss", loss, on_step=True, on_epoch=False, prog_bar=False)
-            self.log(f"{stage}_acc", etc[0], on_step=True, on_epoch=False, prog_bar=False)
+            self.log(f"{stage}_loss", loss, prog_bar=False)
+            self.log(f"{stage}_acc", etc[0], prog_bar=False)
         def clone(self, copy=None):
             return super(SimpleModel, self).clone(copy=SimpleModel())
 
