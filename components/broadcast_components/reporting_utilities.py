@@ -112,12 +112,12 @@ class BroadcastMetricGatheringUtilities:
         self.running_stats['entropy']['mape%']=(mape_f(original_flat, recons_entropy))
         self.running_stats['entropy']['mae']=(mae_f(original_flat, recons_entropy))
 
-        # detect end of round
-        self._reset_running_stats_step_end(round_end=(agent_id == worker_count-1))
-
         # log at round start
         if self.user_logger:
             self.user_logger.broadcast_reporting(self.running_stats)
+
+        # detect end of round
+        self._reset_running_stats_step_end(round_end=(agent_id == worker_count-1))
 
         return reconstructed_grads
 
