@@ -3,6 +3,7 @@ from typing import Optional, Dict, List, Any
 import numpy as np
 import torch
 import pytorch_lightning as pl
+import torchmetrics
 from pytorch_lightning import Trainer
 from torch.utils.data import Sampler
 from torchvision.datasets import VisionDataset
@@ -351,6 +352,7 @@ class FLSimulator:
                 self._log_report(ag.local_model, shared_train_loader, shared_test_loader, round_s, ag_id)
 
             # Aggregate pl_models from all agents
+            assert len(current_round_grad_list) == self.num_agents
             self._aggregate_models(current_round_grad_list)
 
         self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
@@ -392,12 +394,12 @@ def _main_test():
             loss_detach = loss.detach()
             loss = loss if loss < 1000 else loss/loss_detach * 1000
 
-            acc = torch.mean((torch.abs((
-                torch.sigmoid(logits.detach()) > 0.5).float() - temp[1].float())<0.0001).float()).item()
-            return loss, (acc, )
+            auc_calculator = torchmetrics.AUROC(num_classes=1, task='binary')
+            auc = float(auc_calculator(logits, y).item())
+            return loss, (auc, )
         def _log_metrics(self, loss, etc, stage: str):
             self.log(f"{stage}_loss", loss, prog_bar=False)
-            self.log(f"{stage}_acc", etc[0], prog_bar=False)
+            self.log(f"{stage}_auc", etc[0], prog_bar=False)
         def clone(self, copy=None):
             return super(SimpleModel, self).clone(copy=SimpleModel())
 
