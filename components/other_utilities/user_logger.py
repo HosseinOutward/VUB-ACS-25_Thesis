@@ -24,10 +24,11 @@ class UnifiedLoggingClass:
             self.fl_sim_log = None
             self.get_agent_csv_logger = None
             self.get_wz_csv_logger = None
-        # else:
-        #     import shutil
-        #     shutil.rmtree(self.path_folder)
-        #     os.makedirs(self.path_folder)
+        else:
+            input('WARNING: You are about to delete the dev debug folder.')
+            import shutil
+            shutil.rmtree(self.path_folder)
+            os.makedirs(self.path_folder)
 
         self.agent_id, self.round_id = None, None
 
@@ -56,7 +57,7 @@ class UnifiedLoggingClass:
         assert temp(train_metrics_dict, test_metrics_dict) and temp(test_metrics_dict, train_metrics_dict)
 
         unified_dict = {'train_' + k: v for k, v in train_metrics_dict.items()}
-        unified_dict.update({'test_' + k: v for k, v in test_metrics_dict.items()})
+        unified_dict.update({'val_' + k: v for k, v in test_metrics_dict.items()})
         unified_dict.update({'agent_id': agent_id, 'round_id': round_s})
 
         current_folder = self.path_folder
@@ -86,59 +87,63 @@ class UnifiedLoggingClass:
         return CSVLogger(save_dir=self.path_folder, name=folder,
             version=f"round_{round_trained_for}_agent_{agent_trained_for}")
 
-    def get_unified_data_tables(self):
-        global_metric_before_round =\
-            pd.read_csv(os.path.join(self.path_folder, '_global_metrics_before_round_start.csv'))
-        agent_metrics_after_training =\
-            pd.read_csv(os.path.join(self.path_folder, '_agent_metrics_after_training.csv'))
 
-        round_count = agent_metrics_after_training['round_id'].max() + 1
+def _get_trainer_logs(path_folder, folder_p, round_count):
+    temp = os.listdir(os.path.join(path_folder, folder_p))
+    worker_count = max([int(f.split('_')[3]) for f in temp])+1
 
-        per_worker_training_logs = self._get_trainer_logs('agent_model_training_logs', round_count)
-        per_wz_training_logs = self._get_trainer_logs('wz_training_logs', round_count)
+    res = []
+    r_start = 0 if folder_p == 'agent_model_training_logs' else 1
+    for agent_id in range(worker_count):
+        last_step_num = 0
+        worker_table = pd.DataFrame()
+        for round_id in range(r_start, round_count):
+            version_folder = f"round_{round_id}_agent_{agent_id}"
+            file_path = os.path.join(path_folder, folder_p, version_folder, 'metrics.csv')
+            assert os.path.exists(file_path)
 
-        broadcast_entire_stats = {}
-        for file in os.listdir(os.path.join(self.path_folder, '_broadcast_protocol_stats')):
-            method = file.split('.')[0]
-            file_path = os.path.join(self.path_folder, '_broadcast_protocol_stats', file)
-            temp={k: list(v.values()) for k, v in pd.read_csv(file_path).to_dict().items()}
-            broadcast_entire_stats[method] = {
-                k: [v[i:i+round_count] for i in range(0,round_count*self.worker_count, round_count)]
-                    for k, v in temp.items()}
+            table = pd.read_csv(file_path)
+            table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[0]).reset_index()
 
-        return (per_worker_training_logs, per_wz_training_logs,
-                global_metric_before_round, agent_metrics_after_training,
-                broadcast_entire_stats)
+            table['step'] += last_step_num
+            last_step_num = table['step'].max()+1
 
-    def _get_trainer_logs(self, folder_p, round_count):
-        temp = os.listdir(os.path.join(self.path_folder, folder_p))
-        temp = max([int(f.split('_')[3]) for f in temp])+1
-        assert self.worker_count == temp
+            table['agent_id'] = agent_id
+            table['round_id'] = round_id
 
-        res = []
-        r_start = 0 if folder_p == '_global_metrics_before_round_start' else 1
-        for agent_id in range(self.worker_count):
-            last_step_num = 0
-            worker_table = pd.DataFrame()
-            for round_id in range(r_start, round_count):
-                version_folder = f"round_{round_id}_agent_{agent_id}"
-                file_path = os.path.join(self.path_folder, folder_p, version_folder, 'metrics.csv')
-                assert os.path.exists(file_path)
+            worker_table = pd.concat([worker_table, table], ignore_index=True)
+        temp = worker_table['step']
+        worker_table['step'] = temp/temp.max()*round_count
+        res.append(worker_table)
+    return res
 
-                table = pd.read_csv(file_path)
-                table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[0]).reset_index()
 
-                table['step'] += last_step_num
-                last_step_num = table['step'].max()+1
+def get_unified_data_tables(name, worker_count):
+    path_folder = os.path.join(_REPORTING_FOLDR_, name)
+    global_metric_before_round =\
+        pd.read_csv(os.path.join(path_folder, '_global_metrics_before_round_start.csv'))
+    agent_metrics_after_training =\
+        pd.read_csv(os.path.join(path_folder, '_agent_metrics_after_training.csv'))
+    round_count = agent_metrics_after_training['round_id'].max() + 1
 
-                table['agent_id'] = agent_id
-                table['round_id'] = round_id
+    per_worker_training_logs = _get_trainer_logs(path_folder, 'agent_model_training_logs', round_count)
+    per_wz_training_logs = _get_trainer_logs(path_folder, 'wz_training_logs', round_count)
+    for i in range(len(per_wz_training_logs)):
+        temp=per_wz_training_logs[i]['step']
+        per_wz_training_logs[i]['step']=temp/temp.max()*(temp.max()-1)+1
 
-                worker_table = pd.concat([worker_table, table], ignore_index=True)
-            temp = worker_table['step']
-            worker_table['step'] = temp/temp.max()*round_count
-            res.append(worker_table)
-        return res
+    broadcast_entire_stats = {}
+    for file in os.listdir(os.path.join(path_folder, '_broadcast_protocol_stats')):
+        method = file.split('.')[0]
+        file_path = os.path.join(path_folder, '_broadcast_protocol_stats', file)
+        temp={k: list(v.values()) for k, v in pd.read_csv(file_path).to_dict().items()}
+        broadcast_entire_stats[method] = {
+            k: [v[i:i+round_count] for i in range(0,round_count*worker_count, round_count)]
+                for k, v in temp.items()}
+
+    return (per_worker_training_logs, per_wz_training_logs,
+            global_metric_before_round, agent_metrics_after_training,
+            broadcast_entire_stats)
 
 def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                      global_metric_before_round, agent_metrics_after_training, broadcast_entire_stats):
@@ -149,35 +154,243 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
 
     import matplotlib.pyplot as plt
     import seaborn as sns
+    import numpy as np
 
-    # per_worker_training_logs is a list of DataFrames, one for each agent
-    # columns: epoch,step,train_loss,train_m1,m2,...,val_loss,test_m1,...
-    # m1 and ... are the metrics that could be different, like mse, acc, auc
-
-    # per_wz_training_logs is a list of DataFrames, one for each agent
-    # columns:epoch,step,train_gumble_loss,train_gumble_mape%,train_gumble_mse,train_gumble_rate_bits,
-    # train_gumble_real_bit_r,train_loss,train_mape%,train_mse,train_rate_bits,train_real_bit_r,
-    # val_loss,val_mape%,val_mse,val_rate_bits,val_real_bit_r
-
-    # each of the dataframes have a steps column which is between 0 and max_rounds
-
-    # global_metric_before_round and agent_metrics_after_training have the following columns:
-    # train_loss,train_auc,test_loss,test_auc,agent_id,round_id
-    # for global_metric_before_round, agent_id is 'global', but for the other, it is the agent id
-    # round id is an integer starting from 0 (before any training) to max_rounds (after all training)
-    # note that all the rows might not have the test_x metrics, so treat them separately so you can drop the nan rows
-
-    # I want a set of plots, but some of the columns change,
-    # we need the following plots:
-    # 1. plot of loss of global model (global_metric_before_round['?_loss']), with
-    #       the worker loss in the background (only slightly visible)
-    #       grids on, x tick on integers. legend for the global model, and also for a line showing the mean of workers
-    #       pay attention to coloring, symbols and others beautification's
-    # 2. similar plot to above but for the other metrics, with the same metric from the global_metric_before_round
-    # 3. finally a plot for per_wz_training_logs. It's similar to above, but no more global_metric_before_round, instead
-    #       every plot has a second y axis on the right with different color that has the data from mean of
-    #       broadcast_entire_stats['wz']['mape%'] which is a 2d list of size (round_count, agent_count). take a mean
-    #       over the second axis (agent_id).
+    # Set style for better aesthetics
+    plt.style.use('seaborn-v0_8')
+    sns.set_palette("husl")
+    
+    # Helper function to get metric columns
+    def get_metric_columns(df, metric_type):
+        return [col for col in df.columns if metric_type in col.lower()]
+    
+    # Helper function to plot worker backgrounds and mean
+    def plot_worker_backgrounds(ax, worker_logs, metric_col, alpha=0.2, show_mean=True):
+        worker_values = []
+        for i, worker_df in enumerate(worker_logs):
+            if metric_col in worker_df.columns:
+                x_vals = worker_df['step'] if 'step' in worker_df.columns else worker_df.index
+                y_vals = worker_df[metric_col]
+                ax.plot(x_vals, y_vals, alpha=alpha, linewidth=1, color='gray')
+                worker_values.append(y_vals.values)
+        
+        if show_mean and worker_values:
+            # Calculate mean across workers at each step
+            min_length = min(len(vals) for vals in worker_values)
+            truncated_values = [vals[:min_length] for vals in worker_values]
+            mean_values = np.mean(truncated_values, axis=0)
+            
+            # Use same x values as first worker (assuming they're aligned)
+            if worker_logs:
+                x_vals = worker_logs[0]['step'][:min_length] if 'step' in worker_logs[0].columns else range(min_length)
+                ax.plot(x_vals, mean_values, '--', linewidth=2, label='Workers Mean', color='orange', alpha=0.8)
+    
+    # Find loss and auc columns
+    loss_cols = get_metric_columns(global_metric_before_round, 'loss')
+    auc_cols = get_metric_columns(global_metric_before_round, 'auc')
+    
+    # 1. Combined Loss and AUC Plot with dual y-axes
+    if loss_cols or auc_cols:
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        
+        # Define colors and markers for different metrics
+        colors = {'train_loss': 'darkred', 'val_loss': 'red', 'train_auc': 'darkblue', 'val_auc': 'blue'}
+        markers = {'train_loss': 'o', 'val_loss': '^', 'train_auc': 's', 'val_auc': 'D'}
+        
+        # Plot Loss on primary y-axis
+        if loss_cols:
+            # Plot worker backgrounds first for loss
+            for loss_col in loss_cols:
+                worker_loss_cols = get_metric_columns(per_worker_training_logs[0] if per_worker_training_logs else pd.DataFrame(), 'loss')
+                matching_worker_col = None
+                for wcol in worker_loss_cols:
+                    if loss_col.split('_')[-1] in wcol:  # Match train/val prefix
+                        matching_worker_col = wcol
+                        break
+                
+                if matching_worker_col:
+                    # Use different colors for train/val worker backgrounds
+                    metric_type = 'train_loss' if 'train' in loss_col else 'val_loss'
+                    worker_values = []
+                    for i, worker_df in enumerate(per_worker_training_logs):
+                        if matching_worker_col in worker_df.columns:
+                            x_vals = worker_df['step'] if 'step' in worker_df.columns else worker_df.index
+                            y_vals = worker_df[matching_worker_col]
+                            ax1.plot(x_vals, y_vals, alpha=0.15, linewidth=1, color=colors[metric_type])
+                            worker_values.append(y_vals.values)
+                    
+                    # Plot worker mean
+                    if worker_values:
+                        min_length = min(len(vals) for vals in worker_values)
+                        truncated_values = [vals[:min_length] for vals in worker_values]
+                        mean_values = np.mean(truncated_values, axis=0)
+                        if per_worker_training_logs:
+                            x_vals = per_worker_training_logs[0]['step'][:min_length] if 'step' in per_worker_training_logs[0].columns else range(min_length)
+                            ax1.plot(x_vals, mean_values, '--', linewidth=1.5, 
+                                   label=f'Workers Mean ({loss_col.replace("_", " ").title()})', 
+                                   color=colors[metric_type], alpha=0.7)
+            
+            # Plot global model loss (main lines)
+            for loss_col in loss_cols:
+                x_vals = global_metric_before_round['round_id']
+                y_vals = global_metric_before_round[loss_col]
+                metric_type = 'train_loss' if 'train' in loss_col else 'val_loss'
+                label = f"Global Model ({loss_col.replace('_', ' ').title()})"
+                ax1.plot(x_vals, y_vals, marker=markers[metric_type], linestyle='-', 
+                        linewidth=3, markersize=8, label=label, color=colors[metric_type])
+            
+            ax1.set_ylabel('Loss', fontsize=12, fontweight='bold', color='darkred')
+            ax1.tick_params(axis='y', labelcolor='darkred')
+        
+        # Create secondary y-axis for AUC
+        if auc_cols:
+            ax2 = ax1.twinx()
+            
+            # Plot worker backgrounds first for AUC
+            for auc_col in auc_cols:
+                worker_auc_cols = get_metric_columns(per_worker_training_logs[0] if per_worker_training_logs else pd.DataFrame(), 'auc')
+                matching_worker_col = None
+                for wcol in worker_auc_cols:
+                    if auc_col.split('_')[-1] in wcol:  # Match train/val prefix
+                        matching_worker_col = wcol
+                        break
+                
+                if matching_worker_col:
+                    # Use different colors for train/val worker backgrounds
+                    metric_type = 'train_auc' if 'train' in auc_col else 'val_auc'
+                    worker_values = []
+                    for i, worker_df in enumerate(per_worker_training_logs):
+                        if matching_worker_col in worker_df.columns:
+                            x_vals = worker_df['step'] if 'step' in worker_df.columns else worker_df.index
+                            y_vals = worker_df[matching_worker_col]
+                            ax2.plot(x_vals, y_vals, alpha=0.15, linewidth=1, color=colors[metric_type])
+                            worker_values.append(y_vals.values)
+                    
+                    # Plot worker mean
+                    if worker_values:
+                        min_length = min(len(vals) for vals in worker_values)
+                        truncated_values = [vals[:min_length] for vals in worker_values]
+                        mean_values = np.mean(truncated_values, axis=0)
+                        if per_worker_training_logs:
+                            x_vals = per_worker_training_logs[0]['step'][:min_length] if 'step' in per_worker_training_logs[0].columns else range(min_length)
+                            ax2.plot(x_vals, mean_values, '--', linewidth=1.5, 
+                                   label=f'Workers Mean ({auc_col.replace("_", " ").title()})', 
+                                   color=colors[metric_type], alpha=0.7)
+            
+            # Plot global model AUC (main lines)
+            for auc_col in auc_cols:
+                x_vals = global_metric_before_round['round_id']
+                y_vals = global_metric_before_round[auc_col]
+                metric_type = 'train_auc' if 'train' in auc_col else 'val_auc'
+                label = f"Global Model ({auc_col.replace('_', ' ').title()})"
+                ax2.plot(x_vals, y_vals, marker=markers[metric_type], linestyle='-', 
+                        linewidth=3, markersize=8, label=label, color=colors[metric_type])
+            
+            ax2.set_ylabel('AUC', fontsize=12, fontweight='bold', color='darkblue')
+            ax2.tick_params(axis='y', labelcolor='darkblue')
+        
+        # Common settings
+        ax1.set_xlabel('Round', fontsize=12, fontweight='bold')
+        ax1.set_title('Global Model Loss and AUC vs Training Rounds', fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        
+        # Set integer ticks on x-axis
+        max_round = global_metric_before_round['round_id'].max()
+        ax1.set_xticks(range(0, max_round + 1))
+        
+        # Combine legends from both axes
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = (ax2.get_legend_handles_labels() if auc_cols else ([], []))
+        ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc='best')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    # 2. Plot WZ Training Logs (specific metrics only)
+    if per_wz_training_logs and len(per_wz_training_logs) > 0:
+        # Define the specific metrics we want to plot
+        desired_metrics = ['loss', 'mape%', 'mse', 'rate_bits', 'real_bit_r']
+        
+        # Find available metrics with train/val prefixes
+        available_metrics = []
+        for metric in desired_metrics:
+            train_col = f'train_{metric}'
+            val_col = f'val_{metric}'
+            if train_col in per_wz_training_logs[0].columns or val_col in per_wz_training_logs[0].columns:
+                available_metrics.append(metric)
+        
+        if available_metrics:
+            # Create subplots for each metric
+            n_metrics = len(available_metrics)
+            n_cols = min(3, n_metrics)
+            n_rows = (n_metrics + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows))
+            if n_metrics == 1:
+                axes = [axes]
+            elif n_rows == 1:
+                axes = axes.flatten()
+            else:
+                axes = axes.flatten()
+            
+            for i, metric in enumerate(available_metrics):
+                ax = axes[i] if i < len(axes) else None
+                if ax is None:
+                    continue
+                
+                # Plot train and val metrics separately
+                train_col = f'train_{metric}'
+                val_col = f'val_{metric}'
+                
+                # Plot worker backgrounds for train metric
+                if train_col in per_wz_training_logs[0].columns:
+                    plot_worker_backgrounds(ax, per_wz_training_logs, train_col, alpha=0.3, show_mean=False)
+                    
+                    # Calculate and plot mean for train
+                    worker_values = []
+                    for worker_df in per_wz_training_logs:
+                        if train_col in worker_df.columns:
+                            worker_values.append(worker_df[train_col].values)
+                    
+                    if worker_values:
+                        min_length = min(len(vals) for vals in worker_values)
+                        truncated_values = [vals[:min_length] for vals in worker_values]
+                        mean_values = np.mean(truncated_values, axis=0)
+                        x_vals = per_wz_training_logs[0]['step'][:min_length] if 'step' in per_wz_training_logs[0].columns else range(min_length)
+                        ax.plot(x_vals, mean_values, '-', linewidth=2, label=f'Train {metric.replace("_", " ").title()}', color='blue', alpha=0.8)
+                
+                # Plot worker backgrounds for val metric
+                if val_col in per_wz_training_logs[0].columns:
+                    plot_worker_backgrounds(ax, per_wz_training_logs, val_col, alpha=0.3, show_mean=False)
+                    
+                    # Calculate and plot mean for val
+                    worker_values = []
+                    for worker_df in per_wz_training_logs:
+                        if val_col in worker_df.columns:
+                            worker_values.append(worker_df[val_col].values)
+                    
+                    if worker_values:
+                        min_length = min(len(vals) for vals in worker_values)
+                        truncated_values = [vals[:min_length] for vals in worker_values]
+                        mean_values = np.mean(truncated_values, axis=0)
+                        x_vals = per_wz_training_logs[0]['step'][:min_length] if 'step' in per_wz_training_logs[0].columns else range(min_length)
+                        ax.plot(x_vals, mean_values, '--', linewidth=2, label=f'Val {metric.replace("_", " ").title()}', color='red', alpha=0.8)
+                
+                # Beautify the plot
+                metric_name = metric.replace('_', ' ').title()
+                ax.set_xlabel('Step', fontsize=10, fontweight='bold')
+                ax.set_ylabel(metric_name, fontsize=10, fontweight='bold')
+                ax.set_title(f'WZ Training: {metric_name}', fontsize=12, fontweight='bold')
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=9)
+            
+            # Hide empty subplots
+            for i in range(n_metrics, len(axes)):
+                axes[i].set_visible(False)
+            
+            plt.suptitle('WZ Model Training Metrics', fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            plt.show()
 
 
 
@@ -196,9 +409,8 @@ if __name__ == "__main__":
     user_logger = UnifiedLoggingClass(k)
 
     # *****************
-    temp=user_logger.get_unified_data_tables()
-    plot_all_metrics(*temp)
-    exit()
+    # temp=get_unified_data_tables("_dev_debug_test", k)
+    # plot_all_metrics(*temp)
 
     # *****************
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
