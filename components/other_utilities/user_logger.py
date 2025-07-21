@@ -416,6 +416,100 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
             plt.suptitle('WZ Model Training Metrics (Combined Workers)', fontsize=16, fontweight='bold')
             plt.tight_layout()
             plt.show()
+    
+    # 3. Scatter plots: Bit rates vs MSE/MAPE% colored by real_step
+    if per_wz_training_logs and len(per_wz_training_logs) > 0:
+        # Combine all worker DataFrames into one
+        combined_wz_df = pd.concat(per_wz_training_logs, ignore_index=True)
+        combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
+        
+        # Check if required columns exist
+        required_cols = ['train_rate_bits', 'train_real_bit_r', 'train_mse', 'train_mape%']
+        available_cols = [col for col in required_cols if col in combined_wz_df.columns]
+        
+        if len(available_cols) >= 3:  # Need at least one bit rate and one metric
+            fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+            
+            # Convert MSE to decibels (10 * log10(MSE))
+            if 'train_mse' in combined_wz_df.columns:
+                # Avoid log of zero by adding small epsilon
+                mse_db = 10 * np.log10(combined_wz_df['train_mse'] + 1e-10)
+            else:
+                mse_db = None
+            
+            # Convert MAPE% to decibels (10 * log10(MAPE%))
+            if 'train_mape%' in combined_wz_df.columns:
+                # Avoid log of zero by adding small epsilon
+                mape_db = 10 * np.log10(combined_wz_df['train_mape%'] + 1e-10)
+            else:
+                mape_db = None
+            
+            # Get bit rate values
+            rate_bits = combined_wz_df['train_rate_bits'] if 'train_rate_bits' in combined_wz_df.columns else None
+            real_bit_r = combined_wz_df['train_real_bit_r'] if 'train_real_bit_r' in combined_wz_df.columns else None
+            
+            # Get real_step for coloring
+            real_step_values = combined_wz_df['real_step']
+            
+            # Create color map - using plasma for better directional visualization
+            scatter_alpha = 0.7
+            colormap = 'plasma'  # Better for showing progression (purple to yellow)
+            
+            # Plot 1: rate_bits vs MSE (dB)
+            if rate_bits is not None and mse_db is not None:
+                scatter = axes[0, 0].scatter(rate_bits, mse_db, c=real_step_values, 
+                                           alpha=scatter_alpha, cmap=colormap, s=20)
+                axes[0, 0].set_xlabel('Rate Bits', fontsize=10, fontweight='bold')
+                axes[0, 0].set_ylabel('MSE (dB)', fontsize=10, fontweight='bold')
+                axes[0, 0].set_title('Rate Bits vs MSE (dB)', fontsize=12, fontweight='bold')
+                axes[0, 0].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[0, 0], label='Real Step')
+            else:
+                axes[0, 0].text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=axes[0, 0].transAxes)
+                axes[0, 0].set_title('Rate Bits vs MSE (dB) - No Data', fontsize=12)
+            
+            # Plot 2: real_bit_r vs MSE (dB)
+            if real_bit_r is not None and mse_db is not None:
+                scatter = axes[0, 1].scatter(real_bit_r, mse_db, c=real_step_values, 
+                                           alpha=scatter_alpha, cmap=colormap, s=20)
+                axes[0, 1].set_xlabel('Real Bit R', fontsize=10, fontweight='bold')
+                axes[0, 1].set_ylabel('MSE (dB)', fontsize=10, fontweight='bold')
+                axes[0, 1].set_title('Real Bit R vs MSE (dB)', fontsize=12, fontweight='bold')
+                axes[0, 1].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[0, 1], label='Real Step')
+            else:
+                axes[0, 1].text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=axes[0, 1].transAxes)
+                axes[0, 1].set_title('Real Bit R vs MSE (dB) - No Data', fontsize=12)
+            
+            # Plot 3: rate_bits vs MAPE% (dB)
+            if rate_bits is not None and mape_db is not None:
+                scatter = axes[1, 0].scatter(rate_bits, mape_db, c=real_step_values, 
+                                           alpha=scatter_alpha, cmap=colormap, s=20)
+                axes[1, 0].set_xlabel('Rate Bits', fontsize=10, fontweight='bold')
+                axes[1, 0].set_ylabel('MAPE% (dB)', fontsize=10, fontweight='bold')
+                axes[1, 0].set_title('Rate Bits vs MAPE% (dB)', fontsize=12, fontweight='bold')
+                axes[1, 0].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[1, 0], label='Real Step')
+            else:
+                axes[1, 0].text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=axes[1, 0].transAxes)
+                axes[1, 0].set_title('Rate Bits vs MAPE% (dB) - No Data', fontsize=12)
+            
+            # Plot 4: real_bit_r vs MAPE% (dB)
+            if real_bit_r is not None and mape_db is not None:
+                scatter = axes[1, 1].scatter(real_bit_r, mape_db, c=real_step_values, 
+                                           alpha=scatter_alpha, cmap=colormap, s=20)
+                axes[1, 1].set_xlabel('Real Bit R', fontsize=10, fontweight='bold')
+                axes[1, 1].set_ylabel('MAPE% (dB)', fontsize=10, fontweight='bold')
+                axes[1, 1].set_title('Real Bit R vs MAPE% (dB)', fontsize=12, fontweight='bold')
+                axes[1, 1].grid(True, alpha=0.3)
+                plt.colorbar(scatter, ax=axes[1, 1], label='Real Step')
+            else:
+                axes[1, 1].text(0.5, 0.5, 'Data not available', ha='center', va='center', transform=axes[1, 1].transAxes)
+                axes[1, 1].set_title('Real Bit R vs MAPE% (dB) - No Data', fontsize=12)
+            
+            plt.suptitle('WZ Training: Bit Rates vs Performance Metrics', fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            plt.show()
 
 
 
