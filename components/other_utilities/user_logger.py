@@ -88,7 +88,7 @@ class UnifiedLoggingClass:
             version=f"round_{round_trained_for}_agent_{agent_trained_for}")
 
 
-def _get_trainer_logs(path_folder, folder_p, round_count):
+def _get_trainer_logs(path_folder, folder_p, round_count, change_step=True):
     temp = os.listdir(os.path.join(path_folder, folder_p))
     worker_count = max([int(f.split('_')[3]) for f in temp])+1
 
@@ -105,15 +105,14 @@ def _get_trainer_logs(path_folder, folder_p, round_count):
             table = pd.read_csv(file_path)
             table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[0]).reset_index()
 
-            table['step'] += last_step_num
-            last_step_num = table['step'].max()+1
+            if change_step:
+                table['step'] += last_step_num
+                last_step_num = table['step'].max()+1
 
             table['agent_id'] = agent_id
             table['round_id'] = round_id
 
             worker_table = pd.concat([worker_table, table], ignore_index=True)
-        temp = worker_table['step']
-        worker_table['step'] = temp/temp.max()*round_count
         res.append(worker_table)
     return res
 
@@ -127,10 +126,15 @@ def get_unified_data_tables(name, worker_count):
     round_count = agent_metrics_after_training['round_id'].max() + 1
 
     per_worker_training_logs = _get_trainer_logs(path_folder, 'agent_model_training_logs', round_count)
-    per_wz_training_logs = _get_trainer_logs(path_folder, 'wz_training_logs', round_count)
+    for i in range(len(per_worker_training_logs)):
+        temp = per_worker_training_logs[i]['step']
+        per_worker_training_logs[i]['step'] = temp/temp.max()*round_count
+
+    per_wz_training_logs = _get_trainer_logs(path_folder, 'wz_training_logs', round_count, False)
     for i in range(len(per_wz_training_logs)):
-        temp=per_wz_training_logs[i]['step']
-        per_wz_training_logs[i]['step']=temp/temp.max()*(temp.max()-1)+1
+        temp=per_wz_training_logs[i]
+        per_wz_training_logs[i]['real_step'] =\
+            temp['round_id'] + temp['agent_id']/worker_count + temp['step']/temp['step'].max()/worker_count
 
     broadcast_entire_stats = {}
     for file in os.listdir(os.path.join(path_folder, '_broadcast_protocol_stats')):
@@ -194,7 +198,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
         fig, ax1 = plt.subplots(figsize=(12, 6))
         
         # Define colors and markers for different metrics
-        colors = {'train_loss': 'darkred', 'val_loss': 'red', 'train_auc': 'darkblue', 'val_auc': 'blue'}
+        colors = {'train_loss': 'darkred', 'val_loss': 'pink', 'train_auc': 'darkblue', 'val_auc': 'lightblue'}
         markers = {'train_loss': 'o', 'val_loss': '^', 'train_auc': 's', 'val_auc': 'D'}
         
         # Plot Loss on primary y-axis
@@ -237,7 +241,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                 metric_type = 'train_loss' if 'train' in loss_col else 'val_loss'
                 label = f"Global Model ({loss_col.replace('_', ' ').title()})"
                 ax1.plot(x_vals, y_vals, marker=markers[metric_type], linestyle='-', 
-                        linewidth=3, markersize=8, label=label, color=colors[metric_type])
+                        linewidth=3, markersize=6, label=label, color=colors[metric_type])
             
             ax1.set_ylabel('Loss', fontsize=12, fontweight='bold', color='darkred')
             ax1.tick_params(axis='y', labelcolor='darkred')
@@ -284,7 +288,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                 metric_type = 'train_auc' if 'train' in auc_col else 'val_auc'
                 label = f"Global Model ({auc_col.replace('_', ' ').title()})"
                 ax2.plot(x_vals, y_vals, marker=markers[metric_type], linestyle='-', 
-                        linewidth=3, markersize=8, label=label, color=colors[metric_type])
+                        linewidth=3, markersize=6, label=label, color=colors[metric_type])
             
             ax2.set_ylabel('AUC', fontsize=12, fontweight='bold', color='darkblue')
             ax2.tick_params(axis='y', labelcolor='darkblue')
@@ -306,17 +310,21 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
         plt.tight_layout()
         plt.show()
     
-    # 2. Plot WZ Training Logs (specific metrics only)
+    # 2. Plot WZ Training Logs (specific metrics, combined across workers)
     if per_wz_training_logs and len(per_wz_training_logs) > 0:
         # Define the specific metrics we want to plot
         desired_metrics = ['loss', 'mape%', 'mse', 'rate_bits', 'real_bit_r']
+        
+        # Combine all worker DataFrames into one
+        combined_wz_df = pd.concat(per_wz_training_logs, ignore_index=True)
+        combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
         
         # Find available metrics with train/val prefixes
         available_metrics = []
         for metric in desired_metrics:
             train_col = f'train_{metric}'
             val_col = f'val_{metric}'
-            if train_col in per_wz_training_logs[0].columns or val_col in per_wz_training_logs[0].columns:
+            if train_col in combined_wz_df.columns or val_col in combined_wz_df.columns:
                 available_metrics.append(metric)
         
         if available_metrics:
@@ -333,6 +341,14 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
             else:
                 axes = axes.flatten()
             
+            # Calculate discontinuity points (round + agent_id/worker_count)
+            worker_count = len(per_wz_training_logs)
+            max_round = combined_wz_df['round_id'].max()
+            discontinuity_points = []
+            for round_id in range(1,max_round + 1):
+                for agent_id in range(worker_count):
+                    discontinuity_points.append(round_id + agent_id / worker_count)
+            
             for i, metric in enumerate(available_metrics):
                 ax = axes[i] if i < len(axes) else None
                 if ax is None:
@@ -342,43 +358,52 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                 train_col = f'train_{metric}'
                 val_col = f'val_{metric}'
                 
-                # Plot worker backgrounds for train metric
-                if train_col in per_wz_training_logs[0].columns:
-                    plot_worker_backgrounds(ax, per_wz_training_logs, train_col, alpha=0.3, show_mean=False)
-                    
-                    # Calculate and plot mean for train
-                    worker_values = []
-                    for worker_df in per_wz_training_logs:
-                        if train_col in worker_df.columns:
-                            worker_values.append(worker_df[train_col].values)
-                    
-                    if worker_values:
-                        min_length = min(len(vals) for vals in worker_values)
-                        truncated_values = [vals[:min_length] for vals in worker_values]
-                        mean_values = np.mean(truncated_values, axis=0)
-                        x_vals = per_wz_training_logs[0]['step'][:min_length] if 'step' in per_wz_training_logs[0].columns else range(min_length)
-                        ax.plot(x_vals, mean_values, '-', linewidth=2, label=f'Train {metric.replace("_", " ").title()}', color='blue', alpha=0.8)
+                # Plot train metric if available
+                if train_col in combined_wz_df.columns:
+                    x_vals = combined_wz_df['real_step']
+                    y_vals = combined_wz_df[train_col]
+                    ax.plot(x_vals, y_vals, '-', linewidth=1,
+                            label=f'Train {metric.replace("_", " ").title()}', color='blue', alpha=0.8)
                 
-                # Plot worker backgrounds for val metric
-                if val_col in per_wz_training_logs[0].columns:
-                    plot_worker_backgrounds(ax, per_wz_training_logs, val_col, alpha=0.3, show_mean=False)
-                    
-                    # Calculate and plot mean for val
-                    worker_values = []
-                    for worker_df in per_wz_training_logs:
-                        if val_col in worker_df.columns:
-                            worker_values.append(worker_df[val_col].values)
-                    
-                    if worker_values:
-                        min_length = min(len(vals) for vals in worker_values)
-                        truncated_values = [vals[:min_length] for vals in worker_values]
-                        mean_values = np.mean(truncated_values, axis=0)
-                        x_vals = per_wz_training_logs[0]['step'][:min_length] if 'step' in per_wz_training_logs[0].columns else range(min_length)
-                        ax.plot(x_vals, mean_values, '--', linewidth=2, label=f'Val {metric.replace("_", " ").title()}', color='red', alpha=0.8)
+                # Plot val metric if available
+                if val_col in combined_wz_df.columns:
+                    x_vals = combined_wz_df['real_step']
+                    y_vals = combined_wz_df[val_col]
+                    ax.plot(x_vals, y_vals, '--', linewidth=1,
+                            label=f'Val {metric.replace("_", " ").title()}', color='red', alpha=0.8)
+                
+                # Add vertical lines at discontinuity points
+                y_min, y_max = ax.get_ylim()
+                for disc_point in discontinuity_points:
+                    if disc_point <= combined_wz_df['real_step'].max():
+                        ax.axvline(x=disc_point, color='gray', linestyle=':', alpha=0.5, linewidth=0.5)
+                
+                # Add worker labels at discontinuity points
+                # Calculate positions for worker labels (at round boundaries)
+                worker_label_positions = []
+                worker_labels = []
+                for round_id in range(1, max_round + 1):
+                    for agent_id in range(worker_count):
+                        pos = round_id + agent_id / worker_count
+                        if pos <= combined_wz_df['real_step'].max():
+                            worker_label_positions.append(pos)
+                            worker_labels.append(f'w{agent_id + 1}')
+                
+                # Set custom x-ticks to include worker labels
+                existing_ticks = ax.get_xticks()
+                all_tick_positions = list(existing_ticks) + worker_label_positions
+                all_tick_labels = [f'{int(tick)}' if tick in existing_ticks else '' for tick in existing_ticks]
+                
+                # Create secondary x-axis for worker labels
+                ax_top = ax.twiny()
+                ax_top.set_xlim(ax.get_xlim())
+                ax_top.set_xticks(worker_label_positions)
+                ax_top.set_xticklabels(worker_labels, fontsize=8, rotation=45, alpha=0.7)
+                ax_top.tick_params(axis='x', which='major', pad=0, length=3)
                 
                 # Beautify the plot
                 metric_name = metric.replace('_', ' ').title()
-                ax.set_xlabel('Step', fontsize=10, fontweight='bold')
+                ax.set_xlabel('Real Step', fontsize=10, fontweight='bold')
                 ax.set_ylabel(metric_name, fontsize=10, fontweight='bold')
                 ax.set_title(f'WZ Training: {metric_name}', fontsize=12, fontweight='bold')
                 ax.grid(True, alpha=0.3)
@@ -388,7 +413,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
             for i in range(n_metrics, len(axes)):
                 axes[i].set_visible(False)
             
-            plt.suptitle('WZ Model Training Metrics', fontsize=16, fontweight='bold')
+            plt.suptitle('WZ Model Training Metrics (Combined Workers)', fontsize=16, fontweight='bold')
             plt.tight_layout()
             plt.show()
 
@@ -406,11 +431,11 @@ if __name__ == "__main__":
     k=3
 
     # *****************
-    user_logger = UnifiedLoggingClass(k)
+    # user_logger = UnifiedLoggingClass(k)
 
     # *****************
-    # temp=get_unified_data_tables("_dev_debug_test", k)
-    # plot_all_metrics(*temp)
+    temp=get_unified_data_tables("_dev_debug_test", k)
+    plot_all_metrics(*temp)
 
     # *****************
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,

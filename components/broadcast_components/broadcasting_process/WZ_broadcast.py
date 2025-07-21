@@ -3,7 +3,7 @@ import torch
 from lightning import seed_everything
 
 from components.FL_sim import RawBroadcastProtocol
-from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, PL_EncoderDecoder_ANN, get_real_bin_prob
+from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, get_real_bin_prob
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 import pickle
