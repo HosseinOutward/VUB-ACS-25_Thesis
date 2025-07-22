@@ -7,7 +7,7 @@ from components.FL_sim import FederatedModelWrapper
 
 class ResNetPLModel(FederatedModelWrapper):
     def __init__(self, num_classes, resnet_version='resnet50', lr=0.01):
-        super().__init__()
+        super(ResNetPLModel, self).__init__()
 
         self.lr = lr
         self.resnet_version = resnet_version
@@ -44,5 +44,7 @@ class ResNetPLModel(FederatedModelWrapper):
         self.log(f'{stage}_auc', etc[0], on_step=True, on_epoch=True, prog_bar=True)
 
     def clone(self, copy=None):
-        new_model = ResNetPLModel(num_classes=self.num_classes, lr=self.lr, resnet_version=self.resnet_version)
-        return super(ResNetPLModel, self).clone(copy=new_model)
+        assert copy is None
+        copy = self.__class__(num_classes=self.num_classes, lr=self.lr, resnet_version=self.resnet_version)
+        return super(ResNetPLModel, self).clone(copy=copy)
+

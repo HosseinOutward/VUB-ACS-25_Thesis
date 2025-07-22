@@ -1,4 +1,5 @@
 import gc
+from copy import deepcopy
 from typing import Optional, Dict, List, Any
 import numpy as np
 import torch
@@ -54,13 +55,10 @@ class FederatedModelWrapper(pl.LightningModule):
     def __init__(self):
         super(FederatedModelWrapper, self).__init__()
 
+        # add any externals to self.current_step_info
         self.current_step_info: Dict[str, Any] =\
             {k: None for k in ['worker_id', 'curr_round', 'current_epoch', 'batch_idx']}
         self.accu_param_grads = None
-
-    def applied_on_grads_before_optimizer(self, worker_id, curr_round, current_epoch, batch_idx, *args, **kwargs):
-        # self.accu_param_grads
-        pass
 
     def get_loss_etc(self, batch) -> (torch.Tensor, List[Any]):
         raise NotImplementedError
@@ -68,16 +66,14 @@ class FederatedModelWrapper(pl.LightningModule):
     def _log_metrics(self, loss, etc, stage: str):
         raise NotImplementedError
 
-    def on_before_optimizer_step(self, *args, **kwargs):
+    def on_before_optimizer_step(self, optimizer):
+        super().on_before_optimizer_step(optimizer)
         self.current_step_info['current_epoch'] = self.current_epoch
 
         for name, param in self.named_parameters():
             if not param.requires_grad or param.grad is None: continue
             self.accu_param_grads[name] += param.grad.detach().clone()
 
-        self.applied_on_grads_before_optimizer(**self.current_step_info)
-
-        return super().on_before_optimizer_step(*args, **kwargs)
 
     def on_train_start(self):
         self.accu_param_grads = {
@@ -103,8 +99,13 @@ class FederatedModelWrapper(pl.LightningModule):
         return optimizer
 
     def clone(self, copy=None):
+        # NOTE: IMPORTANT TO IMPLEMENT PER CLASS
+        if copy is None:
+            raise NotImplementedError
+
         copy.load_state_dict(self.state_dict())
-        copy.current_step_info = self.current_step_info
+        copy.current_step_info = deepcopy(self.current_step_info)
+        copy.accu_param_grads = None
         return copy
 
 
@@ -234,10 +235,10 @@ class FLSimulator:
 
     def _set_local_models(self, model_transfer_to_worker_from_server):
         for ag in self.agents:
-            model = self.global_model.clone()
-            temp = model_transfer_to_worker_from_server(model.state_dict())[0]
-            model.load_state_dict(temp)
-            ag.local_model = model
+            state_dict_data = model_transfer_to_worker_from_server(self.global_model.state_dict())[0]
+
+            ag.local_model = self.global_model.clone()
+            ag.local_model.load_state_dict(state_dict_data)
             ag.local_model.current_step_info['worker_id'] = ag.agent_id
 
     def _aggregate_models(self, grad_dict_per_agent: Optional[List[Dict]] = None):

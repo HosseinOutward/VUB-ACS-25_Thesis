@@ -206,14 +206,14 @@ class WZQuantizer:
         return res
 
     # todo have multiple input data and train on all of them in one run (change sampler)
-    def train_model(self, input_data, side_info_data_list: List, epoch=10, batch_size=50_000):
+    def train_model(self, input_data, side_info_data_list: List, epoch=10, batch_size=50_000, device=0):
         # return
 
         assert len(side_info_data_list) == self.count_side_info_data
         if self.count_side_info_data == 0:
             side_info_data_list = [np.zeros(len(input_data))]
-        side_info_data_list = torch.tensor(np.array(side_info_data_list)).T
         input_data = torch.tensor(input_data).unsqueeze(1)
+        side_info_data_list = torch.tensor(np.array(side_info_data_list)).T.to(input_data.dtype)
 
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
 
@@ -268,7 +268,8 @@ class WZQuantizer:
             logger = self.user_logger.get_wz_csv_logger()
 
         trainer = pl.Trainer(
-            accelerator="cuda",
+            # accelerator="cuda",
+            devices=device,
             num_sanity_val_steps=0,
             enable_checkpointing=False,
             enable_model_summary=False,
