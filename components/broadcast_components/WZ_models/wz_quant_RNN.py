@@ -31,12 +31,13 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         reconstruct, bins_no, soft_codes, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         loss = 0.0
+            # new ld = reconst_ld * dist / (dist/0.031056 - entropy_pu_pux)
         # assert 1 > self.reconst_ld > 0
         p_u = None
         for i in range(self.coding_model.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
-            # dist = dist / torch.mean(single_grad_param ** 2)
+            dist = dist / torch.mean(single_grad_param ** 2)
             loss = loss + self.reconst_ld * dist
 
             # rate component of the loss

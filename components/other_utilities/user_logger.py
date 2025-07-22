@@ -1,20 +1,19 @@
 import os
 import warnings
-
 import pandas as pd
-import numpy as np
 from copy import deepcopy
 
 import torch
 from pytorch_lightning.loggers import CSVLogger
 
-_REPORTING_FOLDR_ = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\experiments\exp_data\reports of runs'
 
 
 class UnifiedLoggingClass:
-    def __init__(self, worker_count, name:str = "_dev_debug_test",):
+    def __init__(self, worker_count, name:str = "_dev_debug_test", runs_reporting_folder=None):
+        if runs_reporting_folder is None:
+            runs_reporting_folder =r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\experiments\exp_data\reports of runs'
         self.worker_count = worker_count
-        self.path_folder = os.path.join(_REPORTING_FOLDR_, name)
+        self.path_folder = os.path.join(runs_reporting_folder, name)
         if not os.path.exists(self.path_folder):
             os.makedirs(self.path_folder)
         elif name != "_dev_debug_test":
@@ -525,11 +524,11 @@ if __name__ == "__main__":
     k=3
 
     # *****************
-    # user_logger = UnifiedLoggingClass(k)
+    user_logger = UnifiedLoggingClass(k)
 
     # *****************
-    temp=get_unified_data_tables("_dev_debug_test", k)
-    plot_all_metrics(*temp)
+    # temp=get_unified_data_tables("_dev_debug_test", k)
+    # plot_all_metrics(*temp)
 
     # *****************
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,

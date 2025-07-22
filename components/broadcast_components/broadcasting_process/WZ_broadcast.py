@@ -1,6 +1,6 @@
 from typing import List, Dict
 import torch
-from lightning import seed_everything
+from torch import seed_everything
 
 from components.FL_sim import RawBroadcastProtocol
 from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, get_real_bin_prob
