@@ -23,7 +23,7 @@ def get_real_bin_prob(bin_no, bin_count):
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1, lr=1e-4, reconst_ld=100, *args, **kwargs):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=5, lr=8e-4, reconst_ld=3.5, *args, **kwargs):
         super().__init__()
         side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
@@ -206,7 +206,7 @@ class WZQuantizer:
         return res
 
     # todo have multiple input data and train on all of them in one run (change sampler)
-    def train_model(self, input_data, side_info_data_list: List, epoch=10, batch_size=50_000, device=0):
+    def train_model(self, input_data, side_info_data_list: List, epoch=10, batch_size=50_000, device=[0]):
         # return
 
         assert len(side_info_data_list) == self.count_side_info_data
