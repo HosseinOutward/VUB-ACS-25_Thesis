@@ -30,8 +30,8 @@ def compute_corr(worker_id, round_number, accum_grads,):
 
     if len(w1_accu_grads_list) > max_window_size:
         # replace the oldest vector with none to save memory
-        w0_accu_grads_list[-int(max_window_size+1)] = None
-        w1_accu_grads_list[-int(max_window_size+1)] = None
+        w0_accu_grads_list[len(w1_accu_grads_list)-(max_window_size+1)] = None
+        w1_accu_grads_list[-(max_window_size+1)] = None
 
     temp = len(w1_accu_grads_list) - min(len(w1_accu_grads_list), max_window_size)
     vectors_to_check = torch.stack([
@@ -43,7 +43,7 @@ def compute_corr(worker_id, round_number, accum_grads,):
     # compute the correlation for each weight between workers
     corr_list = torch.func.vmap(torch.corrcoef)(vectors_to_check)[:, 0, 1].to(torch.float32)
     temp = torch.isnan(corr_list)
-    summed_non_nan_corr = corr_list[~temp].mean().cpu().numpy()
+    summed_non_nan_corr = corr_list[~temp].abs().mean().cpu().numpy()
 
     res_per_step.append((summed_non_nan_corr, round_number, temp.sum()/len(corr_list)))
 
@@ -104,6 +104,11 @@ if __name__ == '__main__':
                 ),
             ])
         ) for s in ['train', 'test']]
+
+    dataset = [torch.utils.data.Subset(d, list(range(100))) for d in dataset]
+    for i in range(10):
+        for d in dataset:
+            d.dataset.labels[i]=i
 
     # %%
     w0_accu_grads_list = []
