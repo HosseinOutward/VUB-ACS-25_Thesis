@@ -416,12 +416,12 @@ def _main_test():
             return super(SimpleModel, self).clone(copy=SimpleModel())
 
     dataset = torch.utils.data.TensorDataset(
-        torch.concatenate([torch.randn(100000, 64)*0.5+0.5,torch.randn(100000, 64)*0.5-1]),
-        torch.concatenate(        [torch.ones((100000,1)),         torch.zeros((100000,1))]),
+        torch.concatenate([torch.randn(1_000_000, 64)*0.5+0.5,torch.randn(1_000_000, 64)*0.5-1]),
+        torch.concatenate(        [torch.ones((1_000_000,1)),         torch.zeros((1_000_000,1))]),
     )
     dataset_test = torch.utils.data.TensorDataset(
-        torch.concatenate([torch.randn(10000, 64)*0.5+0.5,torch.randn(10000, 64)*0.5-1]),
-        torch.concatenate(        [torch.ones((10000,1)),         torch.zeros((10000,1))]),
+        torch.concatenate([torch.randn(1_000_000, 64)*0.5+0.5,torch.randn(1_000_000, 64)*0.5-1]),
+        torch.concatenate(        [torch.ones((1_000_000,1)),         torch.zeros((1_000_000,1))]),
     )
 
     # run a single epoch of training before starting the simulation
