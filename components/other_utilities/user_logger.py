@@ -11,13 +11,14 @@ from pytorch_lightning.loggers import CSVLogger
 class UnifiedLoggingClass:
     def __init__(self, worker_count, name:str = "_dev_debug_test", runs_reporting_folder=None):
         if runs_reporting_folder is None:
-            runs_reporting_folder =r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\experiments\exp_data\reports of runs'
+            runs_reporting_folder =\
+                r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\experiments\run_sim_script\reports of runs'
         self.worker_count = worker_count
         self.path_folder = os.path.join(runs_reporting_folder, name)
         if not os.path.exists(self.path_folder):
             os.makedirs(self.path_folder)
         elif name != "_dev_debug_test":
-            warnings.warn('Prevented from overwriting existing test folder')
+            warnings.warn('    ***>> Prevented from overwriting existing test folder<<***    ')
             self.set_aid_rid = None
             self.broadcast_reporting = None
             self.fl_sim_log = None

@@ -1,6 +1,6 @@
 from typing import List, Dict
 import torch
-from torch import seed_everything
+from lightning import seed_everything
 
 from components.FL_sim import RawBroadcastProtocol
 from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, get_real_bin_prob
@@ -294,5 +294,5 @@ if __name__ == "__main__":
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                     count_side_info_data=0, enable_progress_bar=True)
-    broadcast_prot = WZBroadcastProtocol(worker_count, base_quantizer)
-    _test_main(broadcast_prot)
+    broadcast_prot = WZBroadcastProtocol(5, base_quantizer)
+    _test_main(broadcast_prot, worker_count=5, rounds=3)

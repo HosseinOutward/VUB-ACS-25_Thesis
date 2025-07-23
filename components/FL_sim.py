@@ -311,7 +311,9 @@ class FLSimulator:
                 data_count += len(batch[0])
         return loss/data_count, auc/data_count
 
-    def run_simulation(self, broadcast_prot=RawBroadcastProtocol(), ):
+    def run_simulation(self, broadcast_prot=None, ):
+        if broadcast_prot is None:
+            broadcast_prot = RawBroadcastProtocol()
         shared_train_loader = torch.utils.data.DataLoader(
             self.dataset_train, batch_size=self.batch_count, sampler=self.train_sampler,
             num_workers=10, persistent_workers=True)
@@ -419,7 +421,7 @@ def _main_test():
     train_loader = torch.utils.data.DataLoader(
         dataset, batch_size=len(dataset), shuffle=True, num_workers=0, persistent_workers=False)
     trainer = Trainer(max_epochs=1, accelerator='gpu', enable_progress_bar=False,
-                      enable_checkpointing=False, enable_model_summary=False)
+                      enable_checkpointing=False, enable_model_summary=False, max_steps=3)
     trainer.fit(model, train_loader)
 
     return model, dataset, dataset_test
@@ -427,10 +429,14 @@ def _main_test():
 if __name__ == "__main__":
     # Example usage of the FLSimulator with a simple model with no broadcast protocol or logger
 
+    from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
+
     model, dataset, dataset_test = _main_test()
     # *****************
+    user_logger:UnifiedLoggingClass = None
+    broadcast_prot:WZBroadcastProtocol = None
     sim = FLSimulator(
         pl_model=model, num_agents=5, communication_rounds=3, client_epochs_per_round=10,
         batch_size=10000, dataset_train=dataset, dataset_test=dataset_test,
         aggregation_method='fedavg', non_iid_sampling=False, user_logger=None)
-    sim.run_simulation()
+    sim.run_simulation(broadcast_prot=broadcast_prot)
