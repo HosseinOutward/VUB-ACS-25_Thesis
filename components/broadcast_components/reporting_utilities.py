@@ -138,13 +138,13 @@ class BroadcastMetricGatheringUtilities:
         return recons, compr
 
 
-def plot_stats(stat_dict):
+def plot_stats(stat_dict, no_raw=False):
     import matplotlib.pyplot as plt
 
     # sort stat_dict by these keys ['wz', 'entropy', 'raw16']
     temp = ['wz', 'entropy', 'raw16']
     assert all(k in stat_dict for k in temp), f"Some Key not found in stat_dict: {stat_dict.keys()}"
-    stat_dict = {k: deepcopy(stat_dict[k]) for k in temp}
+    stat_dict = {k: deepcopy(stat_dict[k]) for k in temp if not no_raw or k != 'raw16'}
 
     num_subplots = 3
     fig, ax = plt.subplots(num_subplots, 1, figsize=(15, 4 * num_subplots), sharex=True)
@@ -171,7 +171,7 @@ def plot_stats(stat_dict):
 
     #%%
     # Plotting data transfer sizes on the first subplot (ax[0])
-    temp = np.sum(stat_dict['wz']['mbytes_recived'])*0
+    temp = np.sum(stat_dict['wz']['mbytes_recived'], axis=1)*0
     for method, metrics in stat_dict.items():
         for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
             if k_transfer in metrics:
@@ -198,7 +198,7 @@ def plot_stats(stat_dict):
                        color=colors_per_method[method], alpha=0.9, zorder=len(stat_dict) - z_order)
     temp = stat_dict['wz']['mbytes_sent_to_worker']
     ax[1].plot(np.sum(temp, axis=1), linestyle=lines_per_metric[k_transfer],
-               label=f'{'Server to Worker (wz encoder)'} - {'wz'}', alpha=0.9, zorder=len(stat_dict))
+               label=f'Server to Worker (wz encoder) - wz', alpha=0.9, zorder=len(stat_dict))
 
     ax[1].set_ylabel('MB')
     ax[1].legend(loc='upper left')
