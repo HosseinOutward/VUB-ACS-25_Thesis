@@ -341,24 +341,24 @@ class FLSimulator:
                 ag.local_model.current_step_info['curr_round'] = round_s
 
                 # Backup model state before training for potential recovery
-                model_backup = ag.local_model.clone()
-                retry_count = 0
-                agent_grad=None
-                while retry_count < 5:
-                    try:
-                        agent_grad = self._agent_training(
-                            ag_id, broadcast_prot, shared_train_loader, shared_test_loader)
-                        break
-                    except Exception as e:
-                        retry_count += 1
-                        print(f"Error during training or broadcasting - {ag_id=} (attempt {retry_count}): {e}")
-
-                        if retry_count == 5:
-                            raise e
-
-                        ag.local_model = model_backup.clone()
-                        torch.cuda.empty_cache()
-                        gc.collect()
+                # model_backup = ag.local_model.clone()
+                # retry_count = 0
+                # agent_grad=None
+                # while retry_count < 3:
+                #     try:
+                agent_grad = self._agent_training(
+                    ag_id, broadcast_prot, shared_train_loader, shared_test_loader)
+                    #     break
+                    # except Exception as e:
+                    #     retry_count += 1
+                    #     print(f"Error during training or broadcasting - {ag_id=} (attempt {retry_count}): {e}")
+                    #
+                    #     if retry_count == 5:
+                    #         raise e
+                    #
+                    #     ag.local_model = model_backup.clone()
+                    #     torch.cuda.empty_cache()
+                    #     gc.collect()
 
                 current_round_grad_list.append(agent_grad)
                 self._log_report(ag.local_model, shared_train_loader, shared_test_loader, round_s, ag_id)
