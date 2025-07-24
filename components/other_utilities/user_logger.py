@@ -312,6 +312,9 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
     combined_wz_df = combined_wz_df.sort_values('agent_id').reset_index(drop=True)
     combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
 
+    # only consider rows at transition_steps
+    combined_wz_df = combined_wz_df[combined_wz_df['real_step'].isin(transition_steps)].reset_index(drop=True)
+
     fig, axes = plt.subplots(2, 2, figsize=(17, 15))
 
     mse_db = 10 * np.log10(combined_wz_df['train_mse'] + 1e-10)
@@ -327,7 +330,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
             metric_data = [mse_db, mape_db][i]
             data = [rate_bits, real_bit_r, ][j]
             scatter = axes[i, j].scatter(data, metric_data, c=combined_wz_df['real_step'],
-                                         alpha=0.2, cmap='plasma', s=20)
+                                         alpha=0.8, cmap='plasma', s=25)
             axes[i, j].set_xlabel(f'{data_name}', fontsize=10, fontweight='bold')
             axes[i, j].set_ylabel(f'{metric} (dB)', fontsize=10, fontweight='bold')
             axes[i, j].set_title(f'{j} vs {metric} (dB)', fontsize=12, fontweight='bold')
