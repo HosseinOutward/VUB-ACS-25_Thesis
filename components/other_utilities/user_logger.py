@@ -333,7 +333,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                                          alpha=0.8, cmap='plasma', s=25)
             axes[i, j].set_xlabel(f'{data_name}', fontsize=10, fontweight='bold')
             axes[i, j].set_ylabel(f'{metric} (dB)', fontsize=10, fontweight='bold')
-            axes[i, j].set_title(f'{j} vs {metric} (dB)', fontsize=12, fontweight='bold')
+            axes[i, j].set_title(f'{data_name} vs {metric} (dB)', fontsize=12, fontweight='bold')
             axes[i, j].grid(True, alpha=0.3)
             plt.colorbar(scatter, ax=axes[i, j], label='Real Step')
 
