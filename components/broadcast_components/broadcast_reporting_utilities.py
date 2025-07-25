@@ -171,12 +171,23 @@ def plot_stats(stat_dict, no_raw=False):
 
     #%%
     # Plotting data transfer sizes on the first subplot (ax[0])
+    total_params = 11_191_262
+    ax2 = ax[0].twinx()
     temp = np.sum(stat_dict['wz']['mbytes_recived'], axis=1)*0
     for method, metrics in stat_dict.items():
         for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
             if k_transfer in metrics:
                 temp += np.sum(metrics[k_transfer], axis=1)
-        ax[0].plot(temp, label=f'Total transfer - {method}', marker='o', color=colors_per_method[method], alpha=0.9)
+        ax[0].plot(temp, label=f'Total transfer - {method}',
+                   marker='o', color=colors_per_method[method], alpha=0.9)
+
+        # just to make the axis line up. the line is the same (division by constant)
+        bit_rate = temp/(total_params/1024/1024)
+        ax2.plot(bit_rate, label=f'Practical Bit Rate - {method}', alpha=0)
+
+    ax2.set_ylabel('Bit Rate (bits/parameter)')
+    ax2.tick_params(axis='y', labelcolor='tab:orange')
+    ax2.grid(False)
 
     ax[0].set_ylabel('MB')
     ax[0].legend(loc='upper left')
@@ -231,7 +242,9 @@ def plot_stats(stat_dict, no_raw=False):
     ax2.legend(lines + lines2, labels + labels2, loc='best')
 
     #%%
-    fig.tight_layout()
+    plt.suptitle('Broadcast Protocol Real Practical Performance \n(on the new, unseen bins sent by worker i)',
+                 fontsize=16, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.show()
 
 

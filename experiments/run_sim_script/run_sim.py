@@ -8,7 +8,7 @@ if __name__ == "__main__":
     from components.FL_sim import FLSimulator
     from components.other_utilities.datasets import FasterSVHN
     from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
-    from components.broadcast_components.reporting_utilities import BroadcastMetricGatheringUtilities
+    from components.broadcast_components.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities
     from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.other_utilities.user_logger import UnifiedLoggingClass
