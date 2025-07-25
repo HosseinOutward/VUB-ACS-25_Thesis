@@ -95,10 +95,10 @@ def _get_trainer_logs(path_folder, folder_p, round_count, change_step=True):
         for round_id in range(r_start, round_count):
             version_folder = f"round_{round_id}_agent_{agent_id}"
             file_path = os.path.join(path_folder, folder_p, version_folder, 'metrics.csv')
-            assert os.path.exists(file_path)
+            assert os.path.exists(file_path), f"File {file_path} does not exist."
 
             table = pd.read_csv(file_path)
-            table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[0]).reset_index()
+            table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[-1]).reset_index()
 
             if change_step:
                 table['step'] += last_step_num
@@ -159,7 +159,7 @@ def get_unified_data_tables(name, worker_count):
 
 def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                      global_metric_before_round, agent_metrics_after_training, broadcast_entire_stats):
-    from components.broadcast_components.reporting_utilities import plot_stats
+    from components.broadcast_components.broadcast_reporting_utilities import plot_stats
 
     # broadcast stats plots
     plot_stats(broadcast_entire_stats, no_raw=True)
@@ -211,30 +211,24 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
         ax.plot(x_vals, y_vals, marker=markers[l_col], linestyle='-',
                 linewidth=3, markersize=6, label=label, color=colors[l_col])
 
+    # Set up axis labels and styling
+    ax1.set_xlabel('Round', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Loss', fontsize=12, fontweight='bold', color='darkred')
     ax1.tick_params(axis='y', labelcolor='darkred')
-
-    ax1.legend()
-    plt.tight_layout()
-    plt.show()
+    ax1.set_title('Global Model Loss and AUC vs Training Rounds', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
 
     ax2.set_ylabel('AUC', fontsize=12, fontweight='bold', color='darkblue')
     ax2.tick_params(axis='y', labelcolor='darkblue')
 
-    ax1.set_xlabel('Round', fontsize=12, fontweight='bold')
-    ax1.set_title('Global Model Loss and AUC vs Training Rounds', fontsize=14, fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-
     # Set integer ticks on x-axis
     max_round = global_metric_before_round['round_id'].max()
-    ax1.set_xticks(range(0, max_round))
+    ax1.set_xticks(range(0, max_round + 1))
 
     # Combine legends from both axes
     lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = (ax2.get_legend_handles_labels() if auc_cols else ([], []))
+    lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=9, loc='best')
-
-    ax1.set_xlabel('Round', fontsize=12, fontweight='bold')
 
     plt.tight_layout()
     plt.show()
@@ -249,16 +243,24 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
     combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
 
     # find the step where the workers change for each round
-    transition_steps = []
+    transition_steps_idx = []
     for i in range(1, len(combined_wz_df)):
-        if combined_wz_df['agent_id'][i] != combined_wz_df['agent_id'][i-1]:
-            transition_steps.append(combined_wz_df['real_step'][i])
+        if combined_wz_df['agent_id'][i] != combined_wz_df['agent_id'][i - 1]:
+            # check if it has non nan val otherwise, add a +1
+            if not pd.isna(combined_wz_df['val_mse'][i]):
+                transition_steps_idx.append(i)
+            elif not pd.isna(combined_wz_df['val_mse'][i+1]):
+                transition_steps_idx.append(i+1)
+            else:
+                assert not pd.isna(combined_wz_df['val_mse'][i-1]), f'{i-1}'
+                transition_steps_idx.append(i-1)
+    transition_steps_idx = np.array(transition_steps_idx)
+
+    # only consider rows at transition_steps
+    combined_wz_df = combined_wz_df[combined_wz_df.index.isin(transition_steps_idx)].reset_index(drop=True)
 
     fig, axes = plt.subplots(len(metrics), 1, figsize=(20, 6 * len(metrics)))
     axes = axes.flatten()
-
-    # Define colors for multiple metrics on same plot
-    metric_colors = ['blue', 'green']
 
     # Plot each metric in the group
     for j, metric in enumerate(metrics):
@@ -268,10 +270,10 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
         val_col = f'val_{metric}'
 
         # Use different colors for different metrics in the same group
-        color = [metric_colors[j % len(metric_colors)], metric_colors[(j+1) % len(metric_colors)]]
+        color = ['blue', 'red']
 
         # vlines for transition steps
-        for step in transition_steps:
+        for step in combined_wz_df['real_step']:
             ax.axvline(x=step, color='gray', linestyle='--', linewidth=0.5, alpha=0.1)
 
         # Plot metric
@@ -279,12 +281,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
             train_val = ['Val', 'Train'][i]
             x_vals = combined_wz_df['real_step']
             y_vals = combined_wz_df[[val_col, train_col][i]]
-            # remove nan for validation
-            if train_val == 'Val':
-                temp=y_vals.isna()
-                x_vals = x_vals[~temp]
-                y_vals = y_vals[~temp]
-            ax.plot(x_vals, y_vals, ['-', '--'][i], linewidth=1, color=color[i], alpha=0.6/(i+1),
+            ax.plot(x_vals-0.1, y_vals, ['-s', '--o'][i], linewidth=1, color=color[i], alpha=0.7,
                 label=f'{train_val} {metric.replace("_", " ").title()}')
 
         # Create secondary x-axis for worker labels
@@ -297,12 +294,11 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
         ax.set_ylabel(metric, fontsize=10, fontweight='bold')
         ax.set_title(f'WZ Training: {metric}', fontsize=12, fontweight='bold')
         temp = np.mean(combined_wz_df[train_col].values)
-        min_v, max_v = np.percentile(combined_wz_df[train_col], [5,95])
-        ax.set_ylim(min_v-temp*0.2, max_v+temp*0.1)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=9)
 
-    plt.suptitle('WZ Model Training Metrics (each worker is between the vlines)', fontsize=16, fontweight='bold')
+    plt.suptitle('WZ Model (final) Training Metrics (each worker is between the vlines)',
+                 fontsize=16, fontweight='bold')
     plt.tight_layout(rect=[0, 0, 1, 0.98])
     plt.show()
 
@@ -313,7 +309,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
     combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
 
     # only consider rows at transition_steps
-    combined_wz_df = combined_wz_df[combined_wz_df['real_step'].isin(transition_steps)].reset_index(drop=True)
+    combined_wz_df = combined_wz_df[combined_wz_df.index.isin(transition_steps_idx)].reset_index(drop=True)
 
     fig, axes = plt.subplots(2, 2, figsize=(17, 15))
 
@@ -347,7 +343,7 @@ if __name__ == "__main__":
     from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
-    from components.broadcast_components.reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats
+    from components.broadcast_components.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats
 
     model, dataset, dataset_test = _main_test()
 
