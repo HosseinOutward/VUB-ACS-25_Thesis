@@ -115,7 +115,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
     def bin_count(self):
         return self.bins_per_plane**self.num_planes
 
-    def encode(self, x, tau=1.):
+    def encode(self, x, tau=1., force_softmax=False):
         if self.training:
             softmax = partial(F.gumbel_softmax, tau=tau, hard=False)
         else:
@@ -130,7 +130,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             soft_codes = [softmax(self.binner(rnn_out[:, binner_idx]), dim=-1) for binner_idx in range(self.num_planes)]
         bins = [torch.argmax(sc, dim=-1) for sc in soft_codes]
 
-        if self.training:
+        if self.training or force_softmax:
             codes = soft_codes
         else:
             # hard codes

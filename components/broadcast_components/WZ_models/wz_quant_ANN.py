@@ -58,8 +58,10 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
 
         self.log(f'{name_prefix}_loss', loss, prog_bar=True)
-        recons_loss = torch.mean(torch.abs((inp - inp_rec) / (inp.abs() + 1e-8))) * 100
+
+        recons_loss = torch.mean(torch.abs(inp - inp_rec)) / torch.mean((inp.abs() + 1e-8)) * 100
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
+
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
         self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
 
@@ -73,6 +75,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
         self.eval()
         with torch.no_grad():
+            assert not self.coding_model.training
             self.log_metrics('train', *self.compute_loss(batch, batch_idx))
         self.train()
 
@@ -103,6 +106,10 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
             F.one_hot(bins.long(), num_classes=self.bin_count), side_info)
         return reconstruct
 
+    def get_prior_and_softcodes_net(self, grad_vector, side_info):
+        raise NotImplementedError
+
+
 
 # ---------------------------------------------
 class WZQuantizer:
@@ -123,8 +130,37 @@ class WZQuantizer:
     def bin_count(self):
         return self.wz_pl_model.bin_count
 
-    # def get_bin_probs(self):
-    #     return None
+    def _batch_loop(self, func, batch_size, total_size):
+        self.wz_pl_model.to('cuda')
+        self.wz_pl_model.eval()
+        with torch.no_grad():
+            all_res = []
+            for start_i in range(0, total_size, batch_size):
+                end_idx = min(start_i + batch_size, total_size)
+                res = func(start_i, end_idx)
+                all_res.append(res)
+        self.wz_pl_model.to('cpu')
+        torch.cuda.empty_cache()
+        return all_res
+
+    def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
+        if type(grad_vector) != torch.Tensor:
+            grad_tensor = torch.tensor(grad_vector).to(torch.float32)
+        else:
+            grad_tensor = grad_vector.to(torch.float32)
+        side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
+        total_size = len(grad_tensor)
+
+        def func(start_i, end_idx):
+            grad_batch = grad_tensor[start_i:end_idx].unsqueeze(1).to('cuda')
+            side_info_batch = side_info_array[start_i:end_idx].to('cuda')
+            prior_batch, soft_code_batch = self.wz_pl_model.get_prior_and_softcodes_net(grad_batch, side_info_batch)
+            return (prior_batch.to('cpu'), soft_code_batch.to('cpu'))
+        all_priors = self._batch_loop(func, batch_size, total_size)
+
+        prior, soft_codes = zip(*all_priors)
+        prior, soft_codes = [torch.cat(a, dim=0) for a in [prior, soft_codes]]
+        return prior, soft_codes
 
     def encoding_process(self, grad_vector, batch_size=500_000):
         # from components.broadcast_components.WZ_models.simple import simple_quantize
@@ -133,21 +169,11 @@ class WZQuantizer:
         grad_tensor = torch.tensor(grad_vector).to(torch.float32)
         total_size = len(grad_tensor)
 
-        self.wz_pl_model.to('cuda')
-        self.wz_pl_model.eval()
-
-        all_bins = []
-        with torch.no_grad():
-            for i in range(0, total_size, batch_size):
-                end_idx = min(i + batch_size, total_size)
-                batch = grad_tensor[i:end_idx].unsqueeze(1).to('cuda')
-
-                bins_batch = self.wz_pl_model.encode_net(batch).to('cpu')
-                all_bins.append(bins_batch)
-
-                batch.to('cpu')
-        self.wz_pl_model.to('cpu')
-        torch.cuda.empty_cache()
+        def func(start_i, end_idx):
+            grad_batch = grad_tensor[start_i:end_idx].unsqueeze(1).to('cuda')
+            bins_batch = self.wz_pl_model.encode_net(grad_batch)
+            return bins_batch.to('cpu')
+        all_bins = self._batch_loop(func, batch_size, total_size)
 
         # todo separate the running of the model for ann and rnn
         if len(all_bins) <= 1:
@@ -173,32 +199,20 @@ class WZQuantizer:
 
         assert total_size == len(side_info_data_list[0])
 
-        self.wz_pl_model.to('cuda')
-        self.wz_pl_model.eval()
+        side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
 
-        all_reconstructs = []
+        def func(start_i, end_idx):
+            if len(bins_tensor.shape) != 2:
+                bins_batch = bins_tensor[start_i:end_idx].to('cuda')
+            else:
+                bins_batch = bins_tensor[:, start_i:end_idx].to('cuda')
 
-        with torch.no_grad():
-            side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
+            side_info_batch = side_info_array[start_i:end_idx].to('cuda')
 
-            for i in range(0, total_size, batch_size):
-                end_idx = min(i + batch_size, total_size)
+            reconstructs_batch = self.wz_pl_model.decode_net(bins_batch, side_info_batch)
+            return reconstructs_batch.to('cpu')
 
-                if len(bins_tensor.shape) != 2:
-                    bins_batch = bins_tensor[i:end_idx].to('cuda')
-                else:
-                    bins_batch = bins_tensor[:, i:end_idx].to('cuda')
-
-                side_info_batch = side_info_array[i:end_idx].to('cuda')
-
-                reconstructs_batch = self.wz_pl_model.decode_net(bins_batch, side_info_batch)
-                all_reconstructs.append(reconstructs_batch.to('cpu'))
-
-                # Clear GPU memory for this batch
-                del bins_batch, side_info_batch
-                torch.cuda.empty_cache()
-
-        self.wz_pl_model.to('cpu')
+        all_reconstructs = self._batch_loop(func, batch_size, total_size)
 
         all_reconstructs = torch.cat(all_reconstructs, dim=0)
         res = all_reconstructs.squeeze()

@@ -6,7 +6,7 @@ import numpy as np
 
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
-    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, *args, **kwargs):
+    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, rnn_type='rnn', *args, **kwargs):
         self.coding_model = None
 
         side_info_size = side_info_size if side_info_size != 0 else 1
@@ -15,7 +15,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         self.coding_model = EncoderDecoderLayeredRNN(
             input_dim=inp_dim, side_info_size=side_info_size,
             num_planes=num_planes,  bins_per_plane=bins_per_plane,
-            layers=3, hidden_dim=100, marginal=False)
+            rnn_type=rnn_type, layers=3, hidden_dim=100, marginal=False)
 
     @property
     def num_planes(self):
@@ -28,13 +28,12 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
         tau_t = self.tau * np.exp(self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
-        reconstruct, bins_no, soft_codes, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
+        reconstruct, bins_no, soft_codes, prior_probs =\
+            self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         loss = 0.0
-            # new ld = reconst_ld * dist / (dist/0.031056 - entropy_pu_pux)
-        # assert 1 > self.reconst_ld > 0
-        p_u = None
-        for i in range(self.coding_model.num_planes):
+        pu_vec = torch.ones(len(single_grad_param), dtype=torch.float32, device=single_grad_param.device)
+        for i in range(self.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
             dist = dist / torch.mean(single_grad_param ** 2)
@@ -43,10 +42,11 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             # rate component of the loss
             p_ux = soft_codes[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
-            loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12))) #* (1 - self.reconst_ld)
-        loss = loss #/ self.coding_model.planes
+            pu_vec*=p_u
+            loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
+        loss = loss / self.num_planes
 
-        return loss, reconstruct[-1], single_grad_param, bins_no, p_u, soft_codes, prior_probs
+        return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
     def log_metrics(self, name_prefix, loss, inp_rec, inp, bins_no_mat, p_u, bins_probs, prior_probs):
         unified_bins = self.unify_bins([b.detach() for b in bins_no_mat])
@@ -70,6 +70,22 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins]
         reconstruct = self.coding_model.decode(codes, side_info)
         return reconstruct[-1]
+
+    def get_prior_and_softcodes_net(self, grad_vector, side_info=None):
+        assert not self.coding_model.training
+        assert self.coding_model.marginal == (side_info is None)
+
+        bins_list, soft_codes = self.coding_model.encode(x=grad_vector, tau=None, force_softmax=True)
+        priors = self.coding_model.get_priors(codes=soft_codes, y=side_info, tau=None)
+
+        for i in range(self.num_planes):
+            soft_codes[i] = soft_codes[i][torch.arange(len(bins_list[i])), bins_list[i]]
+            priors[i] = priors[i][torch.arange(len(bins_list[i])), bins_list[i]]
+
+        priors = torch.prod(torch.stack(priors), dim=0)
+        soft_codes = torch.prod(torch.stack(soft_codes), dim=0)
+
+        return priors, soft_codes
 
     def unify_bins(self, list_bins,):
         list_bins=torch.stack([l.clone() for l in list_bins])
