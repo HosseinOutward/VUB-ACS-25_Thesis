@@ -6,7 +6,7 @@ import numpy as np
 
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
-    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, rnn_type='rnn', *args, **kwargs):
+    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, *args, **kwargs):
         self.coding_model = None
 
         side_info_size = side_info_size if side_info_size != 0 else 1
@@ -15,7 +15,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         self.coding_model = EncoderDecoderLayeredRNN(
             input_dim=inp_dim, side_info_size=side_info_size,
             num_planes=num_planes,  bins_per_plane=bins_per_plane,
-            rnn_type=rnn_type, layers=3, hidden_dim=100, marginal=False)
+            layers=3, hidden_dim=100, marginal=False)
 
     @property
     def num_planes(self):
@@ -36,7 +36,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         for i in range(self.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
-            dist = dist / torch.mean(single_grad_param ** 2)
+            #dist = dist / torch.mean(single_grad_param ** 2)
             loss = loss + self.reconst_ld * dist
 
             # rate component of the loss
@@ -44,7 +44,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             pu_vec*=p_u
             loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
-        loss = loss / self.num_planes
+        loss = loss #/ self.num_planes
 
         return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
