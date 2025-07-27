@@ -30,6 +30,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.tau = tau
         self.lr = lr
         self.lr_step = 40
+        self.mspe_denom = None
 
         # if this is a call from super of rnn, don't make the coding model
         if not hasattr(self, 'coding_model'):
@@ -59,7 +60,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
         self.log(f'{name_prefix}_loss', loss, prog_bar=True)
 
-        recons_loss = torch.mean(torch.abs(inp - inp_rec)) / torch.mean((inp.abs() + 1e-8)) * 100
+        recons_loss = torch.mean(torch.abs(inp - inp_rec)) / (self.mspe_denom + 1e-8) * 100
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
 
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
@@ -69,6 +70,9 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.log(f'{name_prefix}_real_bit_r', torch.mean(-torch.log2(practical_p_u + 1e-12)), prog_bar=True)
 
     def training_step(self, batch, batch_idx):
+        self.mspe_denom = (self.mspe_denom + torch.mean(batch[0]**2)) / 2 \
+            if self.mspe_denom is not None else torch.mean(batch[0]**2)
+
         res = self.compute_loss(batch, batch_idx)
 
         self.log_metrics('train_gumble', *res)
@@ -321,6 +325,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
     if isinstance(x_data_, torch.Tensor): x_data_ = x_data_.cpu().numpy()
     ind_list = wz_quantizer.val_indices \
+        if wz_quantizer.val_indices is not None else np.arange(len(x_data_))
+    ind_list = ind_list \
         if training_ind else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
 
     min_v, max_v = np.percentile(x_data_, 0.01), np.percentile(x_data_, 99.99)
@@ -364,7 +370,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
-    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error')
+    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', linewidth=0.1)
     ax1.plot(grad_data, (np.array(bins) + 1) / bin_count, label='(normalized) encoded_bins')
     ax1.set_xlabel('x_range')
 
@@ -381,7 +387,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     for bin_idx in range(bin_count):
         temp = wz_quantizer.decoding_process(
             np.zeros(len(grad_data)) + bin_idx, side_info, element_count=len(grad_data))
-        ax2.plot(grad_data, temp, label=f'bin={bin_idx}', linewidth=0.2)
+        ax2.plot(grad_data, temp, label=f'bin={bin_idx}', linewidth=0.1)
 
     ax2.set_xlabel('x_range (which is forced to bin, but is paired with related side_info)')
     ax2.set_ylabel('reconstruction per bin')
