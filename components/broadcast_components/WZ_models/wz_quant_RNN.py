@@ -28,6 +28,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
         tau_t = self.tau * np.exp(self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
+
         reconstruct, bins_no, soft_codes, prior_probs =\
             self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
@@ -36,7 +37,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         for i in range(self.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
-            #dist = dist / torch.mean(single_grad_param ** 2)
+            dist = dist / self.mape_denom
             loss = loss + self.reconst_ld * dist
 
             # rate component of the loss
@@ -44,7 +45,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             pu_vec*=p_u
             loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
-        loss = loss #/ self.num_planes
+        loss = loss / self.num_planes
 
         return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
