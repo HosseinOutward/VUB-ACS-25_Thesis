@@ -1,5 +1,4 @@
 import os
-import warnings
 import pandas as pd
 from copy import deepcopy
 
@@ -159,7 +158,7 @@ def get_unified_data_tables(name, worker_count):
 
 def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
                      global_metric_before_round, agent_metrics_after_training, broadcast_entire_stats):
-    from components.broadcast_components.broadcast_reporting_utilities import plot_stats
+    from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import plot_stats
 
     # broadcast stats plots
     plot_stats(broadcast_entire_stats, no_raw=True)
@@ -343,7 +342,7 @@ if __name__ == "__main__":
     from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
-    from components.broadcast_components.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats
+    from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats
 
     model, dataset, dataset_test = _main_test()
 

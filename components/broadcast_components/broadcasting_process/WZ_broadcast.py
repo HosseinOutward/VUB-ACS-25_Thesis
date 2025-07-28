@@ -65,6 +65,23 @@ def change_dtype_recursive(obj, dtype):
 
 
 #%%
+def data_prep_function(y, side_info_data, outlier_rem=True, normalize=True):
+    assert normalize or outlier_rem
+    # remove outliers
+    if outlier_rem:
+        filt = np.percentile(y, [0.0003, 99.9997])
+        filt = ((y >= filt[0]) * (y <= filt[1]))
+        y = y[filt]
+        side_info_data = [a[filt] for a in side_info_data]
+
+    norm_fact = None
+    if normalize:
+        norm_fact = np.max(np.abs(np.percentile(y, [0.0003, 99.9997])))
+        y = (y / norm_fact).astype(np.float32)
+        side_info_data = [((a / norm_fact)).astype(np.float32) for a in side_info_data]
+
+    return y, side_info_data, norm_fact
+
 # todo combine bias and weight into one key in dict
 def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
     if min_v is None and max_v is None:
