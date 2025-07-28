@@ -60,7 +60,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 
         self.log(f'{name_prefix}_loss', loss, prog_bar=True)
 
-        recons_loss = torch.mean(torch.abs(inp - inp_rec)) / (self.mspe_denom + 1e-8) * 100
+        recons_loss = torch.mean((inp - inp_rec)**2) / (self.mspe_denom + 1e-8) * 100
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
 
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
@@ -370,7 +370,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
-    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', linewidth=0.1)
+    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', linewidth=0.2)
     ax1.plot(grad_data, (np.array(bins) + 1) / bin_count, label='(normalized) encoded_bins')
     ax1.set_xlabel('x_range')
 
