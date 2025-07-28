@@ -32,6 +32,8 @@ def get_metrics(y, side_info_data, wz_quantizer, val_indices=None):
     bins = wz_quantizer.wz_pl_model.unify_bins(deunified_bins_list)
     y_pred = wz_quantizer.decoding_process(bins, si_test, len(y_test))
 
+    if len(side_info_data) == 0:
+        si_test = [y_test.copy()*0]
     practical_pu = get_real_bin_prob(bins, wz_quantizer.bin_count)[0]
     prior, softcodes = wz_quantizer.get_prior_and_softcodes(bins, si_test, 100_000)
 

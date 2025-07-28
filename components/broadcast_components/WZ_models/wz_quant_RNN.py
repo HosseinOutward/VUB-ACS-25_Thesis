@@ -25,13 +25,44 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
     def bins_per_plane(self):
         return self.coding_model.bins_per_plane
 
-    def compute_loss(self, batch, batch_idx):
+    def OLD_compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
-        temp = self.current_epoch / (self.trainer.max_epochs*0.95 + 1)
-        tau_t = self.tau * np.exp(temp * np.log(0.1 / self.tau))
+        tau_t = self.tau * np.exp(self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
 
         reconstruct, bins_no, soft_codes, prior_probs =\
             self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
+
+        loss = 0.0
+        pu_vec = torch.ones(len(single_grad_param), dtype=torch.float32, device=single_grad_param.device)
+        for i in range(self.num_planes):
+            # reconstruction component of the loss
+            dist = F.mse_loss(reconstruct[i], single_grad_param)
+            dist = dist / self.mspe_denom
+            loss = loss + self.reconst_ld * dist
+
+            # rate component of the loss
+            p_ux = soft_codes[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
+            p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
+            pu_vec*=p_u
+            loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
+        loss = loss / self.num_planes
+        return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
+
+    def compute_loss(self, batch, batch_idx):
+        # return self.OLD_compute_loss(batch, batch_idx)
+
+        single_grad_param, side_info = batch
+        training_progress = self.trainer.current_epoch / (self.trainer.max_epochs + 1)
+
+        training_timing = min(max(training_progress*1.2-0.1, 0), 1)
+        tau_t = self.tau * np.exp(training_timing * np.log(0.1 / self.tau))
+
+        temp = 0 if training_timing<=1e-6 else 4/100
+        temp = [torch.quantile(single_grad_param, q) for q in [0.04 - temp, 0.96 + temp]]
+        recons_target = torch.clip(single_grad_param, *temp)
+
+        reconstruct, bins_no, soft_codes, prior_probs =\
+            self.coding_model.forward(recons_target, side_info, tau=tau_t)
 
         pu_vec = torch.ones(len(single_grad_param), dtype=torch.float32, device=single_grad_param.device)
 
@@ -51,28 +82,30 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
 
             # **************************
 
-            current_error_vec = torch.abs(single_grad_param - reconstruct[i] + 1e-6)
+            current_error_vec = torch.abs(recons_target - reconstruct[i] + 1e-6)
             error_change = current_error_vec - previous_error_vec
             improvement_amount = F.relu(-error_change)**2
             worsen_amount = F.relu(error_change)**2
 
-            dist_loss = (torch.mean(worsen_amount)-torch.mean(improvement_amount)) / self.mspe_denom
+            dist_loss = (
+                    0.1*(torch.mean(worsen_amount)*10-torch.mean(improvement_amount)) +
+                    (torch.mean(current_error_vec**2))
+                ) / self.mspe_denom
 
             previous_error_vec = current_error_vec.detach()
 
             layer_distortion_losses.append(dist_loss)
 
         # **************************
-        layer_weights = torch.linspace(0.5, 1, self.num_planes).to(single_grad_param.device)
+        layer_weights = torch.linspace(0.5, 1.5, self.num_planes).to(single_grad_param.device)
         distortion_loss = sum(w * r for w, r in zip(layer_weights, layer_distortion_losses))
 
         # **************************
-        training_progress = self.current_epoch / (self.trainer.max_epochs + 1)
-        rate_loss = sum(layer_rate_losses) * (0.1 + 0.9 * training_progress)
-        distortion_loss = distortion_loss * (self.reconst_ld * (2.0 - training_progress))
+        rate_loss = sum(layer_rate_losses) * (0.1 + 0.9 * training_timing)
+        distortion_loss = distortion_loss * (self.reconst_ld * (2.0 - training_timing))
 
         # Better Loss Aggregation: Final loss combination with progressive weighting
-        total_loss = rate_loss + distortion_loss
+        total_loss = (rate_loss + distortion_loss) / self.num_planes
 
         return total_loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
