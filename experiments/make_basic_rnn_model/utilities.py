@@ -2,26 +2,22 @@ import numpy as np
 import torch
 
 from components.broadcast_components.WZ_models.wz_quant_ANN import get_real_bin_prob
+from components.broadcast_components.broadcasting_process.WZ_broadcast import data_prep_function
 
 
 def prep_data(y, side_info_data, normalize=True):
-    temp = np.percentile(y, [0.001, 99.999])
-    temp = ((y >= temp[0]) * (y <= temp[1]))
-    y = y[temp]
-    side_info_data = [a[temp] for a in side_info_data]
-    y_argsort = np.argsort(y)
+    return data_prep_function(y, side_info_data, outlier_rem=True, normalize=normalize)[:2]
 
-    if normalize:
-        temp = np.percentile(y, [0.001, 99.999])
-        y = ((y - temp[0]) / (temp[1] - temp[0]) * 2 - 1).astype(np.float32)
-        side_info_data = [((a - temp[0]) / (temp[1] - temp[0]) * 2 - 1).astype(np.float32) for a in side_info_data]
 
-    # %%
-    side_info_variance, noise_variance = [
-        np.mean([np.var(temp[np.random.randint(0, len(y), len(y) // 1000)]) for _ in range(10000)])
-            for temp in [side_info_data[0], y]  ]
+def get_data_var(y, side_info_data):
+    noise_variance = np.mean([np.var(y[np.random.randint(0, len(y), len(y) // 1000)]) for _ in range(10000)])
+    side_info_variance=0
+    if len(side_info_data) != 0:
+        side_info_variance = np.mean([
+            np.var(side_info_data[0][np.random.randint(0, len(y), len(y) // 1000)]) for _ in range(10000)])
+
     noise_variance -= side_info_variance
-    return y, side_info_data, side_info_variance, noise_variance
+    return side_info_variance, noise_variance
 
 
 #%%
