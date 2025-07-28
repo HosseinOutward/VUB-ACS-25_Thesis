@@ -96,7 +96,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
         scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=self.lr_step, gamma=0.3)
+            optimizer, step_size=int(self.trainer.max_epochs*np.ceil(self.lr_step/180)), gamma=0.3)
         return [optimizer], [scheduler]
 
     def encode_net(self, grad_vector):
