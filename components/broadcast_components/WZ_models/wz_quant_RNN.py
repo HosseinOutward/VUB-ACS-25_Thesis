@@ -32,22 +32,48 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         reconstruct, bins_no, soft_codes, prior_probs =\
             self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
-        loss = 0.0
         pu_vec = torch.ones(len(single_grad_param), dtype=torch.float32, device=single_grad_param.device)
-        for i in range(self.num_planes):
-            # reconstruction component of the loss
-            dist = F.mse_loss(reconstruct[i], single_grad_param)
-            dist = dist / self.mape_denom
-            loss = loss + self.reconst_ld * dist
 
-            # rate component of the loss
+        # Better Loss Aggregation: Store individual layer losses for analysis
+        layer_rate_losses = []
+        layer_distortion_losses = []
+        previous_error_vec = torch.zeros_like(single_grad_param)
+        for i in range(self.num_planes):
+            # Rate component of the loss for this layer
             p_ux = soft_codes[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
-            pu_vec*=p_u
-            loss = loss + torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
-        loss = loss / self.num_planes
+            pu_vec *= p_u
 
-        return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
+            # Rate loss for this layer (KL divergence)
+            rate_loss = torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
+            layer_rate_losses.append(rate_loss)
+
+            # **************************
+
+            current_error_vec = torch.abs(single_grad_param - reconstruct[i] + 1e-6)
+            error_change = current_error_vec - previous_error_vec
+            improvement_amount = F.relu(-error_change)**2
+            worsen_amount = F.relu(error_change)**2
+
+            dist_loss = (torch.mean(worsen_amount)-torch.mean(improvement_amount)) / self.mspe_denom
+
+            previous_error_vec = current_error_vec.detach()
+
+            layer_distortion_losses.append(dist_loss )
+
+        # **************************
+        layer_weights = torch.linspace(0.5, 1, self.num_planes).to(single_grad_param.device)
+        distortion_loss = sum(w * r for w, r in zip(layer_weights, layer_distortion_losses))
+
+        # **************************
+        training_progress = self.current_epoch / (self.trainer.max_epochs + 1)
+        rate_loss = sum(layer_rate_losses) * (0.1 + 0.9 * training_progress)
+        distortion_loss = distortion_loss * (self.reconst_ld * (2.0 - training_progress))
+
+        # Better Loss Aggregation: Final loss combination with progressive weighting
+        total_loss = rate_loss + distortion_loss
+
+        return total_loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
     def log_metrics(self, name_prefix, loss, inp_rec, inp, bins_no_mat, p_u, bins_probs, prior_probs):
         unified_bins = self.unify_bins([b.detach() for b in bins_no_mat])
