@@ -126,10 +126,10 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer for _ in range(agent_count)]
 
         self.last_recent_grads_list = [None] * agent_count
-        self.current_side_info_list = None
         self.agent_list_check = []
         self.warmup = True
-        self.previous_data_list = []
+        self.prev_d_flat = []
+        self.generation_done = False
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
@@ -178,7 +178,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
-        assert len(self.agent_list_check)-1==len(self.previous_data_list)
+        assert len(self.agent_list_check)-1==len(self.prev_d_flat)
 
         # ****
         quantizer = self.wz_quantizer_list[agent_id]
@@ -197,22 +197,23 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             bin_data = rans_batch_decode(bin_vec_compressed, prob_per_bin, model_size)
 
         # decode the bin data to get the vector
-        side_info_data_list = [] if self.warmup else self.current_side_info_list
+        side_info_data_list = [] if self.warmup else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
         result_dict = recover_shape_and_denormal_to_dict(res_vector, global_model_dims, min_v, max_v)
 
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
-        # detect if we are in warmup phase
-        if agent_id + 1 >= worker_count:
-            self.warmup = False
-
-        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
         if not self.warmup:
-            self._prep_for_next_agent(agent_id, worker_count, res_vector, min_v, max_v)
+            self.prev_d_flat[agent_id]=result_dict
+        else:
+            self.prev_d_flat.append(result_dict)
 
-        self.previous_data_list.append(result_dict)
+        # detect if we are in warmup phase
+        if agent_id + 1 == worker_count and self.warmup:
+            self.warmup = False
+            self._generate_models(agent_id, worker_count, res_vector, min_v, max_v)
+
         return result_dict
 
     # todo only send recons. change reporting to not need compressed data
@@ -225,30 +226,27 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         recons = {k: torch.tensor(v) for k, v in res.items()}
         return recons, compressed
 
-    def _prep_for_next_agent(self, agent_id, worker_count, res_vector, min_v, max_v):
-        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in self.previous_data_list]
-        prev_d_flat += [res_vector]
+    def _generate_models(self, agent_id, worker_count, res_vector, min_v, max_v):
+        self.generation_done = True
+        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in self.prev_d_flat]
 
-        last_recent_grads_idx = len(prev_d_flat) - worker_count
-        last_recent_grads = prev_d_flat[last_recent_grads_idx]
-        self.current_side_info_list = prev_d_flat[:last_recent_grads_idx] + prev_d_flat[last_recent_grads_idx + 1:]
+        for target_id in range(worker_count):
+            side_info = prev_d_flat[:target_id] + prev_d_flat[target_id + 1:]
+            grads = prev_d_flat[target_id]
+            qz = self.wz_quantizer_list[target_id]
+            self.wz_quantizer_list[target_id] = WZQuantizer(
+                wz_pl_model=self.wz_pl_model_class(
+                    inp_dim=1, side_info_size=len(side_info),
+                    lr=qz.wz_pl_model.lr,
+                    bins_per_plane=qz.wz_pl_model.bins_per_plane,
+                    num_planes=qz.wz_pl_model.num_planes,
+                    tau=qz.wz_pl_model.tau,
+                ).to(torch.float32),
+                count_side_info_data=len(side_info), enable_progress_bar=qz.enable_progress_bar,
+                train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
+            )
 
-        next_agent = (agent_id + 1) % worker_count
-        qz = self.wz_quantizer_list[next_agent]
-        self.wz_quantizer_list[next_agent] = WZQuantizer(
-            wz_pl_model=self.wz_pl_model_class(
-                inp_dim=1, side_info_size=len(self.current_side_info_list),
-                lr=qz.wz_pl_model.lr,
-                bins_per_plane=qz.wz_pl_model.bins_per_plane,
-                num_planes=qz.wz_pl_model.num_planes,
-                tau=qz.wz_pl_model.tau,
-            ).to(torch.float32),
-            count_side_info_data=len(self.current_side_info_list), enable_progress_bar=qz.enable_progress_bar,
-            train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
-        )
-
-        self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.current_side_info_list, epoch=20, batch_size=15_000)
+            self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=30, batch_size=15_000)
 
 
 def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
