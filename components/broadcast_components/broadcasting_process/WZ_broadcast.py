@@ -216,13 +216,15 @@ def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
 class WZBroadcastProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer:WZQuantizer):
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
-        self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer for _ in range(agent_count)]
+        self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer] * agent_count
 
         self.last_recent_grads_list = [None] * agent_count
         self.agent_list_check = []
         self.warmup = True
         self.prev_d_flat = []
-        self.generation_done = False
+        self.model_training_counter = [0] * agent_count
+
+        self.training_side_info_prev_d_flat = None
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
@@ -294,7 +296,8 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             bin_data = rans_batch_decode(bin_vec_compressed, prob_per_bin, model_size)
 
         # decode the bin data to get the vector
-        side_info_data_list = [] if self.warmup else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
+        side_info_data_list = [] if self.model_training_counter[agent_id]==0 \
+            else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
         # denormalize and convert back to dict
@@ -303,15 +306,22 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
 
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
-        if not self.warmup:
+        # ************
+        assert len(self.prev_d_flat)<=worker_count
+        if len(self.prev_d_flat)==worker_count:
             self.prev_d_flat[agent_id]=res_vector
         else:
             self.prev_d_flat.append(res_vector)
+            if len(self.prev_d_flat) == worker_count:
+                self.training_side_info_prev_d_flat = [a for a in self.prev_d_flat]
+
+        if self.warmup and len(self.prev_d_flat) == worker_count:
+            self._generate_models(agent_id, worker_count, res_vector, norm_fact_vec)
 
         # detect if we are in warmup phase
-        if len(self.prev_d_flat) == worker_count and self.warmup:
+        if np.all([a == 1 for a in self.model_training_counter]) and self.warmup:
             self.warmup = False
-            self._generate_models(agent_id, worker_count, res_vector, norm_fact_vec)
+            del self.training_side_info_prev_d_flat
 
         return result_dict
 
@@ -325,26 +335,37 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         recons = {k: torch.tensor(v) for k, v in res.items()}
         return recons, compressed
 
-    def _generate_models(self, agent_id, worker_count, res_vector, norm_fact_vec):
-        self.generation_done = True
+    def _generate_models(self, curr_agent_id, worker_count, res_vector, norm_fact_vec):
+        target_id = (curr_agent_id + 1) % worker_count
+        assert target_id == (curr_agent_id + 1) % worker_count and self.agent_list_check[-1]==curr_agent_id , \
+            'The reporting code depends on training only the next agent.'
 
-        for target_id in range(worker_count):
-            side_info = self.prev_d_flat[:target_id] + self.prev_d_flat[target_id + 1:]
-            grads = self.prev_d_flat[target_id]
-            qz = self.wz_quantizer_list[target_id]
-            self.wz_quantizer_list[target_id] = WZQuantizer(
-                wz_pl_model=self.wz_pl_model_class(
-                    inp_dim=1, side_info_size=len(side_info),
-                    lr=qz.wz_pl_model.lr,
-                    bins_per_plane=qz.wz_pl_model.bins_per_plane,
-                    num_planes=qz.wz_pl_model.num_planes,
-                    tau=qz.wz_pl_model.tau,
-                ).to(torch.float32),
-                count_side_info_data=len(side_info), enable_progress_bar=qz.enable_progress_bar,
-                train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
-            )
+        # make sure the training happens in order
+        curr_counter = self.model_training_counter[target_id]
+        past_counters = self.model_training_counter[:target_id]
+        if target_id==0:
+            past_counters = self.model_training_counter[1:]
+            curr_counter-=1
+        assert np.all([curr_counter+1==a for a in past_counters]), 'The order of model training isn\'t compatible.'
+        self.model_training_counter[target_id] += 1
 
-            self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=60, batch_size=15_000)
+        side_info = self.training_side_info_prev_d_flat[:target_id] +\
+                    self.training_side_info_prev_d_flat[target_id + 1:]
+        grads = self.training_side_info_prev_d_flat[target_id]
+        qz = self.wz_quantizer_list[target_id]
+        self.wz_quantizer_list[target_id] = WZQuantizer(
+            wz_pl_model=self.wz_pl_model_class(
+                inp_dim=1, side_info_size=len(side_info),
+                lr=qz.wz_pl_model.lr,
+                bins_per_plane=qz.wz_pl_model.bins_per_plane,
+                num_planes=qz.wz_pl_model.num_planes,
+                tau=qz.wz_pl_model.tau,
+            ).to(torch.float32),
+            count_side_info_data=len(side_info), enable_progress_bar=qz.enable_progress_bar,
+            train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
+        )
+
+        self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=5, batch_size=15_000)
 
 
 def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
@@ -400,7 +421,7 @@ def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
         assert all([v.shape == model_shape_dict[k] for k, v in grad.items()])
 
 if __name__ == "__main__":
-    k=2
+    k=5
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
                                      bins_per_plane=4, lr=1e-5).to(torch.float32)
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
@@ -409,4 +430,4 @@ if __name__ == "__main__":
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                     count_side_info_data=0, enable_progress_bar=True)
     broadcast_prot = WZBroadcastProtocol(k, base_quantizer)
-    _test_main(broadcast_prot, worker_count=k, rounds=3)
+    _test_main(broadcast_prot, worker_count=k, rounds=10)

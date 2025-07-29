@@ -94,7 +94,9 @@ def _get_trainer_logs(path_folder, folder_p, round_count, change_step=True):
         for round_id in range(r_start, round_count):
             version_folder = f"round_{round_id}_agent_{agent_id}"
             file_path = os.path.join(path_folder, folder_p, version_folder, 'metrics.csv')
-            assert os.path.exists(file_path), f"File {file_path} does not exist."
+            if not os.path.exists(file_path):
+                print('WARNING: File not found:', file_path, 'breaking the wz loadings.')
+                break
 
             table = pd.read_csv(file_path)
             table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[-1]).reset_index()
@@ -346,7 +348,7 @@ if __name__ == "__main__":
 
     model, dataset, dataset_test = _main_test()
 
-    k=3
+    k=5
 
     # *****************
     user_logger = UnifiedLoggingClass(k)
@@ -368,7 +370,7 @@ if __name__ == "__main__":
 
     # *****************
     sim = FLSimulator(
-        pl_model=model, num_agents=k, communication_rounds=3, client_epochs_per_round=3,
+        pl_model=model, num_agents=k, communication_rounds=10, client_epochs_per_round=5,
         batch_size=10000, dataset_train=dataset, dataset_test=dataset_test,
         aggregation_method='fedavg', non_iid_sampling=False, user_logger=user_logger)
     sim.run_simulation(broadcast_prot)
