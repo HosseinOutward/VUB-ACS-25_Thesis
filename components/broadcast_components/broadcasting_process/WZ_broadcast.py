@@ -69,53 +69,146 @@ def data_prep_function(y, side_info_data, outlier_rem=True, normalize=True):
     assert normalize or outlier_rem
     # remove outliers
     if outlier_rem:
-        filt = np.percentile(y, [0.0003, 99.9997])
+        filt = np.percentile(y, [0.0005, 99.9995])
         filt = ((y >= filt[0]) * (y <= filt[1]))
         y = y[filt]
         side_info_data = [a[filt] for a in side_info_data]
 
     norm_fact = None
     if normalize:
-        norm_fact = np.max(np.abs(np.percentile(y, [0.0003, 99.9997])))
+        norm_fact = np.max(np.abs(np.percentile(y, [0.003, 99.997])))
         y = (y / norm_fact).astype(np.float32)
         side_info_data = [((a / norm_fact)).astype(np.float32) for a in side_info_data]
 
     return y, side_info_data, norm_fact
 
 # todo combine bias and weight into one key in dict
-def dict_to_array_and_normalize(grad_dict: Dict, min_v=None, max_v=None):
-    if min_v is None and max_v is None:
-        # min_v, max_v = [
-        #     [f(v).to('cpu').numpy() for k, v in grad_dict.items()] for f in [torch.min, torch.max]]
-        max_v, min_v = [ np.array([torch.quantile(v, q).cpu().numpy() for k, v in grad_dict.items()])
-                            for q in [0.9999,0.0001] ]
-    assert (min_v is not None and max_v is not None)
-
-    for i in range(len(min_v)):
-        if min_v[i] == max_v[i]:
-            max_v[i] = min_v[i]+1
-
+def dict_to_array(grad_dict: Dict):
+    """Convert dictionary of tensors to a single flattened array."""
     res = []
-    for i, (k, v) in enumerate(grad_dict.items()):
+    for k, v in grad_dict.items():
         v = v.ravel()
-        v = (v - min_v[i]) / (max_v[i] - min_v[i])
-        v = v * 2 - 1  # normalize to [-1, 1]
         res.append(v.to('cpu').numpy())
     res = np.concatenate(res)
-    return res, min_v, max_v
+    return res
 
 
-def recover_shape_and_denormal_to_dict(grad_vector, org_shapes_dict, min_v: List, max_v: List):
+def normalize_array_data(data_array, org_shapes_dict, outlier_rem=False, normalize=True):
+    """Normalize array data per layer using the existing data_prep_function method.
+    Groups weight and bias parameters together for each layer."""
+    if not normalize and not outlier_rem:
+        return data_array, None
+
+    norm_fact_vec = []
+    normalized_segments = []
+    start = 0
+
+    # Group layers by their base name (removing .weight/.bias suffix)
+    layer_groups = {}
+    for k, shape in org_shapes_dict.items():
+        if k.endswith('.weight') or k.endswith('.bias'):
+            base_name = k.rsplit('.', 1)[0]  # Remove .weight or .bias
+            if base_name not in layer_groups:
+                layer_groups[base_name] = []
+            layer_groups[base_name].append((k, shape))
+        else:
+            # Handle layers without .weight/.bias suffix as individual groups
+            layer_groups[k] = [(k, shape)]
+
+    # Process each layer group
+    for group_name, layer_params in layer_groups.items():
+        # Collect all parameters for this layer group
+        group_data = []
+        group_start = start
+
+        for param_name, shape in layer_params:
+            end = start + np.prod(shape)
+            layer_data = data_array[start:end]
+            group_data.append(layer_data)
+            start = end
+
+        # Concatenate all parameters in the group for normalization
+        combined_group_data = np.concatenate(group_data)
+
+        # Use existing data_prep_function for the entire group
+        side_info_data = []  # Empty for single array normalization
+        normalized_group, _, norm_fact = data_prep_function(combined_group_data, side_info_data, outlier_rem, normalize)
+
+        # Split the normalized data back to individual parameters
+        group_start_norm = 0
+        for param_name, shape in layer_params:
+            param_size = np.prod(shape)
+            param_normalized = normalized_group[group_start_norm:group_start_norm + param_size]
+            normalized_segments.append(param_normalized)
+            group_start_norm += param_size
+
+        # Store one normalization factor per group
+        norm_fact_vec.append(norm_fact)
+
+    # Concatenate all normalized segments
+    normalized_data = np.concatenate(normalized_segments)
+    norm_fact_vec = np.array(norm_fact_vec)
+
+    return normalized_data, norm_fact_vec
+
+
+def array_to_dict_with_shapes(grad_vector, org_shapes_dict):
+    """Convert flattened array back to dictionary with original shapes."""
     res = {}
     start = 0
-    for i, (k, shape) in enumerate(org_shapes_dict.items()):
+    for k, shape in org_shapes_dict.items():
         end = start + np.prod(shape)
         v = grad_vector[start:end]
-        v = (v + 1) / 2
-        v = v * (max_v[i] - min_v[i]) + min_v[i]
         res[k] = v.reshape(shape)
         start = end
     return res
+
+
+def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
+    """Denormalize array data per layer using the normalization factors from data_prep_function.
+    Groups weight and bias parameters together for each layer."""
+    if norm_fact_vec is None:
+        return normalized_data
+
+    # Group layers by their base name (removing .weight/.bias suffix)
+    layer_groups = {}
+    for k, shape in org_shapes_dict.items():
+        if k.endswith('.weight') or k.endswith('.bias'):
+            base_name = k.rsplit('.', 1)[0]  # Remove .weight or .bias
+            if base_name not in layer_groups:
+                layer_groups[base_name] = []
+            layer_groups[base_name].append((k, shape))
+        else:
+            # Handle layers without .weight/.bias suffix as individual groups
+            layer_groups[k] = [(k, shape)]
+
+    denormalized_segments = []
+    start = 0
+    group_idx = 0
+
+    # Process each layer group
+    for group_name, layer_params in layer_groups.items():
+        norm_fact = norm_fact_vec[group_idx] if group_idx < len(norm_fact_vec) else None
+
+        # Process each parameter in the group
+        for param_name, shape in layer_params:
+            end = start + np.prod(shape)
+            layer_data = normalized_data[start:end]
+
+            if norm_fact is not None:
+                denormalized_layer = layer_data * norm_fact
+            else:
+                denormalized_layer = layer_data
+
+            denormalized_segments.append(denormalized_layer)
+            start = end
+
+        group_idx += 1
+
+    # Concatenate all denormalized segments
+    denormalized_data = np.concatenate(denormalized_segments)
+
+    return denormalized_data
 
 
 # todo separate the wz model and use dependency injection to pass it to the protocol
@@ -141,7 +234,11 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
 
         #**********
         grad_dict = change_dtype_recursive(grad_dict, torch.float32)
-        grad_flat_normal, min_v, max_v = dict_to_array_and_normalize(grad_dict)
+
+        # Get shapes dictionary before flattening
+        shapes_dict = {k: v.shape for k, v in grad_dict.items()}
+        grad_flat = dict_to_array(grad_dict)
+        grad_flat_normal, norm_fact_vec = normalize_array_data(grad_flat, shapes_dict, outlier_rem=False, normalize=True)
 
         quantizer = self.wz_quantizer_list[agent_id]
         bins_vector = quantizer.encoding_process(grad_flat_normal)
@@ -161,9 +258,9 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             bin_vec_compressed = rans_batch_encode(bins_vector.numpy(), temp)
 
         # change the dtype of the encoded data to float16
-        min_v, max_v, prob_per_bin = change_dtype_recursive([min_v, max_v, prob_per_bin], torch.float16)
+        norm_fact_vec, prob_per_bin = change_dtype_recursive([norm_fact_vec, prob_per_bin], torch.float16)
 
-        return compress_data_list((bin_vec_compressed, min_v, max_v, prob_per_bin))
+        return compress_data_list((bin_vec_compressed, norm_fact_vec, prob_per_bin))
 
     def to_worker_prep_data_for_transfer(self, agent_id):
         quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
@@ -178,7 +275,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
         self.agent_list_check.append(agent_id)
         assert all([a==i%worker_count for i,a in enumerate(self.agent_list_check)])
-        assert len(self.agent_list_check)-1==len(self.prev_d_flat)
+        # assert len(self.agent_list_check)-1==len(self.prev_d_flat)
 
         # ****
         quantizer = self.wz_quantizer_list[agent_id]
@@ -186,10 +283,10 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
 
         # decompress the data received from the worker
-        bin_vec_compressed, min_v, max_v, prob_per_bin = decompress_data_list(worker_broadcast_data)
+        bin_vec_compressed, norm_fact_vec, prob_per_bin = decompress_data_list(worker_broadcast_data)
 
         prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
-        min_v, max_v = change_dtype_recursive([min_v, max_v], torch.float32)
+        norm_fact_vec = change_dtype_recursive(norm_fact_vec, torch.float32)
 
         if self.wz_pl_model_class == PL_EncoderDecoder_RNN:
             bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
@@ -200,19 +297,21 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         side_info_data_list = [] if self.warmup else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size)
 
-        result_dict = recover_shape_and_denormal_to_dict(res_vector, global_model_dims, min_v, max_v)
+        # denormalize and convert back to dict
+        denormalized_vector = denormalize_array_data(res_vector, norm_fact_vec, global_model_dims)
+        result_dict = array_to_dict_with_shapes(denormalized_vector, global_model_dims)
 
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
         if not self.warmup:
-            self.prev_d_flat[agent_id]=result_dict
+            self.prev_d_flat[agent_id]=res_vector
         else:
-            self.prev_d_flat.append(result_dict)
+            self.prev_d_flat.append(res_vector)
 
         # detect if we are in warmup phase
-        if agent_id + 1 == worker_count and self.warmup:
+        if len(self.prev_d_flat) == worker_count and self.warmup:
             self.warmup = False
-            self._generate_models(agent_id, worker_count, res_vector, min_v, max_v)
+            self._generate_models(agent_id, worker_count, res_vector, norm_fact_vec)
 
         return result_dict
 
@@ -226,13 +325,12 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         recons = {k: torch.tensor(v) for k, v in res.items()}
         return recons, compressed
 
-    def _generate_models(self, agent_id, worker_count, res_vector, min_v, max_v):
+    def _generate_models(self, agent_id, worker_count, res_vector, norm_fact_vec):
         self.generation_done = True
-        prev_d_flat = [dict_to_array_and_normalize(pd, min_v, max_v)[0] for pd in self.prev_d_flat]
 
         for target_id in range(worker_count):
-            side_info = prev_d_flat[:target_id] + prev_d_flat[target_id + 1:]
-            grads = prev_d_flat[target_id]
+            side_info = self.prev_d_flat[:target_id] + self.prev_d_flat[target_id + 1:]
+            grads = self.prev_d_flat[target_id]
             qz = self.wz_quantizer_list[target_id]
             self.wz_quantizer_list[target_id] = WZQuantizer(
                 wz_pl_model=self.wz_pl_model_class(
@@ -246,7 +344,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
                 train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
             )
 
-            self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=30, batch_size=15_000)
+            self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=60, batch_size=15_000)
 
 
 def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
@@ -302,6 +400,7 @@ def _test_main(broadcast_prot, worker_count = 2, rounds = 2):
         assert all([v.shape == model_shape_dict[k] for k, v in grad.items()])
 
 if __name__ == "__main__":
+    k=2
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
                                      bins_per_plane=4, lr=1e-5).to(torch.float32)
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
@@ -309,5 +408,5 @@ if __name__ == "__main__":
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                     count_side_info_data=0, enable_progress_bar=True)
-    broadcast_prot = WZBroadcastProtocol(5, base_quantizer)
-    _test_main(broadcast_prot, worker_count=5, rounds=3)
+    broadcast_prot = WZBroadcastProtocol(k, base_quantizer)
+    _test_main(broadcast_prot, worker_count=k, rounds=3)

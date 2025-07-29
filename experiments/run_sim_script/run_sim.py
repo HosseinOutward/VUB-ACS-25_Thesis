@@ -44,10 +44,10 @@ if __name__ == "__main__":
 
     # *****************
 
-    user_logger = UnifiedLoggingClass(worker_count, name='7500BS,5tau, 3.5ld,100k-ts,3p,4bpp')
+    user_logger = UnifiedLoggingClass(worker_count, name='new_prot', runs_reporting_folder='reports of runs/')
     # ****
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3, bins_per_plane=4,
-                                     tau=5, lr=8e-4, reconst_ld=3.5).to(torch.float32)
+                                     tau=1.5, reconst_ld=600, lr=4e-3, ).to(torch.float32)
     wz_model.load_state_dict(torch.load(f'{data_folder}/basicRNN_3plane_4bins_state.pt', map_location='cpu'))
     # ****
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,

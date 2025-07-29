@@ -274,7 +274,7 @@ class WZQuantizer:
         # disable val progress bar due to pl bug
         NoValidationBar = None
         if self.enable_progress_bar:
-            print('          - training wz models')
+            print('        - training wz model')
 
             from pytorch_lightning.callbacks import TQDMProgressBar
             from tqdm import tqdm
