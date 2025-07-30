@@ -49,7 +49,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         return loss, reconstruct[-1], single_grad_param, bins_no, pu_vec, soft_codes, prior_probs
 
     def compute_loss(self, batch, batch_idx):
-        # return self.OLD_compute_loss(batch, batch_idx)
+        return self.OLD_compute_loss(batch, batch_idx)
 
         single_grad_param, side_info = batch
         training_progress = self.trainer.current_epoch / (self.trainer.max_epochs + 1)

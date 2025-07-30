@@ -22,6 +22,7 @@ def get_data_var(y, side_info_data):
 
 #%%
 def get_metrics(y, side_info_data, wz_quantizer, val_indices=None):
+    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     if val_indices is None:
         val_indices = np.arange(len(y))
 
@@ -29,7 +30,9 @@ def get_metrics(y, side_info_data, wz_quantizer, val_indices=None):
     si_test = [a[val_indices] for a in side_info_data]
 
     deunified_bins_list = wz_quantizer.encoding_process(y_test)
-    bins = wz_quantizer.wz_pl_model.unify_bins(deunified_bins_list)
+    if isinstance(wz_quantizer.wz_pl_model, PL_EncoderDecoder_RNN):
+        bins = wz_quantizer.wz_pl_model.unify_bins(deunified_bins_list)
+    else: bins = deunified_bins_list
     y_pred = wz_quantizer.decoding_process(bins, si_test, len(y_test))
 
     if len(side_info_data) == 0:
