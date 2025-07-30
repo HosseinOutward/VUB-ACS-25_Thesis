@@ -281,7 +281,7 @@ class WZQuantizer:
             class NoValidationBar(TQDMProgressBar):
                 def init_validation_tqdm(self): return tqdm(disable=True)
 
-        logger = None
+        logger = False
         if self.user_logger:
             logger = self.user_logger.get_wz_csv_logger()
 
