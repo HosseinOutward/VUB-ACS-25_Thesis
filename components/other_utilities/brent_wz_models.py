@@ -102,14 +102,14 @@ class EncoderDecoderLayeredRNN(nn.Module):
         else:
             self.conditionalPrior = nn.Linear(hidden_dim, bins_per_plane)
 
-    def to(self, *args, **kwargs):
-        super(EncoderDecoderLayeredRNN, self).to(*args, **kwargs)
-        self.encoder.to(*args, **kwargs)
-        self.decoder.to(*args, **kwargs)
-        self.conditionalRNN.to(*args, **kwargs)
-        self.binner.to(*args, **kwargs)
-        self.reconstructor.to(*args, **kwargs)
-        self.conditionalPriors.to(*args, **kwargs)
+    # def to(self, *args, **kwargs):
+    #     super(EncoderDecoderLayeredRNN, self).to(*args, **kwargs)
+    #     self.encoder.to(*args, **kwargs)
+    #     self.decoder.to(*args, **kwargs)
+    #     self.conditionalRNN.to(*args, **kwargs)
+    #     self.binner.to(*args, **kwargs)
+    #     self.reconstructor.to(*args, **kwargs)
+    #     self.conditionalPriors.to(*args, **kwargs)
 
     @property
     def bin_count(self):

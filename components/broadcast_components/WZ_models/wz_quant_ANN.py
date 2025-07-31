@@ -111,7 +111,15 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         return reconstruct
 
     def get_prior_and_softcodes_net(self, grad_vector, side_info):
-        raise NotImplementedError
+        from components.other_utilities.brent_wz_models import MarginalPrior
+        assert not self.coding_model.training
+        model_is_marginal = isinstance(self.coding_model.prior, MarginalPrior)
+        assert model_is_marginal == (side_info is None)
+
+        prior = self.coding_model.prior(side_info)
+        soft_code = F.softmax(self.coding_model.encoder(grad_vector), dim=-1)
+
+        return prior, soft_code
 
 
 
@@ -372,6 +380,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
     ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', linewidth=0.2)
     ax1.plot(grad_data, (np.array(bins) + 1) / bin_count, label='(normalized) encoded_bins')
+    for i in range(bin_count):
+        ax1.hlines((i + 1) / bin_count, min(grad_data), max(grad_data), linewidth=0.5, alpha=0.3)
     ax1.set_xlabel('x_range')
 
     # Visualize bin regions
