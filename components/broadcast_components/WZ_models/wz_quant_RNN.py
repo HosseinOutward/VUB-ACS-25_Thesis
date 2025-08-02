@@ -6,7 +6,7 @@ import numpy as np
 
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
-    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, *args, **kwargs):
+    def __init__(self, num_planes, bins_per_plane, inp_dim, side_info_size, marginal=False, *args, **kwargs):
         self.coding_model = None
 
         side_info_size = side_info_size if side_info_size != 0 else 1
@@ -15,7 +15,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         self.coding_model = EncoderDecoderLayeredRNN(
             input_dim=inp_dim, side_info_size=side_info_size,
             num_planes=num_planes,  bins_per_plane=bins_per_plane,
-            layers=3, hidden_dim=100, marginal=False)
+            layers=3, hidden_dim=100, marginal=marginal)
 
     @property
     def num_planes(self):
@@ -134,7 +134,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
 
     def get_prior_and_softcodes_net(self, grad_vector, side_info=None):
         assert not self.coding_model.training
-        assert self.coding_model.marginal == (side_info is None)
+        assert self.coding_model.marginal == (side_info is None or len(side_info)==0)
 
         bins_list, soft_codes = self.coding_model.encode(x=grad_vector, tau=None, force_softmax=True)
         priors = self.coding_model.get_priors(codes=soft_codes, y=side_info, tau=None)
