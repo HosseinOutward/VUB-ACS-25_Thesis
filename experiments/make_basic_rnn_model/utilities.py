@@ -21,10 +21,11 @@ def get_data_var(y, side_info_data):
 
 
 #%%
-def get_metrics(y, side_info_data, wz_quantizer, val_indices=None):
+def get_metrics(y, side_info_data, wz_quantizer):
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
-    if val_indices is None:
-        val_indices = np.arange(len(y))
+    val_indices = np.arange(len(y))
+    if wz_quantizer.val_indices is not None:
+        val_indices = wz_quantizer.val_indices
 
     y_test = y[val_indices]
     si_test = [a[val_indices] for a in side_info_data]
@@ -38,7 +39,8 @@ def get_metrics(y, side_info_data, wz_quantizer, val_indices=None):
     if len(side_info_data) == 0:
         si_test = [y_test.copy()*0]
     practical_pu = get_real_bin_prob(bins, wz_quantizer.bin_count)[0]
-    prior, softcodes = wz_quantizer.get_prior_and_softcodes(bins, si_test, 100_000)
+    temp_si = [] if wz_quantizer.wz_pl_model.coding_model.marginal else si_test
+    prior, softcodes = wz_quantizer.get_prior_and_softcodes(y_test, temp_si, 100_000)
 
     mse = np.mean((y_test - y_pred)**2)
     mspe = mse / np.mean((y)**2) * 100
@@ -62,5 +64,6 @@ def bound_lines(y, side_info_variance, noise_variance, mape_flag = False):
     if mape_flag:
         denom = np.mean(y**2)
         mse = mse/denom*100
-        lattice_db = 10 * np.log10(denom + 10**(lattice_db/10))
+        lattice_mse = 10**(lattice_db/10)
+        lattice_db = 10 * np.log10(lattice_mse/denom)
     return bit_rate_wz_bound, 10 * np.log10(mse), lattice_db

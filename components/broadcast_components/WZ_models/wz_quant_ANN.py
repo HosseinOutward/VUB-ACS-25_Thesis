@@ -23,7 +23,7 @@ def get_real_bin_prob(bin_no, bin_count):
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=5, lr=8e-4, reconst_ld=3.5, *args, **kwargs):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=5, lr=8e-4, reconst_ld=3.5, marginal=False):
         super().__init__()
         side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
@@ -36,7 +36,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         if not hasattr(self, 'coding_model'):
             self.coding_model = EncoderDecoder(
                 input_dim=inp_dim, side_info_size=side_info_size,
-                layers=4, hidden_dim=80, bin_count=bin_count, marginal=False)
+                layers=4, hidden_dim=80, bin_count=bin_count, marginal=marginal)
 
     @property
     def bin_count(self):
@@ -114,7 +114,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         from components.other_utilities.brent_wz_models import MarginalPrior
         assert not self.coding_model.training
         model_is_marginal = isinstance(self.coding_model.prior, MarginalPrior)
-        assert model_is_marginal == (side_info is None)
+        assert model_is_marginal == (side_info is None or len(side_info)==0)
 
         prior = self.coding_model.prior(side_info)
         soft_code = F.softmax(self.coding_model.encoder(grad_vector), dim=-1)
