@@ -248,14 +248,13 @@ class EncoderDecoderLayeredRNN(nn.Module):
         else:
             softmax = F.softmax
 
-        if self.marginal:
-            rnn_inputs_prior = torch.cat([torch.zeros_like(codes[0]).unsqueeze(1),
-                                          torch.stack(codes[:-1], dim=1)], dim=1)
-        else:
-            rnn_inputs_prior = torch.cat([y.unsqueeze(1).repeat(1, self.num_planes, 1),
-                                          torch.cat([torch.zeros_like(codes[0]).unsqueeze(1),
-                                                     torch.stack(codes[:-1], dim=1)], dim=1)
-                                          ], dim=-1)
+        rnn_inputs_prior = torch.zeros_like(codes[0]).unsqueeze(1)
+        if len(codes)!=1:
+            rnn_inputs_prior = torch.cat([rnn_inputs_prior, torch.stack(codes[:-1], dim=1)], dim=1)
+        if not self.marginal:
+            temp = y.unsqueeze(1).repeat(1, self.num_planes, 1)
+            rnn_inputs_prior = torch.cat([temp, rnn_inputs_prior], dim=-1)
+
         if self.training:
             rnn_inputs_prior = rnn_inputs_prior.detach()
         else:
