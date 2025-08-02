@@ -211,8 +211,6 @@ def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
     return denormalized_data
 
 
-# todo separate the wz model and use dependency injection to pass it to the protocol
-# todo remove the *args, **kwargs for all related classes
 class WZBroadcastProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer:WZQuantizer):
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
