@@ -1,9 +1,8 @@
 import csv
 import os
-from concurrent.futures import ProcessPoolExecutor
-
 import numpy as np
 import torch
+from line_profiler_pycharm import profile
 
 from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
@@ -21,77 +20,76 @@ def dict_to_csv(csv_dict, param, mode):
         writer = csv.DictWriter(f, fieldnames=csv_dict.keys())
         writer.writerow(csv_dict)
 
-
-def test_single_run(y, side_info_data, a, b, c):
-    """Single test run that can be executed in a separate process"""
-    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=1, num_planes=2, bins_per_plane=4, **a).to(torch.float32)
-    wz_quantizer = WZQuantizer(wz_model, count_side_info_data=1, enable_progress_bar=False, **b)
-    wz_quantizer.train_model(y, side_info_data, epoch=60, **c)
-
-    mse, mspe, real_bit_rate, prior_bit_rate, softcodes_bit_rate =\
-        utilities.get_metrics(y, side_info_data, wz_quantizer)
-
-    return mse, mspe, real_bit_rate, prior_bit_rate, softcodes_bit_rate
-
-
-def objective(y, side_info_data, lr, tau, ld, bs):
-    sample_count = 3
-
+@profile
+def objective(y, side_info_data, lr, tau, ld, cs, n_p, marginal):
     a = {
         'lr': lr,
         'tau': tau,
         'reconst_ld': ld,
+        'num_planes': n_p,
+        'bins_per_plane': cs,
+        'marginal': marginal,
     }
     b = {
         'train_sample_size': 200_000
     }
     c = {
-        'batch_size': bs
+        'batch_size': 1_000
     }
 
-    # Execute test() calls in parallel using processes
-    # with ProcessPoolExecutor(max_workers=sample_count) as executor:
-    #     futures = [executor.submit(test_single_run, y, side_info_data, a, b, c) for _ in range(sample_count)]
-    #
-    #     for i, future in enumerate(futures):
-    #         res = future.result()
-    for i in range(sample_count):
-        res = test_single_run(y, side_info_data, a, b, c)
-        print(f"Test {i+1}/{sample_count} completed for lr={lr}, tau={tau}, ld={ld}")
-        csv_dict = {
-            'mse': res[0],
-            'mspe': res[1],
-            'real_bit_rate': res[2],
-            'prior_bit_rate': res[3],
-            'softcodes_bit_rate': res[4],
-            'lr': a['lr'],
-            'tau': a['tau'],
-            'reconst_ld': a['reconst_ld'],
-            'train_sample_size': b['train_sample_size'],
-            'batch_size': c['batch_size'],
-        }
-        dict_to_csv(csv_dict, 'wz_rnn_batch_size.csv', mode='a')
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=1, **a).to(torch.float32)
+    wz_quantizer = WZQuantizer(wz_model, count_side_info_data=1, enable_progress_bar=False, **b)
+    wz_quantizer.train_model(y, side_info_data, epoch=180, **c)
+
+    mse, _, real_bit_rate, prior_bit_rate, _, _ =\
+        utilities.get_metrics(y, side_info_data, wz_quantizer)
+
+    return 10*np.log10(mse), real_bit_rate, prior_bit_rate
 
 
 if __name__ == '__main__':
-    temp = np.random.normal(0, np.sqrt(1), 1_000_000, ).astype(np.float32)
-    y = temp + np.random.normal(0, np.sqrt(0.01), 1_000_000, ).astype(np.float32)
+    lrs = [1e-3, 1e-2]
+    taus = [1, 5]
+    reconst_ld = [50, 100, 400, 1000]
+    code_size = [2,3,4,8,16]
+    num_planes = [1,2,3]
+    sample_count = 3
+    marginals = [False, True]
+
+    temp = np.random.normal(0, np.sqrt(1), 20_000_000, ).astype(np.float32)
+    y = temp + np.random.normal(0, np.sqrt(0.01), 20_000_000, ).astype(np.float32)
     side_info_data = [temp]
 
-    # Define hyperparameters to test
-    lrs = [5e-3]
-    taus = [4]
-    reconst_ld = [400]
-    batch_size = [1000, 10000, 50000]
+    prod_list = [(lr, tau, ld, cs, n_p, marg)
+                 for lr in lrs      for tau in taus
+                 for ld in reconst_ld        for cs in code_size
+                 for n_p in num_planes for marg in marginals]
+    test_count = len(prod_list)
+    print(f"Test count: {test_count}*{sample_count}")
+    for i, (lr, tau, ld, cs, n_p, marg) in enumerate(prod_list):
 
-    test_count = len(lrs) * len(taus) * len(reconst_ld) * len(batch_size)
-    print(f"Test count: {test_count}*sample_count")
-    i=0
-    for lr in lrs:
-        for tau in taus:
-            for ld in reconst_ld:
-                for bs in batch_size:
-                    i+=1
-                    print(f'Running grid search {i/test_count*100:.1f}% ({i}/{test_count}): ')
-                    objective(y, side_info_data, lr, tau, ld, bs)
+        if n_p != 1 and cs > 4:
+            continue
+
+        print(f'  ** >> Running grid search {i/test_count*100:.1f}% ({i+1}/{test_count}): \n'
+              f'         {prod_list[i]}"')
+
+        for j in range(sample_count):
+            eval_db, eval_rate, prior_rate = objective(y, side_info_data, lr, tau, ld, cs, n_p, marg)
+            print(f"Test {j+1}/{sample_count} completed")
+
+            csv_dict = {
+                'mse': eval_db,
+                'real_bit_rate': eval_rate,
+                'prior_bit_rate': prior_rate,
+                'whole_code_size': cs**n_p,
+                'num_planes': n_p,
+                'lr': lr,
+                'tau': tau,
+                'reconst_ld': ld,
+            }
+            cond = 'marginal' if marg else 'conditional'
+            mono = 'monolithic' if n_p==1 else 'layered'
+            dict_to_csv(csv_dict, f'res/hos_{mono},{cond}.csv', mode='a')
+
     print('Grid search completed. Results saved to wz_rnn_batch_size.csv')
