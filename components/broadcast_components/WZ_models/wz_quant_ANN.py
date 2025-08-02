@@ -52,7 +52,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         p_ux = bins_probs[temp, bin_no]
         p_u = prior_probs[temp, bin_no] + 1e-12
         loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
-        return loss, reconstruct, single_grad_param, bin_no, p_u, bins_probs, prior_probs
+        return [loss, reconstruct, single_grad_param, bin_no, p_u, bins_probs, prior_probs]
 
     # todo reduce workload by reusing the logit bin values before softmax/gumble from loss calc
     def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no_vec, p_u, bins_probs, prior_probs):
@@ -74,16 +74,21 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
             if self.mspe_denom is not None else torch.mean(batch[0]**2)
 
         res = self.compute_loss(batch, batch_idx)
+        loss, res = res[0], res[1:]
 
-        self.log_metrics('train_gumble', *res)
+        # Skip logging and redundant compute_loss if no logger and no progress bar
+        has_logger = self.trainer.logger is not False and self.trainer.logger is not None
+        has_progress_bar = self.trainer.progress_bar_callback is not None
 
-        self.eval()
-        with torch.no_grad():
-            assert not self.coding_model.training
-            self.log_metrics('train', *self.compute_loss(batch, batch_idx))
-        self.train()
+        if has_logger or has_progress_bar:
+            self.log_metrics('train_gumble', loss.detach(), *res)
 
-        loss = res[0]
+            self.eval()
+            with torch.no_grad():
+                assert not self.coding_model.training
+                self.log_metrics('train', *self.compute_loss(batch, batch_idx))
+            self.train()
+
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -266,8 +271,7 @@ class WZQuantizer:
                 self.dataset_size = dataset_size
                 self.samples_per_epoch = samples_per_epoch
             def __iter__(self):
-                temp = [np.random.randint(0, self.dataset_size) for _ in range(self.samples_per_epoch)]
-                return iter(temp)
+                return iter(np.random.randint(0, self.dataset_size, self.samples_per_epoch))
             def __len__(self):
                 return self.samples_per_epoch
         train_sampler = RandomReplacementSampler(
@@ -299,11 +303,11 @@ class WZQuantizer:
             num_sanity_val_steps=0,
             enable_checkpointing=False,
             enable_model_summary=False,
-            log_every_n_steps=1,
+            log_every_n_steps=1 if self.enable_progress_bar or logger else False,
             max_epochs=epoch,
             enable_progress_bar=self.enable_progress_bar,
             callbacks=[NoValidationBar()] if self.enable_progress_bar else [],
-            logger=logger
+            logger=logger,
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 

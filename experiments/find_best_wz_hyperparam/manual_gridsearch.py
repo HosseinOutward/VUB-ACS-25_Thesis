@@ -2,13 +2,15 @@ import csv
 import os
 import numpy as np
 import torch
-from line_profiler_pycharm import profile
 
 from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 from experiments.make_basic_rnn_model import utilities
 
 torch.set_float32_matmul_precision('medium')
+
+import logging
+logging.getLogger("lightning.pytorch").setLevel(logging.ERROR)
 
 
 def dict_to_csv(csv_dict, param, mode):
@@ -20,7 +22,6 @@ def dict_to_csv(csv_dict, param, mode):
         writer = csv.DictWriter(f, fieldnames=csv_dict.keys())
         writer.writerow(csv_dict)
 
-@profile
 def objective(y, side_info_data, lr, tau, ld, cs, n_p, marginal):
     a = {
         'lr': lr,
@@ -41,7 +42,7 @@ def objective(y, side_info_data, lr, tau, ld, cs, n_p, marginal):
     wz_quantizer = WZQuantizer(wz_model, count_side_info_data=1, enable_progress_bar=False, **b)
     wz_quantizer.train_model(y, side_info_data, epoch=180, **c)
 
-    mse, _, real_bit_rate, prior_bit_rate, _, _ =\
+    mse, _, real_bit_rate, prior_bit_rate, _ =\
         utilities.get_metrics(y, side_info_data, wz_quantizer)
 
     return 10*np.log10(mse), real_bit_rate, prior_bit_rate

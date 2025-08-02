@@ -173,7 +173,7 @@ def plot_stats(stat_dict, no_raw=False):
     # Plotting data transfer sizes on the first subplot (ax[0])
     total_params = 11_191_262
     ax2 = ax[0].twinx()
-    temp = np.sum(stat_dict['wz']['mbytes_recived'], axis=1)*0
+    temp = 0
     for method, metrics in stat_dict.items():
         for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
             if k_transfer in metrics:
@@ -257,8 +257,8 @@ if __name__ == '__main__':
 
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
                                      bins_per_plane=4, lr=1e-5).to(torch.float32)
-    path_to_basic = r'/data/basicRNN_3plane_4bins_state.pt'
-    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
+    # path_to_basic = r'/data/basicRNN_3plane_4bins_state.pt'
+    # wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                     count_side_info_data=0, enable_progress_bar=True)
@@ -268,4 +268,4 @@ if __name__ == '__main__':
     _test_main(broadcast_prot, worker_count)
 
     # report --------------------------------
-    plot_stats(broadcast_prot.round_stats)
+    plot_stats(broadcast_prot.entire_stats)
