@@ -377,7 +377,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
     # Plot 1: Data histogram with binning analysis ------------------------
     counts, bins_edges, patches = ax1.hist(
-        x_data_[np.random.choice(len(x_data_), 20_000, replace=False)],
+        x_data_[np.random.choice(len(x_data_), min(len(x_data_), 20_000), replace=False)],
         bins=200, alpha=0.3, color='gray', label='data histogram', density=False)
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
