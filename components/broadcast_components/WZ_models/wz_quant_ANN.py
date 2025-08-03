@@ -23,7 +23,7 @@ def get_real_bin_prob(bin_no, bin_count):
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=5, lr=8e-4, reconst_ld=3.5, marginal=False):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=4, lr=8e-4, reconst_ld=400, marginal=False):
         super().__init__()
         side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
@@ -132,7 +132,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
                  enable_progress_bar=False, train_sample_size=100_000, user_logger:UnifiedLoggingClass=None,):
-        assert isinstance(wz_pl_model, PL_EncoderDecoder_ANN)
+        from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
         self.val_indices = None
         self.enable_progress_bar = enable_progress_bar
@@ -140,7 +140,7 @@ class WZQuantizer:
 
         self.train_sample_size = train_sample_size
 
-        self.wz_pl_model = wz_pl_model
+        self.wz_pl_model:PL_EncoderDecoder_RNN = wz_pl_model
         self.count_side_info_data = count_side_info_data
 
     @property

@@ -41,6 +41,13 @@ class BroadcastMetricGatheringUtilities:
         self.current_agent_id = None
         self.user_logger = user_logger
 
+    def __getattribute__(self, item):
+        try:
+            return object.__getattribute__(self, item)
+        except AttributeError:
+            protocol = object.__getattribute__(self, 'broadcast_protocol')
+            return getattr(protocol, item)
+
     def _reset_running_stats_step_end(self, round_end=False):
         for method_used in self.running_stats.keys():
             for k, v in self.running_stats[method_used].items():
@@ -257,7 +264,7 @@ if __name__ == '__main__':
 
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
                                      bins_per_plane=4, lr=1e-5).to(torch.float32)
-    # path_to_basic = r'/data/basicRNN_3plane_4bins_state.pt'
+    # path_to_basic = r'/data/basicRNN_2plane_4bins_state.pt'
     # wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,

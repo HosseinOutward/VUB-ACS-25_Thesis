@@ -5,10 +5,6 @@ from components.broadcast_components.WZ_models.wz_quant_ANN import get_real_bin_
 from components.broadcast_components.broadcasting_process.WZ_broadcast import data_prep_function
 
 
-def prep_data(y, side_info_data, normalize=True):
-    return data_prep_function(y, side_info_data, outlier_rem=True, normalize=normalize)[:2]
-
-
 def get_data_var(y, side_info_data):
     noise_variance = np.mean([np.var(y[np.random.randint(0, len(y), len(y) // 1000)]) for _ in range(10000)])
     side_info_variance=0

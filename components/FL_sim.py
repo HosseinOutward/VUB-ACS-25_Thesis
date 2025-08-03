@@ -32,9 +32,15 @@ def fedavg(grad_dict_per_agent, sample_size_per_agent):
 
 
 #%%
+# todo remove this class (move to some file) have if else for where the functions were used.
+#  replace func with not implemented
 class RawBroadcastProtocol:
-    def __init__(self, *args, **kwargs):
-        pass
+    curr_agent_id = None
+    curr_round_id = None
+
+    def start_round_agent_process(self, agent_id, round):
+        self.curr_agent_id = agent_id
+        self.curr_round_id = round
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         return (grad_dict, )
@@ -335,6 +341,8 @@ class FLSimulator:
             self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
             current_round_grad_list = []
             for ag_id, ag in enumerate(self.agents):
+                broadcast_prot.start_round_agent_process(ag_id, round_s)
+
                 if self.user_logger:
                     self.user_logger.set_aid_rid(ag_id, round_s)
 
