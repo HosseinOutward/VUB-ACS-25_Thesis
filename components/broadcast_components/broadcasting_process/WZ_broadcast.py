@@ -69,14 +69,23 @@ def data_prep_function(y, side_info_data, outlier_rem=True, normalize=True):
     assert normalize or outlier_rem
     # remove outliers
     if outlier_rem:
-        filt = np.percentile(y, [0.0005, 99.9995])
+        filt = np.percentile(y, [0.001, 99.999])
         filt = ((y >= filt[0]) * (y <= filt[1]))
         y = y[filt]
         side_info_data = [a[filt] for a in side_info_data]
 
     norm_fact = None
     if normalize:
-        norm_fact = np.max(np.abs(np.percentile(y, [0.003, 99.997])))
+        num_samples = 5
+        sample_size = min(200_000, len(y))
+        norm_facts = []
+        for _ in range(num_samples):
+            sample_indices = np.random.choice(len(y), size=sample_size, replace=True)
+            y_sample = y[sample_indices]
+            norm_fact_sample = np.max(np.abs(np.percentile(y_sample, [0.1, 99.9])))
+            norm_facts.append(norm_fact_sample)
+        norm_fact = np.mean(norm_facts)
+
         y = (y / norm_fact).astype(np.float32)
         side_info_data = [((a / norm_fact)).astype(np.float32) for a in side_info_data]
 
