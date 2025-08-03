@@ -360,7 +360,7 @@ if __name__ == "__main__":
     # *****************
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=3,
                                      bins_per_plane=4, lr=1e-5).to(torch.float32)
-    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_3plane_4bins_state.pt'
+    path_to_basic = r'/data/basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
