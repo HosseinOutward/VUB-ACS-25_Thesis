@@ -394,6 +394,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     _plot_bin_regions(ax1, grad_data, bins, x_step, colors)
 
     ax1.set_xlim(true_min_v, true_max_v)
+    ax1.set_ylim(-0.01, 1.01)
     ax1.legend(loc="upper right")
     ax1.set_title('Binning Visualization')
 
