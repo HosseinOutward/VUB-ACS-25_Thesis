@@ -81,7 +81,7 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         has_logger = self.trainer.logger is not False and self.trainer.logger is not None
         has_progress_bar = self.trainer.progress_bar_callback is not None
 
-        if has_logger or has_progress_bar:
+        if (has_logger or has_progress_bar) and batch_idx%3==0:
             self.log_metrics('train_gumble', loss.detach(), *res)
 
             self.eval()
