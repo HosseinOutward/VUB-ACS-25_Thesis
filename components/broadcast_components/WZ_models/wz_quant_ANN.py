@@ -1,5 +1,6 @@
 import gc
 from typing import List
+
 from components.other_utilities.brent_wz_models import EncoderDecoder
 import torch
 import torch.nn.functional as F
@@ -21,7 +22,7 @@ def get_real_bin_prob(bin_no, bin_count):
         bin_prob_vec[b] = float((count / len(bin_no)).cpu())
     return practical_p_u, torch.tensor(bin_prob_vec)
 
-
+# todo remove this class and use RNN only
 class PL_EncoderDecoder_ANN(pl.LightningModule):
     def __init__(self, inp_dim, side_info_size, bin_count=None, tau=4, lr=8e-4, reconst_ld=400, marginal=False):
         super().__init__()
@@ -203,7 +204,7 @@ class WZQuantizer:
         # from components.broadcast_components.WZ_models.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
-        bins_tensor = torch.tensor(np.array(quantized_data))
+        bins_tensor = torch.tensor(np.asarray(quantized_data))
         total_size = len(bins_tensor[0])
 
         assert len(side_info_data_list) == self.count_side_info_data
@@ -338,7 +339,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ind_list = ind_list if training_ind \
                     else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
 
-    min_v, max_v = np.percentile(x_data_, 0.01), np.percentile(x_data_, 99.99)
+    min_v, max_v = np.percentile(x_data_, 1), np.percentile(x_data_, 99)
     true_min_v, true_max_v = x_data_.min(), x_data_.max()
 
     grad_data = np.asarray(x_data_, dtype=np.float32)[ind_list]
@@ -352,9 +353,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     pointer_v = true_min_v
     spaced_idx = []
     for i, gd in enumerate(grad_data):
-        # assert pointer_v + x_step * 2 > gd, f"Data has gaps larger than x_step ({(gd-pointer_v)/x_step})"
         if pointer_v + x_step * 0.95 < gd:
-            pointer_v += gd
+            pointer_v = gd
             spaced_idx.append(i)
     spaced_idx.append(len(grad_data)-1)
     spaced_idx = np.array(spaced_idx)
@@ -383,7 +383,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ax1.scatter(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', s=0.2, alpha=0.5)
     temp = [wz_quantizer.wz_pl_model.bins_per_plane, wz_quantizer.wz_pl_model.num_planes]
     for b in range(temp[1]):
-        ax1.plot(grad_data, ((np.array(deunif_bins[b]) + 1 + b) / (b + temp[0]) + b)/temp[1],
+        ax1.plot(grad_data, ((np.asarray(deunif_bins[b]) + 1 + b) / (b + temp[0]) + b)/temp[1],
                  color='orange', label='(normalized) encoded_bins' if b == 0 else None, linewidth=0.5)
     for i in range(bin_count):
         ax1.hlines((i + 1) / bin_count, min(grad_data), max(grad_data), linewidth=0.5, alpha=0.3)
@@ -427,8 +427,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
 
 if __name__ == "__main__":
-    side_info_data = np.random.normal(0, 1, 100000).astype(np.float32)
-    y = side_info_data + np.random.normal(0, 0.1, 100000).astype(np.float32)
+    side_info_data = np.random.normal(0, 1, 1_000_000).astype(np.float32)
+    y = side_info_data + np.random.normal(0, 0.1, 1_000_000).astype(np.float32)
     side_info_data = [side_info_data]
     # side_info_data=[]
 
@@ -441,10 +441,10 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", message="The 'val_dataloader' does not have many")
 
     # %%
-    pl_model = PL_EncoderDecoder_ANN(
-        inp_dim=1, side_info_size=len(side_info_data), bin_count=3, lr=1e-5
-    )
-    wz_quantizer = WZQuantizer(wz_pl_model=pl_model,
+    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2, bins_per_plane=16, tau=2,
+                                     reconst_ld=400, lr=1e-3, marginal=True).to(torch.float32)
+    wz_quantizer = WZQuantizer(wz_pl_model=wz_model,
                                count_side_info_data=len(side_info_data),
                                train_sample_size=100_000, enable_progress_bar=True)
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=10_000)
@@ -452,4 +452,4 @@ if __name__ == "__main__":
     # %%
     y_pred = wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), side_info_data, len(y))
     print('error ', np.mean(np.abs(y - y_pred)))
-    plot_bins(wz_quantizer, y, side_info_data)
+    plot_bins(wz_quantizer, y, side_info_data, step_count=10_000)
