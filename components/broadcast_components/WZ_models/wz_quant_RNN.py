@@ -143,10 +143,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             soft_codes[i] = soft_codes[i][torch.arange(len(bins_list[i])), bins_list[i]]
             priors[i] = priors[i][torch.arange(len(bins_list[i])), bins_list[i]]
 
-        priors = torch.prod(torch.stack(priors), dim=0)
-        soft_codes = torch.prod(torch.stack(soft_codes), dim=0)
-
-        return priors, soft_codes
+        return torch.stack(priors), torch.stack(soft_codes)
 
     def unify_bins(self, list_bins,):
         list_bins=torch.stack([l.clone() for l in list_bins])
