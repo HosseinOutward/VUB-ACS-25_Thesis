@@ -406,6 +406,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
                 num_planes=qz.wz_pl_model.num_planes,
                 reconst_ld=qz.wz_pl_model.reconst_ld,
                 tau=qz.wz_pl_model.tau,
+                marginal=False,
             ).to(torch.float32),
             count_side_info_data=len(side_info), enable_progress_bar=qz.enable_progress_bar,
             train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
