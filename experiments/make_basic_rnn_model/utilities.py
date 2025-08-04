@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 
-from components.broadcast_components.WZ_models.wz_quant_ANN import get_real_bin_prob
+from components.broadcast_components.WZ_models.wz_quant_ANN import get_real_bin_prob, WZQuantizer
+from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 from components.broadcast_components.broadcasting_process.WZ_broadcast import data_prep_function
 
 
@@ -17,8 +18,7 @@ def get_data_var(y, side_info_data):
 
 
 #%%
-def get_metrics(y, side_info_data, wz_quantizer):
-    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+def get_metrics(y, side_info_data, wz_quantizer:WZQuantizer):
     val_indices = np.arange(len(y))
     if wz_quantizer.val_indices is not None:
         val_indices = wz_quantizer.val_indices
@@ -27,23 +27,24 @@ def get_metrics(y, side_info_data, wz_quantizer):
     si_test = [a[val_indices] for a in side_info_data]
 
     deunified_bins_list = wz_quantizer.encoding_process(y_test)
-    if isinstance(wz_quantizer.wz_pl_model, PL_EncoderDecoder_RNN):
-        bins = wz_quantizer.wz_pl_model.unify_bins(deunified_bins_list)
-    else: bins = deunified_bins_list
-    y_pred = wz_quantizer.decoding_process(bins, si_test, len(y_test))
+    y_pred = wz_quantizer.decoding_process(deunified_bins_list, si_test, )
 
     if len(side_info_data) == 0:
         si_test = [y_test.copy()*0]
-    practical_pu = get_real_bin_prob(bins, wz_quantizer.bin_count)[0]
     temp_si = [] if wz_quantizer.wz_pl_model.coding_model.marginal else si_test
     prior, softcodes = wz_quantizer.get_prior_and_softcodes(y_test, temp_si, 100_000)
 
-    mse = np.mean((y_test - y_pred)**2)
-    mspe = mse / np.mean((y)**2) * 100
+    practical_pu = [get_real_bin_prob(b, wz_quantizer.wz_pl_model.bins_per_plane)[0]
+                        for b in deunified_bins_list.to(int)]
 
-    real_bit_rate = torch.mean(-torch.log2(practical_pu + 1e-12))
-    prior_bit_rate = torch.mean(-torch.log2(prior + 1e-12))
-    softcodes_bit_rate = torch.mean(-torch.log2(softcodes + 1e-12))
+    mse = np.mean((y_test - y_pred)**2)
+    mspe = mse / np.mean(y**2) * 100
+
+    real_bit_rate, prior_bit_rate, softcodes_bit_rate = 0, 0, 0
+    for i in range(len(practical_pu)):
+        real_bit_rate += torch.mean(-torch.log2(practical_pu[i] + 1e-12))
+        prior_bit_rate += torch.mean(-torch.log2(prior[i] + 1e-12))
+        softcodes_bit_rate += torch.mean(-torch.log2(softcodes[i] + 1e-12))
 
     return mse, mspe, real_bit_rate, prior_bit_rate, softcodes_bit_rate
 

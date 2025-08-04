@@ -176,7 +176,7 @@ class WZQuantizer:
         all_priors = self._batch_loop(func, batch_size, total_size)
 
         prior, soft_codes = zip(*all_priors)
-        prior, soft_codes = [torch.cat(a, dim=0) for a in [prior, soft_codes]]
+        prior, soft_codes = [torch.cat(a, dim=1) for a in [prior, soft_codes]]
         return prior, soft_codes
 
     def encoding_process(self, grad_vector, batch_size=500_000):
@@ -192,27 +192,23 @@ class WZQuantizer:
             return bins_batch.to('cpu')
         all_bins = self._batch_loop(func, batch_size, total_size)
 
-        # todo separate the running of the model for ann and rnn
-        if len(all_bins) <= 1:
-            bins = all_bins[0]
-        else:
-            bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
+        bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
 
-        dtype = torch.uint8 if self.bin_count < 2**8 else torch.uint16
+        dtype = torch.uint8 if self.wz_pl_model.num_planes < 2**8 else torch.uint16
         return bins.to(dtype)
 
-    # todo separate the running of the model for ann and rnn
+    # todo remove element_count
     def decoding_process(self, quantized_data, side_info_data_list,
-                         element_count, batch_size=500_000):
+                         element_count=None, batch_size=500_000):
         # from components.broadcast_components.WZ_models.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
         bins_tensor = torch.tensor(np.array(quantized_data))
-        total_size = len(bins_tensor[0]) if len(bins_tensor.shape) == 2 else len(bins_tensor)
+        total_size = len(bins_tensor[0])
 
         assert len(side_info_data_list) == self.count_side_info_data
         if self.count_side_info_data == 0:
-            side_info_data_list = [np.zeros(element_count)]
+            side_info_data_list = [np.zeros(len(quantized_data[0]))]
 
         assert total_size == len(side_info_data_list[0])
 
@@ -335,11 +331,12 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
         # Final span
         ax.axvspan(last_split_point, x_range[-1], color=colors[current_bin], alpha=0.3)
 
-    if isinstance(x_data_, torch.Tensor): x_data_ = x_data_.cpu().numpy()
-    ind_list = wz_quantizer.val_indices \
-        if wz_quantizer.val_indices is not None else np.arange(len(x_data_))
-    ind_list = ind_list \
-        if training_ind else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
+    if isinstance(x_data_, torch.Tensor):
+        x_data_ = x_data_.cpu().numpy()
+    ind_list = wz_quantizer.val_indices if wz_quantizer.val_indices is not None\
+                    else np.arange(len(x_data_))
+    ind_list = ind_list if training_ind \
+                    else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
 
     min_v, max_v = np.percentile(x_data_, 0.01), np.percentile(x_data_, 99.99)
     true_min_v, true_max_v = x_data_.min(), x_data_.max()
@@ -365,11 +362,12 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     side_info = [si[spaced_idx] for si in side_info]
 
     # Create x_range for plotting
-    bins = wz_quantizer.encoding_process(grad_data)
-    if len(bins.shape) != 1: # if a list of bins is returned, unify them
-        bins = wz_quantizer.wz_pl_model.unify_bins(bins)
+    deunif_bins = wz_quantizer.encoding_process(grad_data)
     recons_for_x_range = wz_quantizer.decoding_process(
-        bins, side_info, element_count=len(grad_data))
+        deunif_bins, side_info, element_count=len(grad_data))
+
+    bins = wz_quantizer.wz_pl_model.unify_bins(deunif_bins)
+    print('bins used:', len(np.unique(bins)))
 
     # Setup plots
     bin_count = wz_quantizer.bin_count
@@ -382,8 +380,11 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
-    ax1.plot(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', linewidth=0.2)
-    ax1.plot(grad_data, (np.array(bins) + 1) / bin_count, label='(normalized) encoded_bins')
+    ax1.scatter(grad_data, np.abs(grad_data - recons_for_x_range), label='reconstruction error', s=0.2, alpha=0.5)
+    temp = [wz_quantizer.wz_pl_model.bins_per_plane, wz_quantizer.wz_pl_model.num_planes]
+    for b in range(temp[1]):
+        ax1.plot(grad_data, ((np.array(deunif_bins[b]) + 1 + b) / (b + temp[0]) + b)/temp[1],
+                 color='orange', label='(normalized) encoded_bins' if b == 0 else None, linewidth=0.5)
     for i in range(bin_count):
         ax1.hlines((i + 1) / bin_count, min(grad_data), max(grad_data), linewidth=0.5, alpha=0.3)
     ax1.set_xlabel('x_range')
@@ -399,9 +400,9 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     # Plot 2: Reconstruction curves for each bin (batch process) ------------------------
     # todo merge the 2 plots and change how the side_info is given (for example for all 0s as side info)
     for bin_idx in range(bin_count):
-        temp = wz_quantizer.decoding_process(
-            np.zeros(len(grad_data)) + bin_idx, side_info, element_count=len(grad_data))
-        ax2.plot(grad_data, temp, label=f'bin={bin_idx}', linewidth=0.1)
+        temp = wz_quantizer.wz_pl_model.deunify_bins(torch.zeros_like(bins) + bin_idx)
+        temp = wz_quantizer.decoding_process(temp, side_info, element_count=len(grad_data))
+        ax2.scatter(grad_data, temp, label=f'bin={bin_idx}', s=0.1)
 
     ax2.set_xlabel('x_range (which is forced to bin, but is paired with related side_info)')
     ax2.set_ylabel('reconstruction per bin')
