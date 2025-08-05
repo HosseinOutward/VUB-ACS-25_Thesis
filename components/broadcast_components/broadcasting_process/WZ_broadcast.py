@@ -236,7 +236,9 @@ def outlier_normalization(grad_flat_normal, outlier_threshold=1.5):
     outlier_values = grad_flat_normal[outlier_mask].copy() if isinstance(grad_flat_normal, np.ndarray) \
                     else grad_flat_normal[outlier_mask].detach().cpu().clone()
 
-    # close the gap, but leave a small gap to pervent zeroing outliers
+    assert len(outlier_values)!=0
+
+    # close the gap, but leave a small gap to prevent zeroing outliers
     outlier_values = (np.abs(outlier_values) - outlier_threshold*0.85) * np.sign(outlier_values)
     outlier_max = np.percentile(np.abs(outlier_values), 99.99) / outlier_threshold
     outlier_values /= outlier_max
@@ -425,17 +427,14 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
                 wz_pl_model=self.wz_pl_model_class(2, max(16 // (self.curr_round_id + 1), 2), 1,
                         temp, 10, False, lr=1e-3, reconst_ld=400, tau=1.5).to(torch.float32),
                 count_side_info_data=temp, enable_progress_bar=old_quantizer.enable_progress_bar,
-                train_sample_size=old_quantizer.train_sample_size, user_logger=old_quantizer.user_logger,
+                train_sample_size=old_quantizer.train_sample_size, user_logger=None,
             )
 
             model_stat_vec = dict_to_array(server_model_state_dict)
             model_stat_vec, _ = normalize_array_data(model_stat_vec, global_model_dims, False, True)
 
-            outlier_mask = np.abs(model_stat_vec) > self.outlier_threshold
-            outlier_values = model_stat_vec[outlier_mask]
-            outlier_values = (np.abs(outlier_values) - self.outlier_threshold) * np.sign(outlier_values)
-            outlier_values /= np.percentile(np.abs(outlier_values), 99.99) / self.outlier_threshold
-            model_stat_vec[outlier_mask] = outlier_values
+            outlier_values, outlier_positions, _, _ = outlier_normalization(model_stat_vec)
+            model_stat_vec[outlier_positions] = outlier_values
 
             model_stat_vec += np.random.normal(0, np.sqrt(1e-6), len(model_stat_vec), ).astype(np.float32)
 
@@ -521,7 +520,7 @@ def _test_main(broadcast_prot: WZBroadcastProtocol, worker_count=2, rounds=2):
             broadcast_prot.start_round_agent_process(ag_id, round)
 
             print(f'>> Round {round}, Agent {ag_id}')
-            _ = broadcast_prot.model_transfer_to_worker_from_server(grad)
+            _ = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad)
 
             print('          - Preparing data for transfer to worker...')
             server_data_sent_to_worker = broadcast_prot.to_worker_prep_data_for_transfer(ag_id)
@@ -541,9 +540,9 @@ def _test_main(broadcast_prot: WZBroadcastProtocol, worker_count=2, rounds=2):
 
 
 if __name__ == "__main__":
-    k = 5
+    k = 2
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
-                                     bins_per_plane=4, lr=1e-5).to(torch.float32)
+                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 

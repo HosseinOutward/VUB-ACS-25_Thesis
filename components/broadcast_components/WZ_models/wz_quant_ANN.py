@@ -195,7 +195,7 @@ class WZQuantizer:
 
         bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
 
-        dtype = torch.uint8 if self.wz_pl_model.num_planes < 2**8 else torch.uint16
+        dtype = torch.uint8 if self.wz_pl_model.bins_per_plane < 2**8 else torch.uint16
         return bins.to(dtype)
 
     # todo remove element_count
