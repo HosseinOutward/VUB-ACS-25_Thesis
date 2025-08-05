@@ -128,8 +128,8 @@ class BroadcastMetricGatheringUtilities:
 
         return reconstructed_grads
 
-    def model_transfer_to_worker_from_server(self, server_model_state_dict):
-        recons, compr = self.broadcast_protocol.model_transfer_to_worker_from_server(server_model_state_dict)
+    def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
+        recons, compr = self.broadcast_protocol.model_transfer_to_worker_from_server(agent_id, server_model_state_dict)
 
         wz_size = get_obj_size(compr)
         self.running_stats['wz']['mbytes_sent_for_aggre']=(wz_size / (1024 * 1024))

@@ -241,7 +241,7 @@ class FLSimulator:
 
     def _set_local_models(self, model_transfer_to_worker_from_server):
         for ag in self.agents:
-            state_dict_data = model_transfer_to_worker_from_server(self.global_model.state_dict())[0]
+            state_dict_data = model_transfer_to_worker_from_server(ag.agent_id, self.global_model.state_dict())[0]
 
             ag.local_model = self.global_model.clone()
             ag.local_model.load_state_dict(state_dict_data)
