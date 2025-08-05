@@ -17,6 +17,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         self.past_workerside_grads = [[] for _ in range(agent_count)]
 
     def _build_worker_side_quantizer(self, old_quantizer, training_target, side_info):
+        print('****************training the workerside model')
         if old_quantizer.user_logger is not None:
             assert old_quantizer.user_logger.agent_id == self.curr_agent_id
             assert old_quantizer.user_logger.round_id == self.curr_round_id
