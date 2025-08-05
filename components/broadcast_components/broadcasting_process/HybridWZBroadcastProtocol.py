@@ -60,7 +60,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         res = super().to_worker_prep_data_for_transfer(agent_id)
         if self.is_hybrid_round_f(self.curr_round_id) or (self.curr_round_id==0 and self.curr_agent_id==0):
             return res, [res]
-        return res, None
+        return res, np.array([0])
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
                                          force_use_diff_model=None):
@@ -93,7 +93,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         if force_use_diff_model is not None:
             quantizer=force_use_diff_model
         elif self.is_hybrid_round_f(self.curr_round_id):
-            self.current_side_info_list = self.past_workerside_grads[agent_id]
+            self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
 
             quantizer, recons_vect = self._build_worker_side_quantizer(
                 self.wz_quantizer_list[agent_id], grad_flat_normal, self.current_side_info_list)
@@ -101,7 +101,6 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             self.wz_quantizer_list[agent_id] = quantizer
 
             recons_vect[outlier_positions] = outlier_de_normalization(recons_vect, outlier_count, outlier_max)
-            recons_vect = recons_vect[:-outlier_count]
             self.past_workerside_grads[self.curr_agent_id].append(recons_vect)
         else:
             quantizer = self.wz_quantizer_list[agent_id]
