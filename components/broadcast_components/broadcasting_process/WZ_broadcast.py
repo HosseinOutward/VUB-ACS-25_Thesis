@@ -224,14 +224,47 @@ def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
     return denormalized_data
 
 
+# ********************
+
+def outlier_normalization(grad_flat_normal, outlier_threshold=1.5):
+    if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
+
+    # Separate outliers with abs value > outlier_threshold
+    outlier_mask = np.abs(grad_flat_normal) > outlier_threshold
+
+    # normalize the outlier values
+    outlier_values = grad_flat_normal[outlier_mask].copy() if isinstance(grad_flat_normal, np.ndarray) \
+                    else grad_flat_normal[outlier_mask].detach().cpu().clone()
+
+    # close the gap, but leave a small gap to pervent zeroing outliers
+    outlier_values = (np.abs(outlier_values) - outlier_threshold*0.85) * np.sign(outlier_values)
+    outlier_max = np.percentile(np.abs(outlier_values), 99.99) / outlier_threshold
+    outlier_values /= outlier_max
+
+    outlier_count = np.sum(outlier_mask)
+
+    outlier_positions = np.where(outlier_mask)[0]
+
+    return outlier_values, outlier_positions, outlier_count, outlier_max
+
+
+def outlier_de_normalization(res_vector, outlier_count, outlier_max, outlier_threshold=1.5):
+    if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
+
+    outlier_values = res_vector[-outlier_count:].copy() if isinstance(res_vector, np.ndarray) \
+                    else res_vector[-outlier_count:].detach().cpu().clone()
+    outlier_values *= outlier_max
+    outlier_values[outlier_values > 0] += outlier_threshold*0.85
+    outlier_values[outlier_values < 0] -= outlier_threshold*0.85
+    return outlier_values
+
+
 class WZBroadcastProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
         self.last_global_model_recon_comp_data = None
         self.global_model_transfer_quantizer = wz_base_quantizer
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
         self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer] * agent_count
-
-        self.outlier_threshold = 1.5
 
         self.last_recent_grads_list = [None] * agent_count
         self.current_side_info_list = None
@@ -265,26 +298,19 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         grad_flat_normal, norm_fact_vec = normalize_array_data(
             grad_flat, shapes_dict, outlier_rem=False, normalize=True)
 
-        # Separate outliers with abs value > 2
-        outlier_mask = np.abs(grad_flat_normal) > self.outlier_threshold
-        outlier_values = grad_flat_normal[outlier_mask]
+        #**********
+        outlier_values, outlier_positions, outlier_count, outlier_max = outlier_normalization(grad_flat_normal)
+        grad_flat_normal[outlier_positions] = outlier_values
 
-        # normalize the outlier values
-        outlier_values = (np.abs(outlier_values) - self.outlier_threshold) * np.sign(outlier_values)
-        outlier_max = np.percentile(np.abs(outlier_values), 99.99) / self.outlier_threshold
-        outlier_values /= outlier_max
-        grad_flat_normal[outlier_mask] = outlier_values
-
-        outlier_count = np.sum(outlier_mask)
-        temp = [8, 16, 32, 64][np.argmax(np.array([8, 16, 32, 64]) / np.log2(outlier_count + 1) > 1)]
-        outlier_count = outlier_count.astype(eval(f'np.uint{temp}'))
-
+        #**********
         quantizer = self.wz_quantizer_list[agent_id] if force_use_diff_model is None else force_use_diff_model  # *******
         bin_count = quantizer.wz_pl_model.bins_per_plane
         bins_vector = quantizer.encoding_process(grad_flat_normal)
-        outlier_bins_vector = torch.stack([a[outlier_mask] for a in bins_vector])
+
+        #**********
+        outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
         for i in range(len(bins_vector)):
-            bins_vector[i][outlier_mask] = bin_count
+            bins_vector[i][outlier_positions] = bin_count
         bins_vector = torch.concat([bins_vector, outlier_bins_vector], dim=1)
 
         #**********
@@ -294,9 +320,14 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         temp = change_dtype_recursive(prob_per_bin, torch.float32)
         bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
 
+        #**********
         # change the dtype of the encoded data to float16
         norm_fact_vec, prob_per_bin = change_dtype_recursive([norm_fact_vec, prob_per_bin], torch.float16)
+
         outlier_max = outlier_max.astype(np.float16)
+
+        temp = [8, 16, 32, 64][np.argmax(np.array([8, 16, 32, 64]) / np.log2(outlier_count + 1) > 1)]
+        outlier_count = outlier_count.astype(eval(f'np.uint{temp}'))
 
         return compress_data_list((bin_vec_compressed, norm_fact_vec, prob_per_bin, outlier_count, outlier_max))
 
@@ -351,11 +382,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, )
 
         # fix the outliers
-        outlier_values = res_vector[-outlier_count:] * outlier_max
-        outlier_values[outlier_values > 0] += self.outlier_threshold
-        outlier_values[outlier_values < 0] += -self.outlier_threshold
-
-        res_vector[outlier_positions] = outlier_values
+        res_vector[outlier_positions] = outlier_de_normalization(res_vector, outlier_count, outlier_max)
         res_vector = res_vector[:-outlier_count]
 
         # denormalize and convert back to dict
@@ -449,13 +476,10 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
         )
 
-        last_recent_grads += np.random.normal(0, np.sqrt(1e-6), len(last_recent_grads), ).astype(np.float32)
-        outlier_mask = np.abs(last_recent_grads) > self.outlier_threshold
-        outlier_values = last_recent_grads[outlier_mask]
-        outlier_values[outlier_values > 0] -= self.outlier_threshold
-        outlier_values[outlier_values < 0] -= -self.outlier_threshold
-        outlier_values /= np.percentile(np.abs(outlier_values), 99.99) / self.outlier_threshold
-        last_recent_grads[outlier_mask] = outlier_values
+        last_recent_grads+=np.random.normal(0, np.sqrt(1e-6), len(last_recent_grads), ).astype(np.float32)
+
+        outlier_values, outlier_positions, _, _ = outlier_normalization(last_recent_grads)
+        last_recent_grads[outlier_positions] = outlier_values
 
         self.wz_quantizer_list[next_agent].train_model(
             last_recent_grads, self.current_side_info_list, epoch=45, batch_size=10_000)
