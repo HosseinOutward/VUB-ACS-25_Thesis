@@ -135,7 +135,7 @@ def normalize_array_data(data_array, org_shapes_dict, outlier_rem=False, normali
         group_data = []
 
         for param_name, shape in layer_params:
-            end = start + np.prod(shape)
+            end = start + int(np.prod(shape))
             layer_data = data_array[start:end]
             group_data.append(layer_data)
             start = end
@@ -150,7 +150,7 @@ def normalize_array_data(data_array, org_shapes_dict, outlier_rem=False, normali
         # Split the normalized data back to individual parameters
         group_start_norm = 0
         for param_name, shape in layer_params:
-            param_size = np.prod(shape)
+            param_size = int(np.prod(shape))
             param_normalized = normalized_group[group_start_norm:group_start_norm + param_size]
             normalized_segments.append(param_normalized)
             group_start_norm += param_size
@@ -170,7 +170,7 @@ def array_to_dict_with_shapes(grad_vector, org_shapes_dict):
     res = {}
     start = 0
     for k, shape in org_shapes_dict.items():
-        end = start + np.prod(shape)
+        end = start + int(np.prod(shape))
         v = grad_vector[start:end]
         res[k] = v.reshape(shape)
         start = end
@@ -205,7 +205,7 @@ def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
 
         # Process each parameter in the group
         for param_name, shape in layer_params:
-            end = start + np.prod(shape)
+            end = start + int(np.prod(shape))
             layer_data = normalized_data[start:end]
 
             if norm_fact is not None:
@@ -325,7 +325,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             # ****
             quantizer = self.wz_quantizer_list[agent_id]
 
-        model_size = np.sum([np.prod(shape) for shape in global_model_dims.values()])
+        model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
 
         # decompress the data received from the worker
         bin_vec_compressed, norm_fact_vec, prob_per_bin, outlier_count, outlier_max = \

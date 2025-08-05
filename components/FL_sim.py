@@ -52,7 +52,7 @@ class RawBroadcastProtocol:
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
         return worker_broadcast_data[0]
 
-    def model_transfer_to_worker_from_server(self, server_model_state_dict):
+    def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
         return server_model_state_dict, None
 
 
