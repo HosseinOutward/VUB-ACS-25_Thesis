@@ -1,18 +1,27 @@
 from multiprocessing import shared_memory
+import atexit
+import weakref
 
 import numpy as np
 import torch
 from PIL import Image
 from torchvision.datasets import SVHN
 
+# Global registry to track shared memory objects for cleanup
+_shared_memory_registry = weakref.WeakSet()
+
 
 class FasterSVHN(SVHN):
     def __init__(self, *args, limit_count=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._is_main_process = True  # Track if this is the main process that created shared memory
 
         if not hasattr(self, '_shared_data_name'):
             self._create_shared_data(limit_count)
+            # Register for cleanup
+            _shared_memory_registry.add(self)
         else:
+            self._is_main_process = False  # This is a worker process
             self._connect_shared_data()
 
     def _create_shared_data(self, limit_count):
@@ -131,21 +140,46 @@ class FasterSVHN(SVHN):
     def __setstate__(self, state):
         """Custom unpickling to reconnect to shared memory"""
         self.__dict__.update(state)
+        self._is_main_process = False  # Worker processes are not main
         if hasattr(self, '_shared_data_name'):
             # Worker process: connect to shared memory
             self._connect_shared_data()
 
+    def __del__(self):
+        """Destructor to clean up shared memory"""
+        self.cleanup_shared_memory()
+
     def cleanup_shared_memory(self):
         """Clean up shared memory (call this when done)"""
-        if hasattr(self, 'shared_data_mem'):
-            try:
+        try:
+            if hasattr(self, 'shared_data_mem'):
                 self.shared_data_mem.close()
-                self.shared_data_mem.unlink()  # Delete the shared memory
-            except:
-                pass
-        if hasattr(self, 'shared_labels_mem'):
-            try:
+                # Only unlink (delete) if this is the main process that created it
+                if self._is_main_process:
+                    try:
+                        self.shared_data_mem.unlink()
+                    except FileNotFoundError:
+                        pass  # Already unlinked
+
+            if hasattr(self, 'shared_labels_mem'):
                 self.shared_labels_mem.close()
-                self.shared_labels_mem.unlink()
-            except:
-                pass
+                # Only unlink (delete) if this is the main process that created it
+                if self._is_main_process:
+                    try:
+                        self.shared_labels_mem.unlink()
+                    except FileNotFoundError:
+                        pass  # Already unlinked
+
+        except Exception:
+            pass  # Ignore cleanup errors
+
+
+def _cleanup_all_shared_memory():
+    """Cleanup function to be called at exit"""
+    for dataset in list(_shared_memory_registry):
+        if dataset is not None:
+            dataset.cleanup_shared_memory()
+
+
+# Register cleanup function to run at exit
+atexit.register(_cleanup_all_shared_memory)
