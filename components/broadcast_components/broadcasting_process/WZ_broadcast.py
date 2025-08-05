@@ -231,6 +231,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         self.outlier_threshold = 1.5
 
         self.last_recent_grads_list = [None] * agent_count
+        self.current_side_info_list = None
         self.agent_list_check = []
         self.warmup = True
         self.prev_d_flat = []
@@ -332,10 +333,9 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             bin_data[i][outlier_positions] = 0
 
         # decode the bin data to get the vector
-        side_info_data_list = [] if self.model_training_counter[agent_id]==0 \
-                            else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
+        side_info_data_list = [] if self.warmup else self.current_side_info_list
         side_info_data_list = [np.concatenate([a, a[outlier_positions]]) for a in side_info_data_list]
-        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, model_size+outlier_count)
+        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, )
 
         # fix the outliers
         outlier_values = res_vector[-outlier_count:] * outlier_max
@@ -352,21 +352,16 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
         # ************
-        assert len(self.prev_d_flat)<=worker_count
-        if len(self.prev_d_flat)==worker_count:
-            self.prev_d_flat[agent_id]=res_vector
-        else:
-            self.prev_d_flat.append(res_vector)
-            if len(self.prev_d_flat) == worker_count:
-                self.training_side_info_prev_d_flat = [a for a in self.prev_d_flat]
 
-        if self.warmup and len(self.prev_d_flat) == worker_count:
-            self._generate_models(agent_id, worker_count, res_vector, norm_fact_vec)
+        self.prev_d_flat.append(res_vector)
 
         # detect if we are in warmup phase
-        if np.all([a == 1 for a in self.model_training_counter]) and self.warmup:
+        if agent_id + 1 >= worker_count:
             self.warmup = False
-            del self.training_side_info_prev_d_flat
+
+        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
+        if not self.warmup:
+            self._prep_for_next_agent(agent_id, worker_count)
 
         return result_dict
 
@@ -380,27 +375,16 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
         recons = {k: torch.tensor(v) for k, v in res.items()}
         return recons, compressed
 
-    def _generate_models(self, curr_agent_id, worker_count, res_vector, norm_fact_vec):
-        target_id = (curr_agent_id + 1) % worker_count
-        assert target_id == (curr_agent_id + 1) % worker_count and self.agent_list_check[-1]==curr_agent_id , \
-            'The reporting code depends on training only the next agent.'
+    def _prep_for_next_agent(self, curr_agent_id, worker_count):
+        temp = len(self.prev_d_flat) - worker_count
+        last_recent_grads = self.prev_d_flat[temp]
+        self.current_side_info_list = self.prev_d_flat[:temp] + self.prev_d_flat[temp + 1:]
 
-        # make sure the training happens in order
-        curr_counter = self.model_training_counter[target_id]
-        past_counters = self.model_training_counter[:target_id]
-        if target_id==0:
-            past_counters = self.model_training_counter[1:]
-            curr_counter-=1
-        assert np.all([curr_counter+1==a for a in past_counters]), 'The order of model training isn\'t compatible.'
-        self.model_training_counter[target_id] += 1
-
-        side_info = self.training_side_info_prev_d_flat[:target_id] +\
-                    self.training_side_info_prev_d_flat[target_id + 1:]
-        grads = self.training_side_info_prev_d_flat[target_id].copy()
-        qz = self.wz_quantizer_list[target_id]
-        self.wz_quantizer_list[target_id] = WZQuantizer(
+        next_agent = (curr_agent_id + 1) % worker_count
+        qz = self.wz_quantizer_list[next_agent]
+        self.wz_quantizer_list[next_agent] = WZQuantizer(
             wz_pl_model=self.wz_pl_model_class(
-                inp_dim=1, side_info_size=len(side_info),
+                inp_dim=1, side_info_size=len(self.current_side_info_list),
                 lr=qz.wz_pl_model.lr,
                 bins_per_plane=max(16//(self.curr_round_id+1), 2),
                 num_planes=2,
@@ -408,19 +392,20 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
                 tau=qz.wz_pl_model.tau,
                 marginal=self.curr_round_id<=2,
             ).to(torch.float32),
-            count_side_info_data=len(side_info), enable_progress_bar=qz.enable_progress_bar,
+            count_side_info_data=len(self.current_side_info_list), enable_progress_bar=qz.enable_progress_bar,
             train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
         )
 
-        grads+=np.random.normal(0, np.sqrt(1e-6), len(grads), ).astype(np.float32)
-        outlier_mask = np.abs(grads) > self.outlier_threshold
-        outlier_values = grads[outlier_mask]
+        last_recent_grads+=np.random.normal(0, np.sqrt(1e-6), len(last_recent_grads), ).astype(np.float32)
+        outlier_mask = np.abs(last_recent_grads) > self.outlier_threshold
+        outlier_values = last_recent_grads[outlier_mask]
         outlier_values[outlier_values > 0] -= self.outlier_threshold
         outlier_values[outlier_values < 0] -= -self.outlier_threshold
         outlier_values /= np.percentile(np.abs(outlier_values), 99.99) / self.outlier_threshold
-        grads[outlier_mask] = outlier_values
+        last_recent_grads[outlier_mask] = outlier_values
 
-        self.wz_quantizer_list[target_id].train_model(grads, side_info, epoch=45, batch_size=10_000)
+        self.wz_quantizer_list[next_agent].train_model(
+            last_recent_grads, self.current_side_info_list, epoch=45, batch_size=10_000)
 
 
 def _test_main(broadcast_prot:WZBroadcastProtocol, worker_count = 2, rounds = 2):
