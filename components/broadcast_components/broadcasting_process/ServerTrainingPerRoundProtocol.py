@@ -455,6 +455,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         return recons, compressed
 
     def _prep_for_next_agent(self, curr_agent_id, worker_count):
+        assert not self.warmup
+
         temp = len(self.prev_d_flat) - worker_count
         last_recent_grads = self.prev_d_flat[temp]
         self.current_side_info_list = self.prev_d_flat[:temp] + self.prev_d_flat[temp + 1:]
