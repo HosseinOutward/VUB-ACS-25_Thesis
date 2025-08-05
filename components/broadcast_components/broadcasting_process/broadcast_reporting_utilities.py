@@ -180,8 +180,8 @@ def plot_stats(stat_dict, no_raw=False):
     # Plotting data transfer sizes on the first subplot (ax[0])
     total_params = 11_191_262
     ax2 = ax[0].twinx()
-    temp = 0
     for method, metrics in stat_dict.items():
+        temp = 0
         for k_transfer in ['mbytes_recived', 'mbytes_sent_for_aggre', 'mbytes_sent_to_worker']:
             if k_transfer in metrics:
                 temp += np.sum(metrics[k_transfer], axis=1)
