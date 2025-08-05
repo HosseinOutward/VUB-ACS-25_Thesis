@@ -10,7 +10,7 @@ from components.broadcast_components.broadcasting_process.WZ_broadcast import ou
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 
 
-class WZBroadcastProtocol(RawBroadcastProtocol):
+class SingleTimeTrainingProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
         self.last_global_model_recon_comp_data = None
         self.global_model_transfer_quantizer = wz_base_quantizer
@@ -214,11 +214,11 @@ if __name__ == "__main__":
 
     k = 5
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
-                                     bins_per_plane=4, lr=1e-5).to(torch.float32)
+                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                  count_side_info_data=0, enable_progress_bar=True)
-    broadcast_prot = WZBroadcastProtocol(k, base_quantizer)
+    broadcast_prot = SingleTimeTrainingProtocol(k, base_quantizer)
     _test_main(broadcast_prot, worker_count=k, rounds=10)
