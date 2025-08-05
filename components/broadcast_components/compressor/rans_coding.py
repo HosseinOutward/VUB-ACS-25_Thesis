@@ -66,7 +66,7 @@ def rans_batch_decode(encoded_state, freqs:np.ndarray, length_decoded:int) -> np
 if __name__ == '__main__':
     import time
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size
-    from components.broadcast_components.broadcasting_process.WZ_broadcast import compress_data_list
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import compress_data_list
 
     data = np.abs(np.random.normal(0,3, size=1_831_000)//1)
     data = np.clip(data, 0, 10).astype(np.uint8)

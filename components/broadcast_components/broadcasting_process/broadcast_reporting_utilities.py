@@ -2,7 +2,7 @@ import copy
 from copy import deepcopy
 import numpy as np
 import torch
-from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol, \
+from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol, \
     change_dtype_recursive, compress_data_list
 from components.broadcast_components.compressor.entropy_coding import entropy_coding, entropy_decoding
 from components.other_utilities.user_logger import UnifiedLoggingClass
@@ -26,7 +26,7 @@ def get_obj_size(obj):
 
 
 class BroadcastMetricGatheringUtilities:
-    def __init__(self, broadcast_prot:WZBroadcastProtocol, user_logger:UnifiedLoggingClass=None):
+    def __init__(self, broadcast_prot:WZServerTrainingPerRoundProtocol, user_logger:UnifiedLoggingClass=None):
         self.broadcast_protocol = broadcast_prot
         self.base_stat_dict:dict[str, dict[str, float|None]] = {
             'wz': {'mbytes_recived': None, 'mbytes_sent_to_worker': None, 'mse': None,
@@ -258,7 +258,7 @@ def plot_stats(stat_dict, no_raw=False):
 if __name__ == '__main__':
     from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
-    from components.broadcast_components.broadcasting_process.WZ_broadcast import _test_main
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     worker_count = 2
 
@@ -269,7 +269,7 @@ if __name__ == '__main__':
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                     count_side_info_data=0, enable_progress_bar=True)
-    broadcast_prot_base = WZBroadcastProtocol(worker_count, base_quantizer)
+    broadcast_prot_base = WZServerTrainingPerRoundProtocol(worker_count, base_quantizer)
     broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base)
 
     _test_main(broadcast_prot, worker_count)
