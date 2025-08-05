@@ -261,7 +261,7 @@ def outlier_de_normalization(res_vector, outlier_count, outlier_max, outlier_thr
     return outlier_values
 
 
-class WZBroadcastProtocol(RawBroadcastProtocol):
+class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
         self.last_global_model_recon_comp_data = None
         self.global_model_transfer_quantizer = wz_base_quantizer
@@ -484,7 +484,7 @@ class WZBroadcastProtocol(RawBroadcastProtocol):
             last_recent_grads, self.current_side_info_list, epoch=45, batch_size=10_000)
 
 
-def _test_main(broadcast_prot: WZBroadcastProtocol, worker_count=2, rounds=2):
+def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):
     # --------------------------------
     torch.set_float32_matmul_precision('medium')
     import logging
@@ -548,5 +548,5 @@ if __name__ == "__main__":
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
                                  count_side_info_data=0, enable_progress_bar=True)
-    broadcast_prot = WZBroadcastProtocol(k, base_quantizer)
+    broadcast_prot = WZServerTrainingPerRoundProtocol(k, base_quantizer)
     _test_main(broadcast_prot, worker_count=k, rounds=10)

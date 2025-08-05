@@ -348,25 +348,8 @@ class FLSimulator:
 
                 ag.local_model.current_step_info['curr_round'] = round_s
 
-                # Backup model state before training for potential recovery
-                # model_backup = ag.local_model.clone()
-                # retry_count = 0
-                # agent_grad=None
-                # while retry_count < 3:
-                #     try:
                 agent_grad = self._agent_training(
                     ag_id, broadcast_prot, shared_train_loader, shared_test_loader)
-                #         break
-                #     except Exception as e:
-                #         retry_count += 1
-                #         print(f"Error during training or broadcasting - {ag_id=} (attempt {retry_count}): {e}")
-                #
-                #         if retry_count == 5:
-                #             raise e
-                #
-                #         ag.local_model = model_backup.clone()
-                #         torch.cuda.empty_cache()
-                #         gc.collect()
 
                 current_round_grad_list.append(agent_grad)
                 self._log_report(ag.local_model, shared_train_loader, shared_test_loader, round_s, ag_id)
@@ -446,12 +429,12 @@ def _main_test():
 if __name__ == "__main__":
     # Example usage of the FLSimulator with a simple model with no broadcast protocol or logger
 
-    from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
 
     model, dataset, dataset_test = _main_test()
     # *****************
     user_logger:UnifiedLoggingClass = None
-    broadcast_prot:WZBroadcastProtocol = None
+    broadcast_prot:WZServerTrainingPerRoundProtocol = None
     sim = FLSimulator(
         pl_model=model, num_agents=5, communication_rounds=3, client_epochs_per_round=10,
         batch_size=10000, dataset_train=dataset, dataset_test=dataset_test,

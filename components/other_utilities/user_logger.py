@@ -343,7 +343,7 @@ if __name__ == "__main__":
     from components.FL_sim import _main_test, FLSimulator
     from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
-    from components.broadcast_components.broadcasting_process.WZ_broadcast import WZBroadcastProtocol
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats
 
     model, dataset, dataset_test = _main_test()
@@ -365,7 +365,7 @@ if __name__ == "__main__":
 
     base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
             count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger)
-    broadcast_prot_base = WZBroadcastProtocol(k, base_quantizer)
+    broadcast_prot_base = WZServerTrainingPerRoundProtocol(k, base_quantizer)
     broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
     # *****************
