@@ -16,7 +16,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
     parser.add_argument('--protocol', type=str,
-                        choices=['no_proto', 'all_out', 'hybrid', 'simple', 'worker-side'],)
+                        choices=['no_proto', 'all_out', 'hybrid', 'simple', 'worker-side', 'balanced_hybrid'],)
 
     args = parser.parse_args()
 
@@ -79,6 +79,9 @@ if __name__ == "__main__":
         elif args.protocol=='simple':
             from components.broadcast_components.broadcasting_process.SingleTimeTrainingProtocol import SingleTimeTrainingProtocol
             broadcast_prot_base = SingleTimeTrainingProtocol(worker_count, base_quantizer)
+        elif args.protocol=='balanced_hybrid':
+            from components.broadcast_components.broadcasting_process.HybridBalanced import BalancedHybridProtocol
+            broadcast_prot_base = BalancedHybridProtocol(worker_count, base_quantizer)
         else:
             raise ValueError(f'Unknown protocol: {args.protocol}')
 

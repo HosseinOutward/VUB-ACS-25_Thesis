@@ -53,6 +53,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
 
         if self.is_hybrid_round_f(coming_round):
             print('********** skipping training for next agent as its the hybrid round')
+            self.prev_d_flat[-1]=self.past_workerside_grads[curr_agent_id][-1]
             return
 
         super()._prep_for_next_agent(curr_agent_id, worker_count)
