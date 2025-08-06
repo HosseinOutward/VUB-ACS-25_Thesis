@@ -10,9 +10,9 @@ from components.broadcast_components.compressor.rans_coding import rans_batch_en
 
 
 class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
+    def __init__(self, agent_count, wz_base_quantizer: WZQuantizer, hybrid_round_num=5):
         super().__init__(agent_count, wz_base_quantizer)
-        self.hybrid_round_num = 5
+        self.hybrid_round_num = hybrid_round_num
         self.is_hybrid_round_f = lambda round_id: round_id%self.hybrid_round_num == 0 and not self.warmup
         self.past_workerside_grads = [[] for _ in range(agent_count)]
 

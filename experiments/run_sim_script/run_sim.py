@@ -15,7 +15,8 @@ if __name__ == "__main__":
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
-    parser.add_argument('--protocol', type=str, choices=['no_proto', 'all_out', 'hybrid', 'simple'],)
+    parser.add_argument('--protocol', type=str,
+                        choices=['no_proto', 'all_out', 'hybrid', 'simple', 'worker-side'],)
 
     args = parser.parse_args()
 
@@ -72,6 +73,9 @@ if __name__ == "__main__":
         elif args.protocol=='hybrid':
             from components.broadcast_components.broadcasting_process.HybridWZBroadcastProtocol import HybridWZBroadcastProtocol
             broadcast_prot_base = HybridWZBroadcastProtocol(worker_count, base_quantizer)
+        elif args.protocol=='worker-side':
+            from components.broadcast_components.broadcasting_process.WorkersideTraining import WorkersideTrainingProtocol
+            broadcast_prot_base = WorkersideTrainingProtocol(worker_count, base_quantizer)
         elif args.protocol=='simple':
             from components.broadcast_components.broadcasting_process.SingleTimeTrainingProtocol import SingleTimeTrainingProtocol
             broadcast_prot_base = SingleTimeTrainingProtocol(worker_count, base_quantizer)
