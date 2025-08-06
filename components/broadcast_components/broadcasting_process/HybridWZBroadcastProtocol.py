@@ -31,6 +31,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             count_side_info_data=len(side_info), enable_progress_bar=old_quantizer.enable_progress_bar,
             train_sample_size=old_quantizer.train_sample_size, user_logger=old_quantizer.user_logger,
         )
+        side_info = change_dtype_recursive(side_info, torch.float32)
         new_quantizer.train_model(training_target, side_info, epoch=45, batch_size=10_000)
 
         recons_vect = new_quantizer.decoding_process(new_quantizer.encoding_process(training_target), side_info)
@@ -51,7 +52,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
                 self.past_workerside_grads[i]+=[a]
 
         if self.is_hybrid_round_f(coming_round):
-            print('********** skipping training for next agent as its the hybrid node')
+            print('********** skipping training for next agent as its the hybrid round')
             return
 
         super()._prep_for_next_agent(curr_agent_id, worker_count)
@@ -101,7 +102,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             self.wz_quantizer_list[agent_id] = quantizer
 
             recons_vect[outlier_positions] = outlier_de_normalization(recons_vect, outlier_count, outlier_max)
-            self.past_workerside_grads[self.curr_agent_id].append(recons_vect)
+            self.past_workerside_grads[self.curr_agent_id].append(change_dtype_recursive(recons_vect, torch.float16))
         else:
             quantizer = self.wz_quantizer_list[agent_id]
         #********** *****************************************************************************************
