@@ -381,6 +381,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         if force_use_diff_model is not None: # *******
             side_info_data_list = self.past_global_model_recon_dict
         side_info_data_list = [np.concatenate([a, a[outlier_positions]]) for a in side_info_data_list]
+        side_info_data_list = change_dtype_recursive(side_info_data_list, torch.float32)
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, )
 
         # fix the outliers
@@ -398,7 +399,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
         # ************
 
-        self.prev_d_flat.append(res_vector)
+        self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
 
         # detect if we are in warmup phase
         if agent_id + 1 >= worker_count:
@@ -438,7 +439,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
             model_stat_vec += np.random.normal(0, np.sqrt(1e-6), len(model_stat_vec), ).astype(np.float32)
 
-            new_quantizer.train_model(model_stat_vec, self.past_global_model_recon_dict, epoch=45, batch_size=10_000)
+            side_info_data_list = change_dtype_recursive(self.past_global_model_recon_dict, torch.float32)
+            new_quantizer.train_model(model_stat_vec, side_info_data_list, epoch=45, batch_size=10_000)
 
         compressed = self.to_server_prep_data_for_transfer(
             None, server_model_state_dict, None, force_use_diff_model=new_quantizer, )
@@ -446,7 +448,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         recons, recons_vector = self.reconstruction_process(
             None, compressed, None, global_model_dims, force_use_diff_model=new_quantizer)
 
-        self.past_global_model_recon_dict += [recons_vector]
+        self.past_global_model_recon_dict += [change_dtype_recursive(recons_vector, torch.float16)]
         if len(self.past_global_model_recon_dict) > 10:
             self.past_global_model_recon_dict.pop(0)
 
@@ -482,8 +484,10 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         outlier_values, outlier_positions, _, _ = outlier_normalization(last_recent_grads)
         last_recent_grads[outlier_positions] = outlier_values
 
+        side_info_data_list = change_dtype_recursive(self.current_side_info_list, torch.float32)
+        last_recent_grads = change_dtype_recursive(last_recent_grads, torch.float32)
         self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.current_side_info_list, epoch=45, batch_size=10_000)
+            last_recent_grads, side_info_data_list, epoch=45, batch_size=10_000)
 
 
 def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):

@@ -275,7 +275,7 @@ class WZQuantizer:
             dataset_size=len(train_dataset), samples_per_epoch=self.train_sample_size)
         train_dataloader = torch.utils.data.DataLoader(
             train_dataset, batch_size=batch_size, sampler=train_sampler,
-            num_workers=4, pin_memory=True, persistent_workers=True)
+            num_workers=4, pin_memory=False, persistent_workers=True)
 
         # ------------------------------
         self.wz_pl_model.to('cpu')
@@ -308,10 +308,43 @@ class WZQuantizer:
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
 
-        del train_dataloader, val_dataloader
+        # Safer cleanup approach that doesn't interfere with PyTorch Lightning's teardown
+        try:
+            # Let PyTorch Lightning finish its own cleanup first
+            if hasattr(trainer, 'state') and trainer.state.finished:
+                # Only do manual cleanup if training completed normally
+                self._cleanup_dataloaders([train_dataloader, val_dataloader], used_persistent_workers=True)
+        except Exception as e:
+            print(f'Post-training cleanup encountered issue: {e}')
+
+        # Clean up trainer and dataloaders
+        del trainer, train_dataloader, val_dataloader
         gc.collect()
         torch.cuda.empty_cache()
 
+    def _cleanup_dataloaders(self, dataloaders, used_persistent_workers):
+        """Safely cleanup DataLoader workers without interfering with PyTorch Lightning"""
+        if not used_persistent_workers:
+            return  # No persistent workers to clean up
+
+        cleanup_successful = True
+        for i, dl in enumerate(dataloaders):
+            dl_name = ['train', 'val'][i]
+            try:
+                # Method 1: Check if iterator exists and is in a clean state
+                if hasattr(dl, '_iterator') and dl._iterator is not None:
+                    # Only attempt cleanup if iterator is not already being cleaned up
+                    if hasattr(dl._iterator, '_shutdown_workers') and not getattr(dl._iterator, '_shutdown', False):
+                        dl._iterator._shutdown_workers()
+
+            except Exception as e:
+                print(f'Safe cleanup failed for {dl_name} dataloader: {e}')
+                cleanup_successful = False
+
+        if not cleanup_successful:
+            print('WARNING: Some DataLoader cleanup failed - minor memory leak possible')
+            # Light garbage collection attempt
+            gc.collect()
 
 def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, training_ind=False):
     from matplotlib import pyplot as plt
