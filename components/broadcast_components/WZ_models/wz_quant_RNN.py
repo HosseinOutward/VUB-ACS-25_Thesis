@@ -315,6 +315,7 @@ if __name__ == "__main__":
     wz_quantizer.train_model(y, side_info_data, epoch=2, batch_size=1_000)
 
     # %%
-    y_pred = wz_quantizer.decoding_process(wz_quantizer.encoding_process(y), side_info_data, len(y))
+    bins_vector, extra_enc_data = wz_quantizer.encoding_process(y)
+    y_pred = wz_quantizer.decoding_process(bins_vector, side_info_data, encoding_extra_data=extra_enc_data)
     print('error ', np.mean(np.abs(y - y_pred)))
     plot_bins(wz_quantizer, y, side_info_data)

@@ -1,9 +1,8 @@
 import numpy as np
 import torch
 
-from components.broadcast_components.WZ_models.wz_quant_ANN import get_real_bin_prob, WZQuantizer
-from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
-from components.broadcast_components.broadcasting_process.WZ_broadcast import data_prep_function
+from components.broadcast_components.WZ_models.wz_quant_RNN import get_real_bin_prob
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 
 
 def get_data_var(y, side_info_data):
@@ -26,8 +25,8 @@ def get_metrics(y, side_info_data, wz_quantizer:WZQuantizer):
     y_test = y[val_indices]
     si_test = [a[val_indices] for a in side_info_data]
 
-    deunified_bins_list = wz_quantizer.encoding_process(y_test)
-    y_pred = wz_quantizer.decoding_process(deunified_bins_list, si_test, )
+    deunified_bins_list, extra_enc_data = wz_quantizer.encoding_process(y_test)
+    y_pred = wz_quantizer.decoding_process(deunified_bins_list, si_test, encoding_extra_data=extra_enc_data)
 
     if len(side_info_data) == 0:
         si_test = [y_test.copy()*0]

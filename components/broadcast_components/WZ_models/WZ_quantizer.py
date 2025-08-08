@@ -74,11 +74,10 @@ class WZQuantizer:
         bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
 
         dtype = torch.uint8 if self.wz_pl_model.bins_per_plane < 2**8 else torch.uint16
-        return bins.to(dtype)
+        return bins.to(dtype), None
 
     # todo remove element_count
-    def decoding_process(self, quantized_data, side_info_data_list,
-                         element_count=None, batch_size=500_000):
+    def decoding_process(self, quantized_data, side_info_data_list, batch_size=500_000, encoding_extra_data=None):
         # from components.broadcast_components.WZ_models.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
@@ -274,9 +273,8 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     side_info = [si[spaced_idx] for si in side_info]
 
     # Create x_range for plotting
-    deunif_bins = wz_quantizer.encoding_process(grad_data)
-    recons_for_x_range = wz_quantizer.decoding_process(
-        deunif_bins, side_info, element_count=len(grad_data))
+    deunif_bins, encoding_extra = wz_quantizer.encoding_process(grad_data)
+    recons_for_x_range = wz_quantizer.decoding_process(deunif_bins, side_info, encoding_extra_data=encoding_extra)
 
     bins = wz_quantizer.wz_pl_model.unify_bins(deunif_bins)
     print('bins used:', len(np.unique(bins)))
@@ -312,9 +310,9 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
     # Plot 2: Reconstruction curves for each bin (batch process) ------------------------
     # todo merge the 2 plots and change how the side_info is given (for example for all 0s as side info)
-    for bin_idx in range(bin_count):
+    for bin_idx in np.unique(bins):
         temp = wz_quantizer.wz_pl_model.deunify_bins(torch.zeros_like(bins) + bin_idx)
-        temp = wz_quantizer.decoding_process(temp, side_info, element_count=len(grad_data))
+        temp = wz_quantizer.decoding_process(temp, side_info, encoding_extra_data=encoding_extra)
         ax2.scatter(grad_data, temp, label=f'bin={bin_idx}', s=0.1)
 
     ax2.set_xlabel('x_range (which is forced to bin, but is paired with related side_info)')
