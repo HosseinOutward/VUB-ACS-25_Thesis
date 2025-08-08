@@ -16,7 +16,9 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
     parser.add_argument('--protocol', type=str,
-                        choices=['no_proto', 'all_out', 'hybrid', 'simple', 'worker-side', 'balanced_hybrid'],)
+                        choices=['no_proto', 'all_out', 'hybrid', 'no_proto_only_global',
+                                 'simple', 'worker-side', 'balanced_hybrid'],)
+    parser.add_argument('--global_quant', type=str, default=False)
 
     args = parser.parse_args()
 
@@ -82,10 +84,16 @@ if __name__ == "__main__":
         elif args.protocol=='balanced_hybrid':
             from components.broadcast_components.broadcasting_process.HybridBalanced import BalancedHybridProtocol
             broadcast_prot_base = BalancedHybridProtocol(worker_count, base_quantizer)
+        elif args.protocol=='no_proto_only_global':
+            from components.broadcast_components.broadcasting_process.OnlyGlobalModel import OnlyGlobalModel
+            broadcast_prot_base = OnlyGlobalModel(worker_count, base_quantizer)
         else:
             raise ValueError(f'Unknown protocol: {args.protocol}')
 
         broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
+
+        if args.global_quant:
+            broadcast_prot.no_global_quantization = True
 
     # *****************
 
