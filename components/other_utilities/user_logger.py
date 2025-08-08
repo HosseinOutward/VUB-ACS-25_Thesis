@@ -1,6 +1,9 @@
 import os
 import pandas as pd
 from copy import deepcopy
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
+import multiprocessing as mp
 
 import torch
 from pytorch_lightning.loggers import CSVLogger
@@ -82,34 +85,140 @@ class UnifiedLoggingClass:
             version=f"round_{round_trained_for}_agent_{agent_trained_for}")
 
 
-def _get_trainer_logs(path_folder, folder_p, round_count, change_step=True):
-    temp = os.listdir(os.path.join(path_folder, folder_p))
-    worker_count = max([int(f.split('_')[3]) for f in temp])+1
+def _process_single_csv(file_info, folder_path):
+    """Process a single CSV file - designed for parallel execution"""
+    round_id, agent_id, folder = file_info
+    file_path = os.path.join(folder_path, folder, 'metrics.csv')
 
-    res = []
+    if not os.path.exists(file_path):
+        return None, f'WARNING: File not found: {file_path}'
+
+    try:
+        table = pd.read_csv(file_path)
+        if table.empty:
+            return None, f'WARNING: Empty file: {file_path}'
+
+        # Group by step and take the last value for each step
+        table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[-1]).reset_index()
+
+        # Add metadata
+        table['agent_id'] = agent_id
+        table['round_id'] = round_id
+        table['original_step'] = table['step'].copy()
+
+        return table, None
+    except Exception as e:
+        return None, f'WARNING: Error processing {file_path}: {e}'
+
+
+def _get_trainer_logs(path_folder, folder_p, round_count=None, change_step=True, n_workers=None):
+    folder_path = os.path.join(path_folder, folder_p)
+    if not os.path.exists(folder_path):
+        # print(f'WARNING: Folder not found: {folder_path}')
+        return []
+
+    # Get all version folders and extract agent/round info
+    version_folders = [f for f in os.listdir(folder_path) if f.startswith('round_')]
+    if not version_folders:
+        # print(f'WARNING: No version folders found in {folder_path}')
+        return []
+
+    # Extract round and agent info from folder names
+    folder_info = []
+    for folder in version_folders:
+        try:
+            parts = folder.split('_')
+            round_id = int(parts[1])
+            agent_id = int(parts[3])
+            folder_info.append((round_id, agent_id, folder))
+        except (IndexError, ValueError):
+            # print(f'WARNING: Skipping malformed folder name: {folder}')
+            continue
+
+    if not folder_info:
+        # print(f'WARNING: No valid version folders found in {folder_path}')
+        return []
+
+    # Determine worker count and round range automatically
+    worker_count = max([info[1] for info in folder_info]) + 1
+    available_rounds = sorted(set([info[0] for info in folder_info]))
+
+    if round_count is not None:
+        # Filter to requested round count
+        available_rounds = [r for r in available_rounds if r < round_count]
+
     r_start = 0 if folder_p == 'agent_model_training_logs' else 1
+    available_rounds = [r for r in available_rounds if r >= r_start]
+
+    # Filter folder_info to only include valid rounds
+    folder_info = [(r, a, f) for r, a, f in folder_info if r in available_rounds]
+
+    # print(f'Processing {len(available_rounds)} rounds for {worker_count} workers in {folder_p} using parallel processing')
+
+    # Determine number of workers for parallel processing
+    if n_workers is None:
+        n_workers = min(mp.cpu_count(), len(folder_info), 8)  # Cap at 8 to avoid overwhelming system
+
+    # Process files in parallel
+    all_data = []
+    process_func = partial(_process_single_csv, folder_path=folder_path)
+
+    if n_workers > 1 and len(folder_info) > 1:
+        # print(f'Using {n_workers} parallel workers to process {len(folder_info)} files')
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            # Submit all tasks
+            future_to_info = {executor.submit(process_func, info): info for info in folder_info}
+
+            # Collect results as they complete
+            for future in as_completed(future_to_info):
+                table, error = future.result()
+                if error:
+                    print(error)
+                elif table is not None:
+                    all_data.append(table)
+    else:
+        # Fall back to sequential processing for small datasets
+        # print('Using sequential processing')
+        for info in folder_info:
+            table, error = process_func(info)
+            if error:
+                print(error)
+            elif table is not None:
+                all_data.append(table)
+
+    if not all_data:
+        # print(f'WARNING: No data found for {folder_p}')
+        return [pd.DataFrame() for _ in range(worker_count)]
+
+    # Combine all data and sort
+    combined_df = pd.concat(all_data, ignore_index=True)
+    combined_df = combined_df.sort_values(['agent_id', 'round_id', 'original_step']).reset_index(drop=True)
+
+    # Split by worker and adjust steps if needed
+    res = []
     for agent_id in range(worker_count):
-        last_step_num = 0
-        worker_table = pd.DataFrame()
-        for round_id in range(r_start, round_count):
-            version_folder = f"round_{round_id}_agent_{agent_id}"
-            file_path = os.path.join(path_folder, folder_p, version_folder, 'metrics.csv')
-            if not os.path.exists(file_path):
-                print('WARNING: File not found:', file_path, 'breaking the wz loadings.')
-                break
+        worker_data = combined_df[combined_df['agent_id'] == agent_id].copy()
 
-            table = pd.read_csv(file_path)
-            table = table.groupby('step').agg(lambda x: x.ffill().bfill().iloc[-1]).reset_index()
+        if worker_data.empty:
+            # print(f'WARNING: No data found for agent {agent_id}')
+            res.append(pd.DataFrame())
+            continue
 
-            if change_step:
-                table['step'] += last_step_num
-                last_step_num = table['step'].max()+1
+        if change_step:
+            # Recalculate steps to be continuous across rounds
+            worker_data = worker_data.sort_values(['round_id', 'original_step']).reset_index(drop=True)
+            step_offset = 0
 
-            table['agent_id'] = agent_id
-            table['round_id'] = round_id
+            for round_id in sorted(worker_data['round_id'].unique()):
+                round_mask = worker_data['round_id'] == round_id
+                round_steps = worker_data.loc[round_mask, 'original_step'].values
+                worker_data.loc[round_mask, 'step'] = round_steps + step_offset
+                step_offset = worker_data.loc[round_mask, 'step'].max() + 1
 
-            worker_table = pd.concat([worker_table, table], ignore_index=True)
-        res.append(worker_table)
+        # Remove the temporary column
+        worker_data = worker_data.drop('original_step', axis=1)
+        res.append(worker_data.reset_index(drop=True))
+
     return res
 
 
@@ -140,18 +249,19 @@ def get_unified_data_tables(name, worker_count):
             temp['round_id'] + temp['agent_id']/worker_count + temp['step']/temp['step'].max()/worker_count
 
     broadcast_entire_stats = {}
-    for file in os.listdir(os.path.join(path_folder, '_broadcast_protocol_stats')):
-        method = file.split('.')[0]
-        file_path = os.path.join(path_folder, '_broadcast_protocol_stats', file)
-        broadcast_entire_stats[method] = pd.read_csv(file_path)
+    if os.path.exists(os.path.join(path_folder, '_broadcast_protocol_stats')):
+        for file in os.listdir(os.path.join(path_folder, '_broadcast_protocol_stats')):
+            method = file.split('.')[0]
+            file_path = os.path.join(path_folder, '_broadcast_protocol_stats', file)
+            broadcast_entire_stats[method] = pd.read_csv(file_path)
 
-        temp = broadcast_entire_stats[method].agent_id!=0
-        broadcast_entire_stats[method].loc[temp, 'mbytes_sent_for_aggre'] = 0.0
-        temp=lambda i: (broadcast_entire_stats[method]['round_id']==i).values
-        broadcast_entire_stats[method] = {
-            k: [broadcast_entire_stats[method][k][temp(i)].values for i in range(round_count)]
-            for k in broadcast_entire_stats[method].columns
-        }
+            temp = broadcast_entire_stats[method].agent_id!=0
+            broadcast_entire_stats[method].loc[temp, 'mbytes_sent_for_aggre'] = 0.0
+            temp=lambda i: (broadcast_entire_stats[method]['round_id']==i).values
+            broadcast_entire_stats[method] = {
+                k: [broadcast_entire_stats[method][k][temp(i)].values for i in range(round_count)]
+                for k in broadcast_entire_stats[method].columns
+            }
 
     return (per_worker_training_logs, per_wz_training_logs,
             global_metric_before_round, agent_metrics_after_training,
@@ -163,7 +273,8 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import plot_stats
 
     # broadcast stats plots
-    plot_stats(broadcast_entire_stats, no_raw=True)
+    if len(broadcast_entire_stats)!=0:
+        plot_stats(broadcast_entire_stats, no_raw=True)
 
     import matplotlib.pyplot as plt
     import seaborn as sns

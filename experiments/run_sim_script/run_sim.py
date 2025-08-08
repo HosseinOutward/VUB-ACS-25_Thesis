@@ -1,3 +1,4 @@
+proto_choices = ['no_proto', 'all_out', 'hybrid', 'no_proto_only_global', 'simple', 'worker-side', 'balanced_hybrid']
 if __name__ == "__main__":
     import argparse
     import logging
@@ -15,9 +16,7 @@ if __name__ == "__main__":
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
-    parser.add_argument('--protocol', type=str,
-                        choices=['no_proto', 'all_out', 'hybrid', 'no_proto_only_global',
-                                 'simple', 'worker-side', 'balanced_hybrid'],)
+    parser.add_argument('--protocol', type=str, choices=proto_choices,)
     parser.add_argument('--global_quant', type=str, default=False)
 
     args = parser.parse_args()
