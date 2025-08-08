@@ -263,6 +263,7 @@ def outlier_de_normalization(res_vector, outlier_count, outlier_max, outlier_thr
 
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
+        self.no_global_quantization = False
         self.last_global_model_recon_comp_data = None
         self.global_model_transfer_quantizer = wz_base_quantizer
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
@@ -413,6 +414,15 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
     # todo only send recons, seperate the compr process. change reporting too
     def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
+        if self.no_global_quantization:
+            res = change_dtype_recursive(server_model_state_dict, torch.float16)
+            compressed = compress_data_list(res)
+
+            res = decompress_data_list(compressed)
+            res = change_dtype_recursive(res, torch.float32)
+            recons = {k: torch.tensor(v) for k, v in res.items()}
+            return recons, compressed
+
         # send the previous returned data as it's the same per each round for all workers
         if agent_id != 0:
             return self.last_global_model_recon_comp_data
