@@ -73,7 +73,7 @@ class SingleTimeTrainingProtocol(RawBroadcastProtocol):
         #**********
         quantizer = self.wz_quantizer_list[agent_id] if force_use_diff_model is None else force_use_diff_model  # *******
         bin_count = quantizer.wz_pl_model.bins_per_plane
-        bins_vector = quantizer.encoding_process(grad_flat_normal)
+        bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat_normal)
 
         #**********
         outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
@@ -137,7 +137,7 @@ class SingleTimeTrainingProtocol(RawBroadcastProtocol):
         side_info_data_list = [] if self.model_training_counter[agent_id]==0 \
                             else self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
         side_info_data_list = [np.concatenate([a, a[outlier_positions]]) for a in side_info_data_list]
-        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, )
+        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, encoding_extra_data=extra_enc_data)
 
         # fix the outliers
         res_vector[outlier_positions] = outlier_de_normalization(res_vector, outlier_count, outlier_max)

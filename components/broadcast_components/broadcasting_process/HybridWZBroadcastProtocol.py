@@ -34,7 +34,8 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         side_info = change_dtype_recursive(side_info, torch.float32)
         new_quantizer.train_model(training_target, side_info, epoch=45, batch_size=10_000)
 
-        recons_vect = new_quantizer.decoding_process(new_quantizer.encoding_process(training_target), side_info)
+        bins, extra_enc_data = new_quantizer.encoding_process(training_target)
+        recons_vect = new_quantizer.decoding_process(bins, side_info, encoding_extra_data=extra_enc_data)
 
         if old_quantizer.user_logger is not None:
             old_quantizer.user_logger.agent_id = self.curr_agent_id
@@ -110,7 +111,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
 
         #**********
         bin_count = quantizer.wz_pl_model.bins_per_plane
-        bins_vector = quantizer.encoding_process(grad_flat_normal)
+        bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat_normal)
 
         #**********
         outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
