@@ -133,7 +133,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         self.tau_rate = tau_rate
 
         side_info_size = side_info_size if side_info_size != 0 else 1
-        super(PL_EncoderDecoder_RNN, self).__init__(inp_dim, side_info_size, *args, **kwargs)
+        super().__init__(inp_dim, side_info_size, *args, **kwargs)
 
         self.coding_model = EncoderDecoderLayeredRNN(
             input_dim=inp_dim, side_info_size=side_info_size,

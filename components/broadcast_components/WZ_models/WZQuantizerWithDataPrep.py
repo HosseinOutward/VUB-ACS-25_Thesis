@@ -1,133 +1,101 @@
 import numpy as np
 
-from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol \
-    import outlier_normalization, outlier_de_normalization
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 
 
-def outlier_normalization(grad_flat_normal, outlier_threshold=1.5, margin_gap=0.25):
-    # if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-    assert outlier_threshold>margin_gap>0
+def get_normalization_factor(y: np.ndarray):
+    num_samples = 5
+    sample_size = min(200_000, len(y))
+    norm_facts = []
+    for _ in range(num_samples):
+        sample_indices = np.random.choice(len(y), size=sample_size, replace=True)
+        y_sample = y[sample_indices]
+        norm_fact_sample = np.max(np.abs(np.percentile(y_sample, [1, 99.])))
+        norm_facts.append(norm_fact_sample)
+    norm_fact = np.mean(norm_facts)
 
-    # Separate outliers with abs value > outlier_threshold
+    return norm_fact
+
+
+#%%
+def get_outlier_factor(grad_flat_normal, outlier_threshold=1.5):
     outlier_mask = np.abs(grad_flat_normal) > outlier_threshold
-
-    if sum(outlier_mask)!=0:
-        return [], [], 0, None
-
-    # normalize the outlier values
-    if isinstance(grad_flat_normal, np.ndarray):
-        outlier_values = grad_flat_normal[outlier_mask].copy()
-    else:
-        outlier_values = grad_flat_normal[outlier_mask].detach().cpu().clone()
-
-    # close the gap, but leave a small gap to prevent zeroing outliers
-    sign_v = np.sign(outlier_values)
-    normalized_outlier_values = np.abs(outlier_values) - outlier_threshold
-    outlier_max = np.percentile(normalized_outlier_values, 99.99) / (outlier_threshold-margin_gap)
-    normalized_outlier_values /= outlier_max
-    normalized_outlier_values += margin_gap
-    normalized_outlier_values *= sign_v
-
     outlier_count = np.sum(outlier_mask)
 
+    if outlier_count==0:
+        return [], None, []
+
+    outlier_sign = np.sign(grad_flat_normal[outlier_mask])
+    outlier_max = np.percentile(np.abs(grad_flat_normal[outlier_mask])-outlier_threshold, 99) / outlier_threshold
     outlier_positions = np.where(outlier_mask)[0]
 
-    return normalized_outlier_values, outlier_positions, outlier_count, outlier_max
+    return outlier_positions, outlier_max, outlier_sign
 
 
-def outlier_de_normalization(res_vector, outlier_count, outlier_max, outlier_threshold=1.5, margin_gap=0.25):
-    # if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-    assert outlier_threshold>margin_gap>0
+#%%
+class QuantizerWithDataPrep(WZQuantizer):
+    def __init__(self, *args, outlier_threshold=1.5, vec_slices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.outlier_threshold = outlier_threshold
+        self.vec_slices = vec_slices if vec_slices is not None else [slice(None)]
 
-    outlier_values = res_vector[-outlier_count:].copy() if isinstance(res_vector, np.ndarray) \
-                    else res_vector[-outlier_count:].detach().cpu().clone()
+    def _apply_pre_process(self, vector, normal_param=None, outlier_param=None):
+        vector = vector.copy()
 
-    sign_v = np.sign(outlier_values)
-    outlier_values = np.abs(outlier_values) - margin_gap
-    outlier_values *= outlier_max
-    outlier_values = outlier_values + outlier_threshold
-    outlier_values *= sign_v
+        # normalization ----------
+        if normal_param is not None:
+            norm_factors = normal_param
+        else:
+            norm_factors = [get_normalization_factor(vector[v_slc]) for v_slc in self.vec_slices]
+            normal_param = norm_factors
 
-    return outlier_values
+        for i, v_slc in enumerate(self.vec_slices):
+            vector[v_slc] /= norm_factors[i]
 
+        # outlier ----------
+        if outlier_param is not None:
+            outlier_positions, outlier_max, _ = outlier_param
+        else:
+            outlier_positions, outlier_max, outlier_sign = get_outlier_factor(vector, self.outlier_threshold)
+            outlier_param = (outlier_positions, outlier_max, outlier_sign)
 
-class QuantizerWithDataPrep:
-    def __init__(self, wz_quantizer, outlier_threshold):
-        self.wz_quantizer = wz_quantizer
-        self.outlier_threshold=1.5
-        self.margin_gap=0.25
+        if len(outlier_positions) != 0:
+            temp = vector[outlier_positions]
+            vector[outlier_positions] = (np.abs(temp) - self.outlier_threshold) * np.sign(temp) / outlier_max
 
-    def get_prior_and_softcodes(self, *args, **kwargs):
-        return prior, soft_codes
+        return vector, normal_param, outlier_param
+
+    def _post_process_grads(self, vector, normal_param, outlier_param):
+        norm_factors = normal_param
+        outlier_positions, outlier_max, outlier_sign = outlier_param
+        # outlier ----------
+        if len(outlier_positions) != 0:
+            vector[outlier_positions] =\
+                (np.abs(vector[outlier_positions]) * outlier_max + self.outlier_threshold)*outlier_sign
+
+        # normalization ----------
+        for i, v_slc in enumerate(self.vec_slices):
+            vector[v_slc] *= norm_factors[i]
+
+        return vector
 
     def encoding_process(self, grad_vector, *args, **kwargs):
-        return bins.to(dtype)
+        grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
 
-    def decoding_process(self, quantized_data, *args, **kwargs):
+        bins, temp = super().encoding_process(grad_vector, *args, **kwargs)
+        assert temp is None
+
+        return bins, (normal_param, outlier_param)
+
+    def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
+        res = super().decoding_process(quantized_data, side_info_data_list, None, batch_size)
+        res = self._post_process_grads(res, *encoding_extra_data)
         return res
 
-    def train_model(self, input_data, *args, **kwargs):
-        pass
+    def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
+        grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
+        return super().get_prior_and_softcodes(grad_vector, side_info_data_list, batch_size)
 
-    def encoding_process(self, y, ):
-        y = y.copy()
-        normalized_outlier_values, outlier_positions, outlier_count, outlier_max = outlier_normalization(
-            y, outlier_threshold=outlier_threshold, margin_gap=margin_gap)
-        outlier_positions = outlier_positions
-        outlier_count = outlier_count
-        outlier_max = outlier_max
-        y[outlier_positions] = normalized_outlier_values
-        return y
-
-    def decoding_process(self, y_pred, ):
-        y_pred = y_pred.copy()
-
-        normalized_outlier_values = y_pred[outlier_positions]
-        denormalized_outliers = outlier_de_normalization(
-            normalized_outlier_values, outlier_count, outlier_max,
-            outlier_threshold=outlier_threshold, margin_gap=margin_gap)
-        y_pred[outlier_positions] = denormalized_outliers
-
-        return y_pred
-
-    def outlier_normalization(self, grad_flat_normal, outlier_threshold=1.5, margin_gap=0.25):
-        # if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-        assert outlier_threshold > margin_gap > 0
-
-        # Separate outliers with abs value > outlier_threshold
-        outlier_mask = np.abs(grad_flat_normal) > outlier_threshold
-
-        # normalize the outlier values
-        outlier_values = grad_flat_normal[outlier_mask].copy() if isinstance(grad_flat_normal, np.ndarray) \
-            else grad_flat_normal[outlier_mask].detach().cpu().clone()
-
-        assert len(outlier_values) != 0
-
-        # close the gap, but leave a small gap to prevent zeroing outliers
-        sign_v = np.sign(outlier_values)
-        normalized_outlier_values = np.abs(outlier_values) - outlier_threshold
-        outlier_max = np.percentile(normalized_outlier_values, 99.99) / (outlier_threshold - margin_gap)
-        normalized_outlier_values /= outlier_max
-        normalized_outlier_values += margin_gap
-        normalized_outlier_values *= sign_v
-
-        outlier_count = np.sum(outlier_mask)
-
-        outlier_positions = np.where(outlier_mask)[0]
-
-        return normalized_outlier_values, outlier_positions, outlier_count, outlier_max
-
-    def outlier_de_normalization(self, res_vector, outlier_count, outlier_max, outlier_threshold=1.5, margin_gap=0.25):
-        # if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-        assert outlier_threshold > margin_gap > 0
-
-        outlier_values = res_vector[-outlier_count:].copy() if isinstance(res_vector, np.ndarray) \
-            else res_vector[-outlier_count:].detach().cpu().clone()
-
-        sign_v = np.sign(outlier_values)
-        outlier_values = np.abs(outlier_values) - margin_gap
-        outlier_values *= outlier_max
-        outlier_values = outlier_values + outlier_threshold
-        outlier_values *= sign_v
-
-        return outlier_values
+    def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
+        grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
+        super().train_model(grad_vector, side_info_data_list, *args, **kwargs)

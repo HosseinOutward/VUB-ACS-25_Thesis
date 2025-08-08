@@ -77,7 +77,7 @@ class WZQuantizer:
         return bins.to(dtype), None
 
     # todo remove element_count
-    def decoding_process(self, quantized_data, side_info_data_list, batch_size=500_000, encoding_extra_data=None):
+    def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
         # from components.broadcast_components.WZ_models.simple import simple_dequantize
         # return simple_dequantize(quantized_data, np.float32)
 
@@ -281,7 +281,7 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
 
     # Setup plots
     bin_count = wz_quantizer.bin_count
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 6))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 12))
 
     # Plot 1: Data histogram with binning analysis ------------------------
     counts, bins_edges, patches = ax1.hist(
