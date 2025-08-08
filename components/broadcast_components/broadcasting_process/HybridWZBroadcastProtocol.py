@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, get_real_bin_prob
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
     WZServerTrainingPerRoundProtocol, decompress_data_list, \
     change_dtype_recursive, dict_to_array, normalize_array_data, outlier_normalization, compress_data_list, \
@@ -138,7 +138,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
 
 
 if __name__ == "__main__":
-    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN, get_real_bin_prob
     from ServerTrainingPerRoundProtocol import _test_main
 
     k = 2

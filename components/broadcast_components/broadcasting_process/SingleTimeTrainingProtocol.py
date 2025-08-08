@@ -3,7 +3,7 @@ import numpy as np
 import torch
 
 from components.FL_sim import RawBroadcastProtocol
-from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer, get_real_bin_prob
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import outlier_normalization, \
     change_dtype_recursive, decompress_data_list, compress_data_list, array_to_dict_with_shapes, denormalize_array_data, \
     outlier_de_normalization, normalize_array_data, dict_to_array
@@ -209,7 +209,7 @@ class SingleTimeTrainingProtocol(RawBroadcastProtocol):
 
 
 if __name__ == "__main__":
-    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
+    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN, get_real_bin_prob
     from ServerTrainingPerRoundProtocol import _test_main
 
     k = 5
