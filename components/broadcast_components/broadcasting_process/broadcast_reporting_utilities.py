@@ -256,7 +256,7 @@ def plot_stats(stat_dict, no_raw=False):
 
 
 if __name__ == '__main__':
-    from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
+    from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 

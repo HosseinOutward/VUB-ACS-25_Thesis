@@ -452,7 +452,7 @@ def plot_all_metrics(per_worker_training_logs, per_wz_training_logs,
 
 if __name__ == "__main__":
     from components.FL_sim import _main_test, FLSimulator
-    from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
+    from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities, plot_stats

@@ -1,4 +1,4 @@
-from components.broadcast_components.WZ_models.wz_quant_ANN import WZQuantizer
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 from components.broadcast_components.broadcasting_process.HybridWZBroadcastProtocol import HybridWZBroadcastProtocol
 
 class WorkersideTrainingProtocol(HybridWZBroadcastProtocol):

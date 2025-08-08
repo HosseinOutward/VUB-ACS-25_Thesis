@@ -1,8 +1,128 @@
-from components.broadcast_components.WZ_models.wz_quant_ANN import PL_EncoderDecoder_ANN, WZQuantizer, plot_bins
-from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
+import pytorch_lightning as pl
+from torch.nn import functional as F
+
+from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer, plot_bins
+from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN, EncoderDecoder
 import torch
 import torch.nn.functional as F
 import numpy as np
+
+def get_real_bin_prob(bin_no, bin_count):
+    temp = bin_no.detach().clone()
+    bin_appearance_counts = torch.unique(temp, return_counts=True)
+    practical_p_u=temp.float()
+    for b, count in zip(*bin_appearance_counts):
+        practical_p_u[practical_p_u == b] = count / len(bin_no)
+
+    bin_prob_vec = [0.0] * bin_count
+    for b, count in zip(*bin_appearance_counts):
+        bin_prob_vec[b] = float((count / len(bin_no)).cpu())
+    return practical_p_u, torch.tensor(bin_prob_vec)
+
+
+class PL_EncoderDecoder_ANN(pl.LightningModule):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=4, lr=8e-4, reconst_ld=400, marginal=False):
+        super().__init__()
+        side_info_size = side_info_size if side_info_size != 0 else 1
+        self.reconst_ld = reconst_ld
+        self.tau = tau
+        self.lr = lr
+        self.lr_step = 40
+        self.mspe_denom = None
+
+        # if this is a call from super of rnn, don't make the coding model
+        if not hasattr(self, 'coding_model'):
+            self.coding_model = EncoderDecoder(
+                input_dim=inp_dim, side_info_size=side_info_size,
+                layers=4, hidden_dim=80, bin_count=bin_count, marginal=marginal)
+
+    @property
+    def bin_count(self):
+        return self.coding_model.bin_count
+
+    def compute_loss(self, batch, batch_idx):
+        tau_t = self.tau * np.exp(
+            self.current_epoch / (self.trainer.max_epochs + 1) * np.log(0.1 / self.tau))
+        single_grad_param, side_info = batch
+        reconstruct, bins_probs, prior_probs = self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
+        bin_no = torch.argmax(bins_probs, dim=-1)
+        temp = torch.arange(bins_probs.size(0))
+        p_ux = bins_probs[temp, bin_no]
+        p_u = prior_probs[temp, bin_no] + 1e-12
+        loss = torch.log(p_ux / p_u).mean() + self.reconst_ld * F.mse_loss(reconstruct, single_grad_param)
+        return [loss, reconstruct, single_grad_param, bin_no, p_u, bins_probs, prior_probs]
+
+    # todo reduce workload by reusing the logit bin values before softmax/gumble from loss calc
+    def log_metrics(self, name_prefix, loss, inp_rec, inp, bin_no_vec, p_u, bins_probs, prior_probs):
+        # train_db = 10 * np.log10(train_mse_loss / TRAIN_BATCHES)
+
+        self.log(f'{name_prefix}_loss', loss, prog_bar=True)
+
+        recons_loss = torch.mean((inp - inp_rec)**2) / (self.mspe_denom + 1e-8) * 100
+        self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
+
+        self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
+        self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
+
+        practical_p_u, _ = get_real_bin_prob(bin_no_vec, self.bin_count)
+        self.log(f'{name_prefix}_real_bit_r', torch.mean(-torch.log2(practical_p_u + 1e-12)), prog_bar=True)
+
+    def training_step(self, batch, batch_idx):
+        self.mspe_denom = (self.mspe_denom + torch.mean(batch[0]**2)) / 2 \
+            if self.mspe_denom is not None else torch.mean(batch[0]**2)
+
+        res = self.compute_loss(batch, batch_idx)
+        loss, res = res[0], res[1:]
+
+        # Skip logging and redundant compute_loss if no logger and no progress bar
+        has_logger = self.trainer.logger is not False and self.trainer.logger is not None
+        has_progress_bar = self.trainer.progress_bar_callback is not None
+
+        if (has_logger or has_progress_bar) and batch_idx%3==0:
+            self.log_metrics('train_gumble', loss.detach(), *res)
+
+            self.eval()
+            with torch.no_grad():
+                assert not self.coding_model.training
+                self.log_metrics('train', *self.compute_loss(batch, batch_idx))
+            self.train()
+
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        res = self.compute_loss(batch, batch_idx)
+        self.log_metrics('val', *res)
+
+        loss = res[0]
+        return loss
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=int(self.trainer.max_epochs*np.ceil(self.lr_step/180)), gamma=0.3)
+        return [optimizer], [scheduler]
+
+    def encode_net(self, grad_vector):
+        x = self.coding_model.encoder(grad_vector)
+        x = F.softmax(x, dim=-1)
+        x = torch.argmax(x, dim=-1)
+        return x
+
+    def decode_net(self, bins, side_info):
+        reconstruct = self.coding_model.decoder(
+            F.one_hot(bins.long(), num_classes=self.bin_count), side_info)
+        return reconstruct
+
+    def get_prior_and_softcodes_net(self, grad_vector, side_info):
+        from components.other_utilities.brent_wz_models import MarginalPrior
+        assert not self.coding_model.training
+        model_is_marginal = isinstance(self.coding_model.prior, MarginalPrior)
+        assert model_is_marginal == (side_info is None or len(side_info)==0)
+
+        prior = self.coding_model.prior(side_info)
+        soft_code = F.softmax(self.coding_model.encoder(grad_vector), dim=-1)
+
+        return prior, soft_code
 
 
 class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
