@@ -3,7 +3,7 @@ import torch
 
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
-    WZServerTrainingPerRoundProtocol, change_dtype_recursive
+    WZServerTrainingPerRoundProtocol, change_dtype_recursive, decompress_data_list, dict_to_array, compress_data_list
 
 
 class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
@@ -19,7 +19,8 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             assert old_quantizer.user_logger.agent_id == self.curr_agent_id
             assert old_quantizer.user_logger.round_id == self.curr_round_id
             old_quantizer.user_logger.agent_id = (self.curr_agent_id - 1) % len(self.past_workerside_grads)
-            old_quantizer.user_logger.round_id = self.curr_round_id if self.curr_agent_id != 0 else self.curr_round_id - 1
+            old_quantizer.user_logger.round_id = self.curr_round_id if self.curr_agent_id != 0 \
+                                                                    else self.curr_round_id - 1
 
         new_quantizer = QuantizerWithDataPrep(
             wz_pl_model=self.wz_pl_model_class(
@@ -68,7 +69,6 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         if force_use_diff_model is None:  # *****
             assert self.curr_agent_id == agent_id
 
-            from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import decompress_data_list
             quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server[0])
             quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
                                             for k, v in quantizer_encoder_state_dict.items()}
@@ -78,7 +78,6 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             # Handle hybrid round logic
             if self.is_hybrid_round_f(self.curr_round_id):
                 grad_dict = change_dtype_recursive(grad_dict, torch.float32)
-                from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import dict_to_array
                 grad_flat, shapes_dict = dict_to_array(grad_dict)
 
                 self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
@@ -88,13 +87,18 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
                     self.wz_quantizer_list[agent_id], grad_flat, self.current_side_info_list)
 
                 self.wz_quantizer_list[agent_id] = quantizer
-                self.past_workerside_grads[self.curr_agent_id].append(change_dtype_recursive(recons_vect, torch.float16))
+                self.past_workerside_grads[self.curr_agent_id].append(
+                    change_dtype_recursive(recons_vect, torch.float16))
 
                 # Use the updated quantizer for encoding
                 force_use_diff_model = quantizer
 
+                encoder_data_sent_by_server = compress_data_list(
+                    quantizer.wz_pl_model.coding_model.encoder.state_dict())
+
         # Now delegate to parent class for the standard encoding process
-        return super().to_server_prep_data_for_transfer(agent_id, grad_dict, encoder_data_sent_by_server[0] if encoder_data_sent_by_server[0] is not None else None, force_use_diff_model)
+        return super().to_server_prep_data_for_transfer(
+            agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
 
 
 if __name__ == "__main__":
