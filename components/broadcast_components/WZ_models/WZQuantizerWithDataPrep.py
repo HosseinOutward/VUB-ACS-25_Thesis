@@ -33,22 +33,49 @@ def get_outlier_factor(grad_flat_normal, outlier_threshold=1.5):
 
 
 #%%
+def _get_vec_slices(shapes_dict):
+    slice_start = 0
+    slice_length = 0
+    vec_slices = []
+    for i, (k, v) in enumerate(shapes_dict.items()):
+        slice_length += int(np.prod(v))
+
+        if i+1 < len(shapes_dict):
+            curr_l_name = '.'.join(k.split('.')[:-1])
+            temp = list(shapes_dict.keys())[i+1]
+            next_l_name = '.'.join(temp.split('.')[:-1])
+            if curr_l_name == next_l_name:
+                continue
+
+        vec_slices.append(slice(slice_start, slice_start + slice_length))
+        slice_start += slice_length
+        slice_length = 0
+    return vec_slices
+
+
+#%%
+# todo remove the vec_slices and have it be an arg for the functions as an extra
 class QuantizerWithDataPrep(WZQuantizer):
-    def __init__(self, *args, outlier_threshold=1.5, vec_slices=None, **kwargs):
+    def __init__(self, *args, vec_slices=None, outlier_threshold=1.3, **kwargs):
         super().__init__(*args, **kwargs)
         self.outlier_threshold = outlier_threshold
-        self.vec_slices = vec_slices if vec_slices is not None else [slice(None)]
+
+        if vec_slices == []:
+            self.vec_slices = [slice(None)]
+        else:
+            self.vec_slices = vec_slices
 
     def _apply_pre_process(self, vector, normal_param=None, outlier_param=None):
         vector = vector.copy()
 
         # normalization ----------
         if normal_param is not None:
-            norm_factors = normal_param
+            norm_factors, = normal_param
         else:
             norm_factors = [get_normalization_factor(vector[v_slc]) for v_slc in self.vec_slices]
-            normal_param = norm_factors
+            normal_param = (norm_factors, )
 
+        assert all([isinstance(a, slice) for a in self.vec_slices])
         for i, v_slc in enumerate(self.vec_slices):
             vector[v_slc] /= norm_factors[i]
 
@@ -66,7 +93,7 @@ class QuantizerWithDataPrep(WZQuantizer):
         return vector, normal_param, outlier_param
 
     def _post_process_grads(self, vector, normal_param, outlier_param):
-        norm_factors = normal_param
+        norm_factors,  = normal_param
         outlier_positions, outlier_max, outlier_sign = outlier_param
         # outlier ----------
         if len(outlier_positions) != 0:

@@ -4,8 +4,9 @@ import torch
 from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
     WZServerTrainingPerRoundProtocol, decompress_data_list, \
-    change_dtype_recursive, dict_to_array, normalize_array_data, outlier_normalization, compress_data_list, \
+    change_dtype_recursive, dict_to_array, outlier_normalization, compress_data_list, \
     outlier_de_normalization
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import normalize_array_data
 from components.broadcast_components.compressor.rans_coding import rans_batch_encode
 
 
