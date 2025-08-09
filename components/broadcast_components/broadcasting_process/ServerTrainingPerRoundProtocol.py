@@ -193,14 +193,12 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         quantizer = force_use_diff_model
         if force_use_diff_model is None:  # *****
             assert self.curr_agent_id == agent_id
-            # return worker_broadcast_data[0]
 
             # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
             self.agent_list_check.append(agent_id)
             assert all([a == i % worker_count for i, a in enumerate(self.agent_list_check)])
             curr_round_id = len([a for a in self.agent_list_check if a == 0]) - 1
             assert curr_round_id == self.curr_round_id
-            # assert len(self.agent_list_check)-1==len(self.prev_d_flat)
 
             # ****
             quantizer = self.wz_quantizer_list[agent_id]
@@ -227,10 +225,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
                 bin_data[i] = bin_data[i][:-outlier_count]
 
         # decode the bin data to get the vector
-        if force_use_diff_model is not None: # *******
-            side_info_data_list = self.past_global_model_recon_dict
-        else:
-            side_info_data_list = [] if self.warmup else self.current_side_info_list
+        side_info_data_list = self._get_side_info_data_list(agent_id, force_use_diff_model)
 
         extra_enc_data = (norm_fact_vec,), (outlier_positions, outlier_max, outlier_sign)
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, encoding_extra_data=extra_enc_data)
@@ -243,19 +238,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         if force_use_diff_model is not None: # *******
             return result_dict, res_vector
 
-        # ************
-        self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
-
-        # detect if we are in warmup phase
-        if agent_id + 1 >= worker_count:
-            self.warmup = False
-
-        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
-        if not self.warmup:
-            self._prep_for_next_agent(agent_id, worker_count)
-
-        # ************
-        return result_dict
+        # Use post-processing logic
+        return self._post_reconstruction_processing(agent_id, worker_count, res_vector, result_dict)
 
     # todo only send recons, seperate the compr process. change reporting too
     def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
@@ -339,6 +323,32 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         self.wz_quantizer_list[next_agent].train_model(
             last_recent_grads, self.current_side_info_list, epoch=self.epoch_count, batch_size=10_000)
 
+    def _get_side_info_data_list(self, agent_id, force_use_diff_model=None):
+        """Get side info data list - can be overridden by child classes."""
+        if force_use_diff_model is not None:
+            return self.past_global_model_recon_dict
+        else:
+            return [] if self.warmup else self.current_side_info_list
+
+    def _post_reconstruction_processing(self, agent_id, worker_count, res_vector, result_dict):
+        """Post-reconstruction processing - can be overridden by child classes."""
+        # ************
+        self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
+
+        # detect if we are in warmup phase
+        if agent_id + 1 >= worker_count:
+            self.warmup = False
+
+        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
+        if not self.warmup:
+            self._prep_for_next_agent(agent_id, worker_count)
+
+        return result_dict
+
+    def _get_vec_slices(self, shapes_dict):
+        """Use the same vec_slices logic as defined in WZQuantizerWithDataPrep."""
+        from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import _get_vec_slices
+        return _get_vec_slices(shapes_dict)
 
 def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):
     # --------------------------------
