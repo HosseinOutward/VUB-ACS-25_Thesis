@@ -5,8 +5,10 @@ import torch
 from components.FL_sim import RawBroadcastProtocol
 from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import outlier_normalization, \
-    change_dtype_recursive, decompress_data_list, compress_data_list, array_to_dict_with_shapes, denormalize_array_data, \
-    outlier_de_normalization, normalize_array_data, dict_to_array
+    change_dtype_recursive, decompress_data_list, compress_data_list, array_to_dict_with_shapes, \
+    outlier_de_normalization, dict_to_array
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import normalize_array_data, \
+    denormalize_array_data
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 
 

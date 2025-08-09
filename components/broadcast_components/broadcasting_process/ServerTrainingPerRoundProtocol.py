@@ -1,11 +1,9 @@
-from typing import List, Dict
-
-import matplotlib.pyplot as plt
+from typing import List, OrderedDict
 import torch
 from lightning import seed_everything
 
 from components.FL_sim import RawBroadcastProtocol
-from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN, get_real_bin_prob
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
 import pickle
@@ -14,31 +12,44 @@ import numpy as np
 
 
 #%%
-def _convert_item_recursive(item):
+def change_dtype_recursive(obj, dtype):
+    if isinstance(obj, torch.Tensor):
+        return obj.to(dtype)
+    elif isinstance(obj, np.ndarray):
+        numpy_dtype = torch.tensor([], dtype=dtype).numpy().dtype
+        return obj.astype(numpy_dtype)
+    elif isinstance(obj, (list, tuple)):
+        return [change_dtype_recursive(x, dtype) for x in obj]
+    elif isinstance(obj, OrderedDict):
+        return OrderedDict({k: change_dtype_recursive(v, dtype) for k, v in obj.items()})
+    elif isinstance(obj, (int, float, complex, np.integer, np.floating, np.complexfloating)):
+        return torch.tensor([], dtype=dtype).numpy().dtype.type(obj)
+    else:
+        raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
+
+
+#%%
+def make_seriable(item):
     if isinstance(item, np.ndarray):
         return item
     elif isinstance(item, (np.uint8, np.uint16, np.uint32, np.uint64, np.float16)):
         return item.item()
     elif isinstance(item, torch.Tensor):
         return item.cpu().numpy()
-    elif isinstance(item, dict):
-        return {k: _convert_item_recursive(v) for k, v in item.items()}
+    elif isinstance(item, OrderedDict):
+        return OrderedDict({k: make_seriable(v) for k, v in item.items()})
     elif isinstance(item, (list, tuple)):
-        return [_convert_item_recursive(x) for x in item]
+        return [make_seriable(x) for x in item]
     elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
-        # Handle numba lists or other types by converting to numpy array
         numpy_dtype = eval('np.'+str(item._dtype))
         return np.array(item, dtype=numpy_dtype)
     else:
-        # If conversion fails, keep as-is and let pickle handle it
-        # print('** >> Warning: Unable to convert item of type {}. Keeping it as is. << **'.format(type(item)))
-        # return item
         raise
 
 
 def compress_data_list(data_list):
     # return data_list
-    serializable_list = _convert_item_recursive(data_list)
+    serializable_list = make_seriable(data_list)
 
     # Serialize and compress
     pickled_data = pickle.dumps(serializable_list, protocol=pickle.HIGHEST_PROTOCOL)
@@ -54,119 +65,20 @@ def decompress_data_list(compressed_data):
 
 
 #%%
-def change_dtype_recursive(obj, dtype):
-    if isinstance(obj, torch.Tensor):
-        return obj.to(dtype)
-    elif isinstance(obj, np.ndarray):
-        numpy_dtype = torch.tensor([], dtype=dtype).numpy().dtype
-        return obj.astype(numpy_dtype)
-    elif isinstance(obj, (list, tuple)):
-        return [change_dtype_recursive(x, dtype) for x in obj]
-    elif isinstance(obj, dict):
-        return {k:change_dtype_recursive(v, dtype) for k, v in obj.items()}
-    else:
-        raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
-
-
-#%%
-def data_prep_function(y, side_info_data, outlier_rem=True, normalize=True):
-    assert normalize or outlier_rem
-    # remove outliers
-    if outlier_rem:
-        filt = np.percentile(y, [0.001, 99.999])
-        filt = ((y >= filt[0]) * (y <= filt[1]))
-        y = y[filt]
-        side_info_data = [a[filt] for a in side_info_data]
-
-    norm_fact = None
-    if normalize:
-        num_samples = 5
-        sample_size = min(200_000, len(y))
-        norm_facts = []
-        for _ in range(num_samples):
-            sample_indices = np.random.choice(len(y), size=sample_size, replace=True)
-            y_sample = y[sample_indices]
-            norm_fact_sample = np.max(np.abs(np.percentile(y_sample, [1, 99.])))
-            norm_facts.append(norm_fact_sample)
-        norm_fact = np.mean(norm_facts)
-
-        y = (y / norm_fact).astype(np.float32)
-        side_info_data = [((a / norm_fact)).astype(np.float32) for a in side_info_data]
-
-    return y, side_info_data, norm_fact
-
-
-# todo combine bias and weight into one key in dict
-def dict_to_array(grad_dict: Dict):
-    """Convert dictionary of tensors to a single flattened array."""
-    res = []
+def dict_to_array(grad_dict: OrderedDict):
+    res_v = []
+    shapes_dict = OrderedDict()
     for k, v in grad_dict.items():
         v = v.ravel()
-        res.append(v.to('cpu').numpy())
-    res = np.concatenate(res)
-    return res
+        res_v.append(v.to('cpu').numpy())
 
+        shapes_dict[k] = v.shape
+    res_v = np.concatenate(res_v)
 
-def normalize_array_data(data_array, org_shapes_dict, outlier_rem=False, normalize=True):
-    """Normalize array data per layer using the existing data_prep_function method.
-    Groups weight and bias parameters together for each layer."""
-    if not normalize and not outlier_rem:
-        return data_array, None
-
-    norm_fact_vec = []
-    normalized_segments = []
-    start = 0
-
-    # Group layers by their base name (removing .weight/.bias suffix)
-    layer_groups = {}
-    for k, shape in org_shapes_dict.items():
-        if k.endswith('.weight') or k.endswith('.bias'):
-            base_name = k.rsplit('.', 1)[0]  # Remove .weight or .bias
-            if base_name not in layer_groups:
-                layer_groups[base_name] = []
-            layer_groups[base_name].append((k, shape))
-        else:
-            # Handle layers without .weight/.bias suffix as individual groups
-            layer_groups[k] = [(k, shape)]
-
-    # Process each layer group
-    for group_name, layer_params in layer_groups.items():
-        # Collect all parameters for this layer group
-        group_data = []
-
-        for param_name, shape in layer_params:
-            end = start + int(np.prod(shape))
-            layer_data = data_array[start:end]
-            group_data.append(layer_data)
-            start = end
-
-        # Concatenate all parameters in the group for normalization
-        combined_group_data = np.concatenate(group_data)
-
-        # Use existing data_prep_function for the entire group
-        side_info_data = []  # Empty for single array normalization
-        normalized_group, _, norm_fact = data_prep_function(combined_group_data, side_info_data, outlier_rem, normalize)
-
-        # Split the normalized data back to individual parameters
-        group_start_norm = 0
-        for param_name, shape in layer_params:
-            param_size = int(np.prod(shape))
-            param_normalized = normalized_group[group_start_norm:group_start_norm + param_size]
-            normalized_segments.append(param_normalized)
-            group_start_norm += param_size
-
-        # Store one normalization factor per group
-        norm_fact_vec.append(norm_fact)
-
-    # Concatenate all normalized segments
-    normalized_data = np.concatenate(normalized_segments)
-    norm_fact_vec = np.array(norm_fact_vec)
-
-    return normalized_data, norm_fact_vec
+    return res_v, shapes_dict
 
 
 def array_to_dict_with_shapes(grad_vector, org_shapes_dict):
-    """Convert flattened array back to dictionary with original shapes."""
     res = {}
     start = 0
     for k, shape in org_shapes_dict.items():
@@ -176,16 +88,9 @@ def array_to_dict_with_shapes(grad_vector, org_shapes_dict):
         start = end
     return res
 
-
-def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
-    """Denormalize array data per layer using the normalization factors from data_prep_function.
-    Groups weight and bias parameters together for each layer."""
-    if norm_fact_vec is None:
-        return normalized_data
-
-    # Group layers by their base name (removing .weight/.bias suffix)
+def shape_dict_to_vect_slices(dict_shapes):
     layer_groups = {}
-    for k, shape in org_shapes_dict.items():
+    for k, shape in dict_shapes.items():
         if k.endswith('.weight') or k.endswith('.bias'):
             base_name = k.rsplit('.', 1)[0]  # Remove .weight or .bias
             if base_name not in layer_groups:
@@ -195,79 +100,16 @@ def denormalize_array_data(normalized_data, norm_fact_vec, org_shapes_dict):
             # Handle layers without .weight/.bias suffix as individual groups
             layer_groups[k] = [(k, shape)]
 
-    denormalized_segments = []
-    start = 0
-    group_idx = 0
 
-    # Process each layer group
-    for group_name, layer_params in layer_groups.items():
-        norm_fact = norm_fact_vec[group_idx] if group_idx < len(norm_fact_vec) else None
-
-        # Process each parameter in the group
-        for param_name, shape in layer_params:
-            end = start + int(np.prod(shape))
-            layer_data = normalized_data[start:end]
-
-            if norm_fact is not None:
-                denormalized_layer = layer_data * norm_fact
-            else:
-                denormalized_layer = layer_data
-
-            denormalized_segments.append(denormalized_layer)
-            start = end
-
-        group_idx += 1
-
-    # Concatenate all denormalized segments
-    denormalized_data = np.concatenate(denormalized_segments)
-
-    return denormalized_data
-
-
-# ********************
-
-def outlier_normalization(grad_flat_normal, outlier_threshold=1.5):
-    if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-
-    # Separate outliers with abs value > outlier_threshold
-    outlier_mask = np.abs(grad_flat_normal) > outlier_threshold
-
-    # normalize the outlier values
-    outlier_values = grad_flat_normal[outlier_mask].copy() if isinstance(grad_flat_normal, np.ndarray) \
-                    else grad_flat_normal[outlier_mask].detach().cpu().clone()
-
-    assert len(outlier_values)!=0
-
-    # close the gap, but leave a small gap to prevent zeroing outliers
-    outlier_values = (np.abs(outlier_values) - outlier_threshold*0.85) * np.sign(outlier_values)
-    outlier_max = np.percentile(np.abs(outlier_values), 99.99) / outlier_threshold
-    outlier_values /= outlier_max
-
-    outlier_count = np.sum(outlier_mask)
-
-    outlier_positions = np.where(outlier_mask)[0]
-
-    return outlier_values, outlier_positions, outlier_count, outlier_max
-
-
-def outlier_de_normalization(res_vector, outlier_count, outlier_max, outlier_threshold=1.5):
-    if outlier_threshold != 1.5: print('warning, using non default outlier threshold!')
-
-    outlier_values = res_vector[-outlier_count:].copy() if isinstance(res_vector, np.ndarray) \
-                    else res_vector[-outlier_count:].detach().cpu().clone()
-    outlier_values *= outlier_max
-    outlier_values[outlier_values > 0] += outlier_threshold*0.85
-    outlier_values[outlier_values < 0] -= outlier_threshold*0.85
-    return outlier_values
-
-
+#%%
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: WZQuantizer):
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep):
+        assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
         self.no_global_quantization = False
         self.last_global_model_recon_comp_data = None
         self.global_model_transfer_quantizer = wz_base_quantizer
         self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
-        self.wz_quantizer_list: List[WZQuantizer] = [wz_base_quantizer] * agent_count
+        self.wz_quantizer_list: List[QuantizerWithDataPrep] = [wz_base_quantizer] * agent_count
 
         self.last_recent_grads_list = [None] * agent_count
         self.current_side_info_list = None
@@ -276,8 +118,15 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         self.prev_d_flat = []
         self.model_training_counter = [0] * agent_count
         self.past_global_model_recon_dict = []
-
         self.training_side_info_prev_d_flat = None
+        self.epoch_count=45
+
+    def to_worker_prep_data_for_transfer(self, agent_id):
+        assert self.curr_agent_id == agent_id
+        quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
+
+        quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
+        return compress_data_list(quantizer_encoder_state_dict)
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
                                          force_use_diff_model=None):
@@ -293,24 +142,26 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
                 quantizer_encoder_state_dict)
 
         #**********
+        if force_use_diff_model is None:
+            quantizer = self.wz_quantizer_list[agent_id]
+        else:
+            quantizer = force_use_diff_model  # *******
+
+        #**********
         grad_dict = change_dtype_recursive(grad_dict, torch.float32)
-
-        # Get shapes dictionary before flattening
-        shapes_dict = {k: v.shape for k, v in grad_dict.items()}
-        grad_flat = dict_to_array(grad_dict)
-        grad_flat_normal, norm_fact_vec = normalize_array_data(
-            grad_flat, shapes_dict, outlier_rem=False, normalize=True)
+        grad_flat, shapes_dict = dict_to_array(grad_dict)
 
         #**********
-        outlier_values, outlier_positions, outlier_count, outlier_max = outlier_normalization(grad_flat_normal)
-        grad_flat_normal[outlier_positions] = outlier_values
+        quantizer.vec_slices = self._get_vec_slices(shapes_dict)
+
+        # **********
+        bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat)
 
         #**********
-        quantizer = self.wz_quantizer_list[agent_id] if force_use_diff_model is None else force_use_diff_model  # *******
+        (norm_fact_vec), (outlier_positions, outlier_max, outlier_sign) = extra_enc_data
+
+        #**********
         bin_count = quantizer.wz_pl_model.bins_per_plane
-        bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat_normal)
-
-        #**********
         outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
         for i in range(len(bins_vector)):
             bins_vector[i][outlier_positions] = bin_count
@@ -324,22 +175,17 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
 
         #**********
-        # change the dtype of the encoded data to float16
-        norm_fact_vec, prob_per_bin = change_dtype_recursive([norm_fact_vec, prob_per_bin], torch.float16)
+        norm_fact_vec, outlier_max = change_dtype_recursive([norm_fact_vec, outlier_max], torch.float16)
 
-        outlier_max = outlier_max.astype(np.float16)
-
+        outlier_count = len(outlier_positions)
         temp = [8, 16, 32, 64][np.argmax(np.array([8, 16, 32, 64]) / np.log2(outlier_count + 1) > 1)]
-        outlier_count = outlier_count.astype(eval(f'np.uint{temp}'))
+        outlier_count = change_dtype_recursive(outlier_count, eval(f'torch.uint{temp}'))
 
-        return compress_data_list((bin_vec_compressed, norm_fact_vec, prob_per_bin, outlier_count, outlier_max))
+        outlier_sign = np.packbits((outlier_sign>0), bitorder='big')
 
-    def to_worker_prep_data_for_transfer(self, agent_id):
-        assert self.curr_agent_id == agent_id
-        quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
-
-        quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
-        return compress_data_list(quantizer_encoder_state_dict)
+        #**********
+        return compress_data_list(((bin_vec_compressed, prob_per_bin), (norm_fact_vec),
+                                   (outlier_count, outlier_sign, outlier_max)))
 
     # %%
     def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims,
@@ -361,45 +207,43 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
         model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
 
-        # decompress the data received from the worker
-        bin_vec_compressed, norm_fact_vec, prob_per_bin, outlier_count, outlier_max = \
-            decompress_data_list(worker_broadcast_data)
+        # ******
+        (bin_vec_compressed, prob_per_bin), (norm_fact_vec, ), (outlier_count, outlier_sign, outlier_max) =\
+                 decompress_data_list(worker_broadcast_data)
+        prob_per_bin, norm_fact_vec, outlier_max =\
+            change_dtype_recursive([prob_per_bin, norm_fact_vec, outlier_max], torch.float32)
+        outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count]*2-1
 
-        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float32)
-        norm_fact_vec = change_dtype_recursive(norm_fact_vec, torch.float32)
-
+        # ******
         bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size + outlier_count)
-                    for i, bvc in enumerate(bin_vec_compressed)]
+                        for i, bvc in enumerate(bin_vec_compressed)]
 
-        # ****
-        bin_count = quantizer.wz_pl_model.bins_per_plane
-        outlier_positions = np.where(bin_data[0] == bin_count)[0]
-        for i in range(len(bin_data)):
-            bin_data[i][outlier_positions] = 0
+        # ******
+        if outlier_count > 0:
+            bin_count = quantizer.wz_pl_model.bins_per_plane
+            outlier_positions = np.where(bin_data[0] == bin_count)[0]
+            for i in range(len(bin_data)):
+                bin_data[i][outlier_positions] = bin_data[i][-outlier_count:]
+                bin_data[i] = bin_data[i][:-outlier_count]
 
         # decode the bin data to get the vector
-        side_info_data_list = [] if self.warmup else self.current_side_info_list
         if force_use_diff_model is not None: # *******
             side_info_data_list = self.past_global_model_recon_dict
-        side_info_data_list = [np.concatenate([a, a[outlier_positions]]) for a in side_info_data_list]
-        side_info_data_list = change_dtype_recursive(side_info_data_list, torch.float32)
+        else:
+            side_info_data_list = [] if self.warmup else self.current_side_info_list
+
+        extra_enc_data = (norm_fact_vec,), (outlier_positions, outlier_max, outlier_sign)
         res_vector = quantizer.decoding_process(bin_data, side_info_data_list, encoding_extra_data=extra_enc_data)
 
-        # fix the outliers
-        res_vector[outlier_positions] = outlier_de_normalization(res_vector, outlier_count, outlier_max)
-        res_vector = res_vector[:-outlier_count]
-
-        # denormalize and convert back to dict
-        denormalized_vector = denormalize_array_data(res_vector, norm_fact_vec, global_model_dims)
-        result_dict = array_to_dict_with_shapes(denormalized_vector, global_model_dims)
-
+        # ******
+        result_dict = array_to_dict_with_shapes(res_vector, global_model_dims)
         result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
 
+        # ************
         if force_use_diff_model is not None: # *******
             return result_dict, res_vector
 
         # ************
-
         self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
 
         # detect if we are in warmup phase
@@ -410,6 +254,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         if not self.warmup:
             self._prep_for_next_agent(agent_id, worker_count)
 
+        # ************
         return result_dict
 
     # todo only send recons, seperate the compr process. change reporting too
@@ -428,29 +273,27 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             return self.last_global_model_recon_comp_data
 
         old_quantizer = self.global_model_transfer_quantizer
-        global_model_dims = {k: v.shape for k, v in server_model_state_dict.items()}
+        model_stat_vec, global_model_dims = dict_to_array(server_model_state_dict)
 
         new_quantizer = old_quantizer
         if not self.warmup:
             print('        - training quant for global model transfer')
-            temp = len(self.past_global_model_recon_dict)
-            new_quantizer = WZQuantizer(
-                wz_pl_model=self.wz_pl_model_class(2, max(16 // (self.curr_round_id + 1), 2), 1,
-                        temp, 10, False, lr=1e-3, reconst_ld=400, tau=1.5).to(torch.float32),
-                count_side_info_data=temp, enable_progress_bar=old_quantizer.enable_progress_bar,
+
+            si_count = len(self.past_global_model_recon_dict)
+            new_quantizer = QuantizerWithDataPrep(
+                wz_pl_model=self.wz_pl_model_class(
+                        2, max(16 // (self.curr_round_id + 1), 2), 1,
+                        si_count, 10, False, lr=1e-3, reconst_ld=400, tau=1.5
+                    ).to(torch.float32),
+                count_side_info_data=si_count, enable_progress_bar=old_quantizer.enable_progress_bar,
                 train_sample_size=old_quantizer.train_sample_size, user_logger=None,
+                vec_slices=self._get_vec_slices(global_model_dims),
             )
-
-            model_stat_vec = dict_to_array(server_model_state_dict)
-            model_stat_vec, _ = normalize_array_data(model_stat_vec, global_model_dims, False, True)
-
-            outlier_values, outlier_positions, _, _ = outlier_normalization(model_stat_vec)
-            model_stat_vec[outlier_positions] = outlier_values
 
             model_stat_vec += np.random.normal(0, np.sqrt(1e-6), len(model_stat_vec), ).astype(np.float32)
 
-            side_info_data_list = change_dtype_recursive(self.past_global_model_recon_dict, torch.float32)
-            new_quantizer.train_model(model_stat_vec, side_info_data_list, epoch=45, batch_size=10_000)
+            new_quantizer.train_model(model_stat_vec, self.past_global_model_recon_dict,
+                                      epoch=self.epoch_count, batch_size=10_000)
 
         compressed = self.to_server_prep_data_for_transfer(
             None, server_model_state_dict, None, force_use_diff_model=new_quantizer, )
@@ -459,6 +302,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             None, compressed, None, global_model_dims, force_use_diff_model=new_quantizer)
 
         self.past_global_model_recon_dict += [change_dtype_recursive(recons_vector, torch.float16)]
+
         if len(self.past_global_model_recon_dict) > 10:
             self.past_global_model_recon_dict.pop(0)
 
@@ -470,12 +314,11 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         assert not self.warmup
 
         temp = len(self.prev_d_flat) - worker_count
-        last_recent_grads = self.prev_d_flat[temp]
         self.current_side_info_list = self.prev_d_flat[:temp] + self.prev_d_flat[temp + 1:]
 
         next_agent = (curr_agent_id + 1) % worker_count
         qz = self.wz_quantizer_list[next_agent]
-        self.wz_quantizer_list[next_agent] = WZQuantizer(
+        self.wz_quantizer_list[next_agent] = QuantizerWithDataPrep(
             wz_pl_model=self.wz_pl_model_class(
                 inp_dim=1, side_info_size=len(self.current_side_info_list),
                 lr=qz.wz_pl_model.lr,
@@ -487,17 +330,14 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             ).to(torch.float32),
             count_side_info_data=len(self.current_side_info_list), enable_progress_bar=qz.enable_progress_bar,
             train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
+            vec_slices=qz.vec_slices,
         )
 
-        last_recent_grads+=np.random.normal(0, np.sqrt(1e-6), len(last_recent_grads), ).astype(np.float32)
+        last_recent_grads = self.prev_d_flat[temp] +\
+                            np.random.normal(0, np.sqrt(1e-6), len(self.prev_d_flat[temp]), ).astype(np.float32)
 
-        outlier_values, outlier_positions, _, _ = outlier_normalization(last_recent_grads)
-        last_recent_grads[outlier_positions] = outlier_values
-
-        side_info_data_list = change_dtype_recursive(self.current_side_info_list, torch.float32)
-        last_recent_grads = change_dtype_recursive(last_recent_grads, torch.float32)
         self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, side_info_data_list, epoch=45, batch_size=10_000)
+            last_recent_grads, self.current_side_info_list, epoch=self.epoch_count, batch_size=10_000)
 
 
 def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):
@@ -521,7 +361,7 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
     }
 
     grad_test_data = [
-        [{k: torch.normal(0, 1, size=v).to('cuda') for k, v in model_shape_dict.items()}
+        [OrderedDict({k: torch.normal(0, 1, size=v).to('cuda') for k, v in model_shape_dict.items()})
          for _ in range(worker_count)]
         for _ in range(rounds)]
 
@@ -562,7 +402,9 @@ if __name__ == "__main__":
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
-    base_quantizer = WZQuantizer(wz_model, train_sample_size=100_000,
-                                 count_side_info_data=0, enable_progress_bar=True)
+    base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
+                            count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
+
     broadcast_prot = WZServerTrainingPerRoundProtocol(k, base_quantizer)
-    _test_main(broadcast_prot, worker_count=k, rounds=10)
+
+    _test_main(broadcast_prot, worker_count=k, rounds=2)

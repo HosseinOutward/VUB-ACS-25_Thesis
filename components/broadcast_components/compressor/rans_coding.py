@@ -2,7 +2,7 @@ import numpy as np
 import rans.rANSCoder as rans
 import numba.typed
 
-batch_size=100_000
+batch_size=50_000
 
 
 def rans_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.ndarray:

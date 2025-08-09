@@ -225,8 +225,47 @@ class WZQuantizer:
 
 
 def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, training_ind=False):
-    from matplotlib import pyplot as plt
+    if isinstance(x_data_, torch.Tensor):
+        x_data_ = x_data_.cpu().numpy()
+    ind_list = wz_quantizer.val_indices if wz_quantizer.val_indices is not None\
+                    else np.arange(len(x_data_))
+    ind_list = ind_list if training_ind \
+                    else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
 
+    min_v, max_v = np.percentile(x_data_, 0.1), np.percentile(x_data_, 99.9)
+    true_min_v, true_max_v = x_data_.min(), x_data_.max()
+
+    grad_data = np.asarray(x_data_, dtype=np.float32)[ind_list]
+    side_info = [si[ind_list] for si in side_info]
+
+    sort_idx = np.argsort(grad_data)
+    grad_data = grad_data[sort_idx]
+    side_info = [si[sort_idx] for si in side_info]
+
+    # Create x_range for plotting
+    deunif_bins, encoding_extra = wz_quantizer.encoding_process(grad_data)
+    recons_for_x_range = wz_quantizer.decoding_process(deunif_bins, side_info, encoding_extra_data=encoding_extra)
+
+    x_step = (max_v - min_v) / step_count
+    pointer_v = true_min_v
+    spaced_idx = []
+    for i, gd in enumerate(grad_data):
+        if pointer_v + x_step * 0.95 < gd:
+            pointer_v = gd
+            spaced_idx.append(i)
+    spaced_idx.append(len(grad_data)-1)
+    spaced_idx = np.array(spaced_idx)
+
+    grad_data = grad_data[spaced_idx]
+    side_info = [si[spaced_idx] for si in side_info]
+    recons_for_x_range = recons_for_x_range[spaced_idx]
+    deunif_bins = [deunif_bins[b][spaced_idx] for b in range(len(deunif_bins))]
+
+    bins = wz_quantizer.wz_pl_model.unify_bins(deunif_bins)
+    print('bins used:', len(np.unique(bins)))
+
+    # Setup plots
+    from matplotlib import pyplot as plt
     def _plot_bin_regions(ax, x_range, decoded_bins, x_step, colors):
         current_bin = decoded_bins[0]
         last_idx = 0
@@ -243,50 +282,13 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
         # Final span
         ax.axvspan(last_split_point, x_range[-1], color=colors[current_bin], alpha=0.3)
 
-    if isinstance(x_data_, torch.Tensor):
-        x_data_ = x_data_.cpu().numpy()
-    ind_list = wz_quantizer.val_indices if wz_quantizer.val_indices is not None\
-                    else np.arange(len(x_data_))
-    ind_list = ind_list if training_ind \
-                    else np.setdiff1d(np.arange(len(x_data_)), wz_quantizer.val_indices)
-
-    min_v, max_v = np.percentile(x_data_, 1), np.percentile(x_data_, 99)
-    true_min_v, true_max_v = x_data_.min(), x_data_.max()
-
-    grad_data = np.asarray(x_data_, dtype=np.float32)[ind_list]
-    side_info = [si[ind_list] for si in side_info]
-
-    sort_idx = np.argsort(grad_data)
-    grad_data = grad_data[sort_idx]
-    side_info = [si[sort_idx] for si in side_info]
-
-    x_step = (max_v - min_v) / step_count
-    pointer_v = true_min_v
-    spaced_idx = []
-    for i, gd in enumerate(grad_data):
-        if pointer_v + x_step * 0.95 < gd:
-            pointer_v = gd
-            spaced_idx.append(i)
-    spaced_idx.append(len(grad_data)-1)
-    spaced_idx = np.array(spaced_idx)
-    grad_data = grad_data[spaced_idx]
-    side_info = [si[spaced_idx] for si in side_info]
-
-    # Create x_range for plotting
-    deunif_bins, encoding_extra = wz_quantizer.encoding_process(grad_data)
-    recons_for_x_range = wz_quantizer.decoding_process(deunif_bins, side_info, encoding_extra_data=encoding_extra)
-
-    bins = wz_quantizer.wz_pl_model.unify_bins(deunif_bins)
-    print('bins used:', len(np.unique(bins)))
-
-    # Setup plots
     bin_count = wz_quantizer.bin_count
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 12))
 
     # Plot 1: Data histogram with binning analysis ------------------------
     counts, bins_edges, patches = ax1.hist(
         x_data_[np.random.choice(len(x_data_), min(len(x_data_), 20_000), replace=False)],
-        bins=200, alpha=0.3, color='gray', label='data histogram', density=False)
+        bins=200, alpha=0.3, color='gray', label='data histogram', density=True)
     ax1.clear()
     ax1.bar(bins_edges[:-1], counts / np.max(counts), width=np.diff(bins_edges),
             alpha=0.3, color='gray', label='data histogram (normalized)', align='edge')
@@ -311,8 +313,9 @@ def plot_bins(wz_quantizer: WZQuantizer, x_data_, side_info, step_count=1000, tr
     # Plot 2: Reconstruction curves for each bin (batch process) ------------------------
     # todo merge the 2 plots and change how the side_info is given (for example for all 0s as side info)
     for bin_idx in np.unique(bins):
-        temp = wz_quantizer.wz_pl_model.deunify_bins(torch.zeros_like(bins) + bin_idx)
+        temp = wz_quantizer.wz_pl_model.deunify_bins(torch.zeros(len(x_data_)) + bin_idx)
         temp = wz_quantizer.decoding_process(temp, side_info, encoding_extra_data=encoding_extra)
+        temp = temp[spaced_idx]
         ax2.scatter(grad_data, temp, label=f'bin={bin_idx}', s=0.1)
 
     ax2.set_xlabel('x_range (which is forced to bin, but is paired with related side_info)')
