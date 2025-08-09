@@ -117,8 +117,8 @@ class WZQuantizer:
         assert len(side_info_data_list) == self.count_side_info_data
         if self.count_side_info_data == 0:
             side_info_data_list = [np.zeros(len(input_data))]
-        input_data = torch.tensor(input_data).unsqueeze(1)
-        side_info_data_list = torch.tensor(np.array(side_info_data_list)).T.to(input_data.dtype)
+        input_data = torch.tensor(input_data).unsqueeze(1).to(torch.float32)
+        side_info_data_list = torch.tensor(np.array(side_info_data_list)).T.to(torch.float32)
 
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
 

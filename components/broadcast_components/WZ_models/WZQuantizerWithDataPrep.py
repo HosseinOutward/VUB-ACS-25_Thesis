@@ -14,6 +14,8 @@ def get_normalization_factor(y: np.ndarray):
         norm_facts.append(norm_fact_sample)
     norm_fact = np.mean(norm_facts)
 
+    assert norm_fact!=0
+
     return norm_fact
 
 
@@ -28,6 +30,8 @@ def get_outlier_factor(grad_flat_normal, outlier_threshold=1.5):
     outlier_sign = np.sign(grad_flat_normal[outlier_mask])
     outlier_max = np.percentile(np.abs(grad_flat_normal[outlier_mask])-outlier_threshold, 99) / outlier_threshold
     outlier_positions = np.where(outlier_mask)[0]
+
+    assert outlier_max!=0
 
     return outlier_positions, outlier_max, outlier_sign
 
@@ -44,7 +48,7 @@ def _get_vec_slices(shapes_dict):
             curr_l_name = '.'.join(k.split('.')[:-1])
             temp = list(shapes_dict.keys())[i+1]
             next_l_name = '.'.join(temp.split('.')[:-1])
-            if curr_l_name == next_l_name:
+            if curr_l_name == next_l_name and len(curr_l_name)>0:
                 continue
 
         vec_slices.append(slice(slice_start, slice_start + slice_length))
@@ -95,6 +99,7 @@ class QuantizerWithDataPrep(WZQuantizer):
     def _post_process_grads(self, vector, normal_param, outlier_param):
         norm_factors,  = normal_param
         outlier_positions, outlier_max, outlier_sign = outlier_param
+        assert len(np.unique(outlier_sign))==2 and outlier_sign.max()==1 and outlier_sign.min()==-1
         # outlier ----------
         if len(outlier_positions) != 0:
             vector[outlier_positions] =\
