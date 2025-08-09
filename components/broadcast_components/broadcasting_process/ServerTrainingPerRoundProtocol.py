@@ -69,10 +69,10 @@ def dict_to_array(grad_dict: OrderedDict):
     res_v = []
     shapes_dict = OrderedDict()
     for k, v in grad_dict.items():
+        shapes_dict[k] = v.shape
+
         v = v.ravel()
         res_v.append(v.to('cpu').numpy())
-
-        shapes_dict[k] = v.shape
     res_v = np.concatenate(res_v)
 
     return res_v, shapes_dict
@@ -87,6 +87,7 @@ def array_to_dict_with_shapes(grad_vector, org_shapes_dict):
         res[k] = v.reshape(shape)
         start = end
     return res
+
 
 def shape_dict_to_vect_slices(dict_shapes):
     layer_groups = {}

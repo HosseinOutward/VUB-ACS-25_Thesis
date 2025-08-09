@@ -1,6 +1,6 @@
 import gc
 from copy import deepcopy
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, OrderedDict
 import numpy as np
 import torch
 import pytorch_lightning as pl
@@ -82,10 +82,10 @@ class FederatedModelWrapper(pl.LightningModule):
 
 
     def on_train_start(self):
-        self.accu_param_grads = {
+        self.accu_param_grads = OrderedDict({
             k: torch.zeros_like(v.data, device=v.device)
             for k, v in self.named_parameters() if v.requires_grad
-        }
+        })
         super().on_train_start()
 
     def training_step(self, batch, batch_idx):
@@ -232,8 +232,8 @@ class FLSimulator:
         self.train_sampler = CustomSampler(len(self.dataset_train), self.num_agents,
                 True, True, non_iid_flag=non_iid_sampling, )
 
-        self.model_shape_dict = {k: v.shape
-                for k, v in self.global_model.named_parameters() if v.requires_grad}
+        self.model_shape_with_grads_dict = OrderedDict({k: v.shape
+                                        for k, v in self.global_model.named_parameters() if v.requires_grad})
 
         self.agents = [Agent(
             agent_id, self.train_sampler.size_of_partition[agent_id],
@@ -282,10 +282,11 @@ class FLSimulator:
         server_data_sent_to_worker = broadcast_prot.to_worker_prep_data_for_transfer(ag_id)
 
         current_ag_encoding_function = broadcast_prot.to_server_prep_data_for_transfer
-        encoded_ag_broadcast = self.agents[ag_id].get_worker_broadcast(server_data_sent_to_worker, current_ag_encoding_function)
+        encoded_ag_broadcast = self.agents[ag_id].get_worker_broadcast(
+            server_data_sent_to_worker, current_ag_encoding_function)
 
         decoded_agent_broadcast = broadcast_prot.reconstruction_process(
-            ag_id, encoded_ag_broadcast, self.num_agents, self.model_shape_dict, )
+            ag_id, encoded_ag_broadcast, self.num_agents, self.model_shape_with_grads_dict, )
 
         return decoded_agent_broadcast
 
