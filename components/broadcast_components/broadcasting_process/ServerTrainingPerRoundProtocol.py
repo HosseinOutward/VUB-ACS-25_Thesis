@@ -6,6 +6,7 @@ from components.FL_sim import RawBroadcastProtocol
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN, get_real_bin_prob
 from components.broadcast_components.compressor.rans_coding import rans_batch_decode, rans_batch_encode
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import _get_vec_slices
 import pickle
 import gzip
 import numpy as np
@@ -24,6 +25,8 @@ def change_dtype_recursive(obj, dtype):
         return OrderedDict({k: change_dtype_recursive(v, dtype) for k, v in obj.items()})
     elif isinstance(obj, (int, float, complex, np.integer, np.floating, np.complexfloating)):
         return torch.tensor([], dtype=dtype).numpy().dtype.type(obj)
+    elif obj is None:
+        return None
     else:
         raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
 
@@ -43,6 +46,8 @@ def make_seriable(item):
     elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
         numpy_dtype = eval('np.'+str(item._dtype))
         return np.array(item, dtype=numpy_dtype)
+    elif item is None:
+        return None
     else:
         raise
 
@@ -131,6 +136,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
                                          force_use_diff_model=None):
+        quantizer = force_use_diff_model
         if force_use_diff_model is None:  # *****
             assert self.curr_agent_id == agent_id
 
@@ -142,18 +148,14 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
                 quantizer_encoder_state_dict)
 
-        #**********
-        if force_use_diff_model is None:
             quantizer = self.wz_quantizer_list[agent_id]
-        else:
-            quantizer = force_use_diff_model  # *******
 
         #**********
         grad_dict = change_dtype_recursive(grad_dict, torch.float32)
         grad_flat, shapes_dict = dict_to_array(grad_dict)
 
         #**********
-        quantizer.vec_slices = self._get_vec_slices(shapes_dict)
+        quantizer.vec_slices = _get_vec_slices(shapes_dict)
 
         # **********
         bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat)
@@ -211,7 +213,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
                  decompress_data_list(worker_broadcast_data)
         prob_per_bin, norm_fact_vec, outlier_max =\
             change_dtype_recursive([prob_per_bin, norm_fact_vec, outlier_max], torch.float32)
-        outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count]*2-1
+        outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count].astype(int)*2-1
 
         # ******
         bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size + outlier_count)
@@ -272,10 +274,10 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
                     ).to(torch.float32),
                 count_side_info_data=si_count, enable_progress_bar=old_quantizer.enable_progress_bar,
                 train_sample_size=old_quantizer.train_sample_size, user_logger=None,
-                vec_slices=self._get_vec_slices(global_model_dims),
+                vec_slices=_get_vec_slices(global_model_dims),
             )
 
-            model_stat_vec += np.random.normal(0, np.sqrt(1e-6), len(model_stat_vec), ).astype(np.float32)
+            model_stat_vec += np.random.normal(0, np.sqrt(1e-8), len(model_stat_vec), ).astype(np.float32)
 
             new_quantizer.train_model(model_stat_vec, self.past_global_model_recon_dict,
                                       epoch=self.epoch_count, batch_size=10_000)
@@ -319,7 +321,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         )
 
         last_recent_grads = self.prev_d_flat[temp] +\
-                            np.random.normal(0, np.sqrt(1e-6), len(self.prev_d_flat[temp]), ).astype(np.float32)
+                            np.random.normal(0, np.sqrt(1e-8), len(self.prev_d_flat[temp]), ).astype(np.float32)
 
         self.wz_quantizer_list[next_agent].train_model(
             last_recent_grads, self.current_side_info_list, epoch=self.epoch_count, batch_size=10_000)
@@ -345,11 +347,6 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             self._prep_for_next_agent(agent_id, worker_count)
 
         return result_dict
-
-    def _get_vec_slices(self, shapes_dict):
-        """Use the same vec_slices logic as defined in WZQuantizerWithDataPrep."""
-        from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import _get_vec_slices
-        return _get_vec_slices(shapes_dict)
 
 def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):
     # --------------------------------
@@ -387,7 +384,8 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
             broadcast_prot.start_round_agent_process(ag_id, round)
 
             print(f'>> Round {round}, Agent {ag_id}')
-            _ = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad)
+            recon_model_param = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad)
+            recon_model_param = recon_model_param[0]
 
             print('          - Preparing data for transfer to worker...')
             server_data_sent_to_worker = broadcast_prot.to_worker_prep_data_for_transfer(ag_id)
@@ -395,10 +393,17 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
             print('          - Preparing data for transfer to server...')
             encoded_ag_broadcast = broadcast_prot.to_server_prep_data_for_transfer(
                 ag_id, grad, server_data_sent_to_worker)
+            decoded_ag_broadcast = decompress_data_list(encoded_ag_broadcast)
 
             print('          - reconstructing data received...')
             decoded_agent_broadcast = broadcast_prot.reconstruction_process(
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
+
+            # print the mspe
+            temp = np.mean(np.concat([grad[k].cpu()**2 for k in grad.keys()]))
+            temp = [np.mean(np.concat([(grad[k]-a[k]).cpu()**2 for k in grad.keys()]))/temp
+                    for a in [decoded_agent_broadcast, recon_model_param]]
+            print('          - MSPE:', temp)
 
     # check output size and correctness
     for i, grad in enumerate(grad_test_data[-1]):
@@ -418,4 +423,4 @@ if __name__ == "__main__":
 
     broadcast_prot = WZServerTrainingPerRoundProtocol(k, base_quantizer)
 
-    _test_main(broadcast_prot, worker_count=k, rounds=2)
+    _test_main(broadcast_prot, worker_count=k, rounds=3)

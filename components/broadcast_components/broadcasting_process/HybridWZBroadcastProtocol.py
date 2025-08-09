@@ -62,41 +62,43 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         res = super().to_worker_prep_data_for_transfer(agent_id)
         if self.is_hybrid_round_f(self.curr_round_id) or (self.curr_round_id == 0 and self.curr_agent_id == 0):
             return res, [res]
-        return res, np.array([0])
+        return res, None
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
                                          force_use_diff_model=None):
-        if force_use_diff_model is None:  # *****
-            assert self.curr_agent_id == agent_id
+        if encoder_data_sent_by_server is not None:
+            encoder_data_sent_by_server = encoder_data_sent_by_server[0]
 
-            quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server[0])
-            quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
-                                            for k, v in quantizer_encoder_state_dict.items()}
-            self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
-                quantizer_encoder_state_dict)
+        if force_use_diff_model is not None:  # *****
+            return super().to_server_prep_data_for_transfer(
+                agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
 
-            # Handle hybrid round logic
-            if self.is_hybrid_round_f(self.curr_round_id):
-                grad_dict = change_dtype_recursive(grad_dict, torch.float32)
-                grad_flat, shapes_dict = dict_to_array(grad_dict)
+        assert self.curr_agent_id == agent_id
 
-                self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
-                self.wz_quantizer_list[agent_id].vec_slices = self._get_vec_slices(shapes_dict)
+        quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
+        quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
+                                        for k, v in quantizer_encoder_state_dict.items()}
+        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
+            quantizer_encoder_state_dict)
 
-                quantizer, recons_vect = self._build_worker_side_quantizer(
-                    self.wz_quantizer_list[agent_id], grad_flat, self.current_side_info_list)
+        # Handle hybrid round logic
+        if self.is_hybrid_round_f(self.curr_round_id):
+            grad_dict = change_dtype_recursive(grad_dict, torch.float32)
+            grad_flat, shapes_dict = dict_to_array(grad_dict)
+            grad_flat += np.random.normal(0, np.sqrt(1e-8), len(grad_flat), ).astype(np.float32)
 
-                self.wz_quantizer_list[agent_id] = quantizer
-                self.past_workerside_grads[self.curr_agent_id].append(
-                    change_dtype_recursive(recons_vect, torch.float16))
+            self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
+            self.wz_quantizer_list[agent_id].vec_slices = self._get_vec_slices(shapes_dict)
 
-                # Use the updated quantizer for encoding
-                force_use_diff_model = quantizer
+            quantizer, recons_vect = self._build_worker_side_quantizer(
+                self.wz_quantizer_list[agent_id], grad_flat, self.current_side_info_list)
 
-                encoder_data_sent_by_server = compress_data_list(
-                    quantizer.wz_pl_model.coding_model.encoder.state_dict())
+            self.wz_quantizer_list[agent_id] = quantizer
+            self.past_workerside_grads[self.curr_agent_id].append(
+                change_dtype_recursive(recons_vect, torch.float16))
 
-        # Now delegate to parent class for the standard encoding process
+            force_use_diff_model = quantizer
+
         return super().to_server_prep_data_for_transfer(
             agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
 
@@ -113,5 +115,5 @@ if __name__ == "__main__":
 
     base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=100_000,
                                           count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
-    broadcast_prot = HybridWZBroadcastProtocol(k, base_quantizer)
-    _test_main(broadcast_prot, worker_count=k, rounds=10)
+    broadcast_prot = HybridWZBroadcastProtocol(k, base_quantizer, hybrid_round_num=2)
+    _test_main(broadcast_prot, worker_count=k, rounds=5)

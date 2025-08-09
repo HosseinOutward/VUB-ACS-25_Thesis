@@ -241,7 +241,13 @@ class FLSimulator:
 
     def _set_local_models(self, model_transfer_to_worker_from_server):
         for ag in self.agents:
-            state_dict_data = model_transfer_to_worker_from_server(ag.agent_id, self.global_model.state_dict())[0]
+            global_state_dict = self.global_model.state_dict()
+            # remove the batchnorm num_batches_tracked
+            for k, _ in global_state_dict.items():
+                if 'num_batches_tracked' in k:
+                    global_state_dict[k] = torch.zeros_like(global_state_dict[k])
+
+            state_dict_data = model_transfer_to_worker_from_server(ag.agent_id, global_state_dict)[0]
 
             ag.local_model = self.global_model.clone()
             ag.local_model.load_state_dict(state_dict_data)
@@ -263,6 +269,19 @@ class FLSimulator:
                 grad_to_apply = aggregated_grads[name].detach().clone().to(param.device)
                 param.grad = grad_to_apply
         self.server_optimizer.step()
+
+    def _recompute_bn_stats_for_global_model(self, train_loader):
+        # recompute batch_norm running mean and variance
+        self.global_model.train()
+        self.global_model.to('cuda')
+        with torch.no_grad():
+            for batch in train_loader:
+                self.global_model(batch[0].to('cuda'))
+        self.global_model.to('cpu')
+        self.global_model.eval()
+
+        torch.cuda.empty_cache()
+        gc.collect()
 
     def _agent_training(self, ag_id, broadcast_prot, shared_train_loader, shared_test_loader):
         print(f"      > training agent {ag_id + 1}/{len(self.agents)}")
@@ -358,6 +377,7 @@ class FLSimulator:
             # Aggregate pl_models from all agents
             assert len(current_round_grad_list) == self.num_agents
             self._aggregate_models(current_round_grad_list)
+            self._recompute_bn_stats_for_global_model(shared_train_loader)
 
         self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
 
