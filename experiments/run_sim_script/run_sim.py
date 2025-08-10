@@ -1,5 +1,10 @@
-proto_choices = ['no_proto', 'all_out', 'hybrid', 'no_proto_only_global', 'simple', 'worker-side', 'balanced_hybrid']
+proto_combo = ['12', '34', '56']
+proto_choices = ['no_proto',
+                 'all_out', 'balanced_hybrid',
+                 'hybrid', 'no_proto_only_global',
+                 'simple', 'worker-side', ] + proto_combo
 if __name__ == "__main__":
+    import gc
     import argparse
     import logging
     import warnings
@@ -10,7 +15,7 @@ if __name__ == "__main__":
     from components.FL_sim import FLSimulator
     from components.other_utilities.datasets import FasterSVHN
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import BroadcastMetricGatheringUtilities
-    from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer
+    from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
     from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.other_utilities.user_logger import UnifiedLoggingClass
 
@@ -32,7 +37,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", "`Trainer.fit` stopped: ")
 
     #%%
-    data_folder = r'../../data'
+    data_folder = r'data'
     dataset = [
         FasterSVHN(
 
@@ -52,57 +57,71 @@ if __name__ == "__main__":
         ) for s in ['train', 'test']]
 
     #%%
-    worker_count = 5
-    batch_size = 15_000
+    def f(proto_name):
+        worker_count = 5
+        batch_size = 15_000
 
-    # *****************
+        # *****************
 
-    user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=args.protocol)
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=proto_name)
 
-    broadcast_prot = None
-    if args.protocol != 'no_proto':
-        wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2, bins_per_plane=16, tau=1.5,
-                                     reconst_ld=400, lr=1e-3, tau_rate=10, marginal=True).to(torch.float32)
-        wz_model.load_state_dict(torch.load(f'{data_folder}/basicRNN_2plane_4bins_state.pt', map_location='cpu'))
+        broadcast_prot = None
+        if proto_name != 'no_proto':
+            wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2, bins_per_plane=16, tau=1.3,
+                                         reconst_ld=400, lr=1e-3, tau_rate=10, marginal=True).to(torch.float32)
+            wz_model.load_state_dict(torch.load(f'{data_folder}/basicRNN_2plane_4bins_state.pt', map_location='cpu'))
 
-        base_quantizer = WZQuantizer(wz_model, train_sample_size=200_000,
-                count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger)
+            base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
+                    count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger)
 
-        if args.protocol=='all_out':
-            from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
-            broadcast_prot_base = WZServerTrainingPerRoundProtocol(worker_count, base_quantizer)
-        elif args.protocol=='hybrid':
-            from components.broadcast_components.broadcasting_process.HybridWZBroadcastProtocol import HybridWZBroadcastProtocol
-            broadcast_prot_base = HybridWZBroadcastProtocol(worker_count, base_quantizer)
-        elif args.protocol=='worker-side':
-            from components.broadcast_components.broadcasting_process.WorkersideTraining import WorkersideTrainingProtocol
-            broadcast_prot_base = WorkersideTrainingProtocol(worker_count, base_quantizer)
-        elif args.protocol=='simple':
-            from components.broadcast_components.broadcasting_process.SingleTimeTrainingProtocol import SingleTimeTrainingProtocol
-            broadcast_prot_base = SingleTimeTrainingProtocol(worker_count, base_quantizer)
-        elif args.protocol=='balanced_hybrid':
-            from components.broadcast_components.broadcasting_process.HybridBalanced import BalancedHybridProtocol
-            broadcast_prot_base = BalancedHybridProtocol(worker_count, base_quantizer)
-        elif args.protocol=='no_proto_only_global':
-            from components.broadcast_components.broadcasting_process.OnlyGlobalModel import OnlyGlobalModel
-            broadcast_prot_base = OnlyGlobalModel(worker_count, base_quantizer)
-        else:
-            raise ValueError(f'Unknown protocol: {args.protocol}')
+            if proto_name=='all_out':
+                from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
+                broadcast_prot_base = WZServerTrainingPerRoundProtocol(worker_count, base_quantizer)
+            elif proto_name=='hybrid':
+                from components.broadcast_components.broadcasting_process.HybridWZBroadcastProtocol import HybridWZBroadcastProtocol
+                broadcast_prot_base = HybridWZBroadcastProtocol(worker_count, base_quantizer)
+            elif proto_name=='worker-side':
+                from components.broadcast_components.broadcasting_process.WorkersideTraining import WorkersideTrainingProtocol
+                broadcast_prot_base = WorkersideTrainingProtocol(worker_count, base_quantizer)
+            elif proto_name=='simple':
+                from components.broadcast_components.broadcasting_process.SingleTimeTrainingProtocol import SingleTimeTrainingProtocol
+                broadcast_prot_base = SingleTimeTrainingProtocol(worker_count, base_quantizer)
+            elif proto_name=='balanced_hybrid':
+                from components.broadcast_components.broadcasting_process.HybridBalanced import BalancedHybridProtocol
+                broadcast_prot_base = BalancedHybridProtocol(worker_count, base_quantizer)
+            elif proto_name=='no_proto_only_global':
+                from components.broadcast_components.broadcasting_process.OnlyGlobalModel import OnlyGlobalModel
+                broadcast_prot_base = OnlyGlobalModel(worker_count, base_quantizer)
+            else:
+                raise ValueError(f'Unknown protocol: {proto_name}')
 
-        broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
+            broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
-        if args.global_quant:
-            broadcast_prot.no_global_quantization = True
+            if args.global_quant:
+                broadcast_prot.no_global_quantization = True
 
-    # *****************
+        # *****************
 
-    model = ResNetPLModel(num_classes=10, resnet_version='resnet18', lr=0.005,)
-    model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
+        model = ResNetPLModel(num_classes=10, resnet_version='resnet18', lr=0.005,)
+        model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
 
-    # *****************
-    sim = FLSimulator(
-        pl_model=model, num_agents=worker_count, communication_rounds=50, client_epochs_per_round=10,
-        batch_size=batch_size, dataset_train=dataset[0], dataset_test=dataset[1],
-        aggregation_method='fedavg', non_iid_sampling=False, user_logger=user_logger)
-    # ****
-    sim.run_simulation(broadcast_prot)
+        # *****************
+        sim = FLSimulator(
+            pl_model=model, num_agents=worker_count, communication_rounds=50, client_epochs_per_round=10,
+            batch_size=batch_size, dataset_train=dataset[0], dataset_test=dataset[1],
+            aggregation_method='fedavg', non_iid_sampling=False, user_logger=user_logger)
+        # ****
+        sim.run_simulation(broadcast_prot)
+
+    if args.protocol not in proto_combo:
+        gc.collect()
+        torch.cuda.empty_cache()
+        f(args.protocol)
+    else:
+        for i in range(3):
+            try:
+                f(proto_choices[int(args.protocol[i:i+1])])
+            except Exception as e:
+                print(f'\n     ***************\n'
+                      f'Error in protocol {proto_choices[int(args.protocol[i:i+1])]}: {e}\n'
+                      f'\n     ***************\n')
