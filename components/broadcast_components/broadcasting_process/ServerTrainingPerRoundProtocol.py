@@ -291,9 +291,6 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
     # todo only send recons, seperate the compr process. change reporting too
     def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
-        assert agent_id == self.curr_agent_id
-
-        # *************
         if self.no_global_quantization:
             res = change_dtype_recursive(server_model_state_dict, torch.float16)
             compressed = compress_data_list(res)
