@@ -27,7 +27,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         # ***********
         if self.is_hybrid_round_f(self.curr_round_id):
             target_vec, dict_shape = dict_to_array(grad_dict)
-            side_info = self._get_side_info_for_grad_recons(agent_id, is_hybrid_round_flag=True)
+            side_info = self._get_side_info_for_grad_recons(agent_id, is_hybrid_round=True)
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id + 1), 4)),
@@ -38,11 +38,9 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         return super().to_server_prep_data_for_transfer(
             agent_id, grad_dict, encoder_data_sent_by_server)
 
-    def _get_side_info_for_grad_recons(self, agent_id, is_hybrid_round_flag=None):
-        is_hybrid_round=self.is_hybrid_round_f(self.curr_round_id)
-        if is_hybrid_round_flag is not None:
-            assert is_hybrid_round == is_hybrid_round_flag and not self.warmup
-
+    def _get_side_info_for_grad_recons(self, agent_id, is_hybrid_round=None):
+        if is_hybrid_round is None:
+            is_hybrid_round = self.is_hybrid_round_f(self.curr_round_id)
         if not is_hybrid_round:
             return super()._get_side_info_for_grad_recons(agent_id)
 
@@ -68,14 +66,21 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
 
             assert all([len(a)==1 for a in self.past_worker_grad_recons_vec])
             self.past_workerside_grads = [[a[0]] for a in self.past_worker_grad_recons_vec]
+        elif self.is_hybrid_round_f(self.curr_round_id):
+            assert not self.warmup
+            self.past_workerside_grads[agent_id].append(new_side_info_to_add)
+            if len(self.past_workerside_grads[agent_id]) > self.si_window_size:
+                self.past_workerside_grads[agent_id].pop(0)
 
         # **************
         # if the next round is hybrid, we don't need to train a new quantizer now
         next_agent = (agent_id + 1) % worker_count
         coming_round = self.curr_round_id + int(next_agent==0)
+        coming_is_hybrid = self.is_hybrid_round_f(coming_round)
         if not self.warmup and not self.is_hybrid_round_f(coming_round):
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
-            side_info = self._get_side_info_for_grad_recons(next_agent)
+            side_info = self._get_side_info_for_grad_recons(next_agent, is_hybrid_round=coming_is_hybrid)
+            assert len(side_info) == self.curr_round_id*worker_count+agent_id
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
@@ -83,11 +88,6 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
                 user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[next_agent] = quantizer
 
-        if self.is_hybrid_round_f(self.curr_round_id):
-            assert not self.warmup
-            self.past_workerside_grads[agent_id].append(new_side_info_to_add)
-            if len(self.past_workerside_grads[agent_id]) > self.si_window_size:
-                self.past_workerside_grads[agent_id].pop(0)
 
 
 if __name__ == "__main__":
