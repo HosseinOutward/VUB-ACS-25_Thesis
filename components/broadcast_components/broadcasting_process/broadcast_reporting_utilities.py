@@ -85,12 +85,12 @@ class BroadcastMetricGatheringUtilities:
 
         return b_p_res
 
-    def reconstruction_process(self, *args, **kwargs):
+    def reconstruct_worker_grads(self, *args, **kwargs):
         agent_id = kwargs.get('agent_id') if 'agent_id' in kwargs else args[0]
         worker_count = kwargs.get('worker_count') if 'worker_count' in kwargs else args[2]
         assert self.current_agent_id == agent_id, "Current agent ID does not match the provided agent ID."
 
-        reconstructed_grads = self.broadcast_protocol.reconstruction_process(*args, **kwargs)
+        reconstructed_grads = self.broadcast_protocol.reconstruct_worker_grads(*args, **kwargs)
 
         original_flat = np.concatenate([v.flatten().cpu().to(torch.float16)
                                         for v in self.original_grads.values()])

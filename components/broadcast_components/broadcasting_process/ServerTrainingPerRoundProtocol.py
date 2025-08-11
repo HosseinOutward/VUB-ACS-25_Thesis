@@ -1,4 +1,4 @@
-from typing import List, OrderedDict
+from typing import OrderedDict
 import torch
 from lightning import seed_everything
 
@@ -12,7 +12,7 @@ import gzip
 import numpy as np
 
 
-#%%
+# %%
 def change_dtype_recursive(obj, dtype):
     if isinstance(obj, torch.Tensor):
         return obj.to(dtype)
@@ -31,7 +31,7 @@ def change_dtype_recursive(obj, dtype):
         raise TypeError(f"Unsupported type for dtype conversion: {type(obj)}.")
 
 
-#%%
+# %%
 def make_seriable(item):
     if isinstance(item, np.ndarray):
         return item
@@ -44,12 +44,12 @@ def make_seriable(item):
     elif isinstance(item, (list, tuple)):
         return [make_seriable(x) for x in item]
     elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
-        numpy_dtype = eval('np.'+str(item._dtype))
+        numpy_dtype = eval('np.' + str(item._dtype))
         return np.array(item, dtype=numpy_dtype)
     elif item is None:
         return None
     else:
-        raise
+        raise TypeError(f"Unsupported type for serialization: {type(item)}.")
 
 
 def compress_data_list(data_list):
@@ -69,7 +69,7 @@ def decompress_data_list(compressed_data):
     return data_list
 
 
-#%%
+# %%
 def dict_to_array(grad_dict: OrderedDict):
     res_v = []
     shapes_dict = OrderedDict()
@@ -107,145 +107,186 @@ def shape_dict_to_vect_slices(dict_shapes):
             layer_groups[k] = [(k, shape)]
 
 
-#%%
-class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep):
-        assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
-        self.no_global_quantization = False
-        self.last_global_model_recon_comp_data = None
-        self.global_model_transfer_quantizer = wz_base_quantizer
-        self.wz_pl_model_class = wz_base_quantizer.wz_pl_model.__class__
-        self.wz_quantizer_list: List[QuantizerWithDataPrep] = [wz_base_quantizer] * agent_count
+# %%
+def _compression_protocol(grad_dict, quantizer):
+    grad_dict = change_dtype_recursive(grad_dict, torch.float32)
+    grad_flat, shapes_dict = dict_to_array(grad_dict)
 
-        self.last_recent_grads_list = [None] * agent_count
-        self.current_side_info_list = None
+    # **********
+    quantizer.vec_slices = _get_vec_slices(shapes_dict)
+
+    # **********
+    bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat)
+
+    # **********
+    (norm_fact_vec, ), (outlier_positions, outlier_max, outlier_sign) = extra_enc_data
+
+    # **********
+    bin_count = quantizer.wz_pl_model.bins_per_plane
+    outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
+    for i in range(len(bins_vector)):
+        bins_vector[i][outlier_positions] = bin_count
+    bins_vector = torch.concat([bins_vector, outlier_bins_vector], dim=1)
+
+    # **********
+    # compress the bins_vector using RANS
+    prob_per_bin = [get_real_bin_prob(b, bin_count + 1)[1].numpy() for b in bins_vector]
+    prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
+    temp = change_dtype_recursive(prob_per_bin, torch.float32)
+    bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
+
+    # **********
+    norm_fact_vec, outlier_max = change_dtype_recursive([norm_fact_vec, outlier_max], torch.float16)
+
+    outlier_count = len(outlier_positions)
+    temp = [8, 16, 32, 64][np.argmax(np.array([8, 16, 32, 64]) / (np.log2(outlier_count + 1)+1e-8) > 1)]
+    outlier_count = change_dtype_recursive(outlier_count, eval(f'torch.uint{temp}'))
+
+    outlier_sign = np.packbits((outlier_sign > 0), bitorder='big') if outlier_count>0 else None
+
+    # **********
+    bin_rans_data = (bin_vec_compressed, prob_per_bin)
+    normal_param = (norm_fact_vec,)
+    outlier_param = (outlier_count, outlier_sign, outlier_max)
+    return (
+        compress_data_list((bin_rans_data, normal_param, outlier_param)),
+        (bins_vector, normal_param, outlier_param)
+    )
+
+
+def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quantizer):
+    model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
+
+    # ******
+    (bin_vec_compressed, prob_per_bin), (norm_fact_vec,), (outlier_count, outlier_sign, outlier_max) = \
+        decompress_data_list(compressed_data)
+    prob_per_bin, norm_fact_vec, outlier_max = \
+        change_dtype_recursive([prob_per_bin, norm_fact_vec, outlier_max], torch.float32)
+    if outlier_count!=0:
+        outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count].astype(int) * 2 - 1
+    else:
+        assert outlier_sign is None
+
+    # ******
+    bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size + outlier_count)
+                for i, bvc in enumerate(bin_vec_compressed)]
+
+    # ******
+    outlier_positions=[]
+    if outlier_count!=0:
+        bin_count = quantizer.wz_pl_model.bins_per_plane
+        outlier_positions = np.where(bin_data[0] == bin_count)[0]
+        for i in range(len(bin_data)):
+            bin_data[i][outlier_positions] = bin_data[i][-outlier_count:]
+            bin_data[i] = bin_data[i][:-outlier_count]
+
+    # decode the bin data to get the vector
+    res_vector = quantizer.decoding_process(bin_data, side_info,
+        encoding_extra_data=[(norm_fact_vec,), (outlier_positions, outlier_max, outlier_sign)])
+
+    # ******
+    result_dict = array_to_dict_with_shapes(res_vector, global_model_dims)
+    result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
+    return result_dict, res_vector
+
+
+def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
+                 bins_per_plane, vec_slices, user_logger, reconst_ld=None):
+    assert len(side_info) != 0
+
+    reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
+
+    qz = to_clone_quantizer
+    wz_pl_model_class: PL_EncoderDecoder_RNN = qz.wz_pl_model.__class__
+    new_quantizer = QuantizerWithDataPrep(
+        user_logger=user_logger,
+        vec_slices=vec_slices,
+        count_side_info_data=len(side_info),
+        wz_pl_model=wz_pl_model_class(
+            inp_dim=1,
+            side_info_size=len(side_info),
+            num_planes=2,
+            marginal=False,
+
+            lr=qz.wz_pl_model.lr,
+            bins_per_plane=bins_per_plane,
+            reconst_ld=reconst_ld,
+            tau=qz.wz_pl_model.tau,
+            tau_rate=qz.wz_pl_model.tau_rate,
+        ).to(torch.float32),
+        enable_progress_bar=qz.enable_progress_bar,
+        train_sample_size=qz.train_sample_size,
+    )
+
+    temp = np.random.normal(0, np.sqrt(1e-8), len(grad_vector), ).astype(np.float32)
+    new_quantizer.train_model(grad_vector + temp, side_info, epoch=epoch_count, batch_size=10_000)
+
+    return new_quantizer
+
+
+class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep,
+                 epoch_count=45, no_global_quantization=False):
+        assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
+        self.epoch_count = epoch_count
+        self.wz_basic_quantizer = wz_base_quantizer
+        self.no_global_quantization = no_global_quantization
+
+        self.wz_quantizer_list = [wz_base_quantizer for _ in range(agent_count)]
+
+        self.past_worker_grad_recons_vec = [[] for _ in range(agent_count)]
+        self.past_global_model_recons_vec = []
         self.agent_list_check = []
+        self.last_global_comp = None
         self.warmup = True
-        self.prev_d_flat = []
-        self.model_training_counter = [0] * agent_count
-        self.past_global_model_recon_dict = []
-        self.training_side_info_prev_d_flat = None
-        self.epoch_count=45
+
+    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+        assert agent_id == self.curr_agent_id
+
+        # **********
+        quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
+        quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
+                                        for k, v in quantizer_encoder_state_dict.items()}
+
+        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
+            quantizer_encoder_state_dict)
+
+        quantizer = self.wz_quantizer_list[agent_id]
+        compressed_data, _ = _compression_protocol(grad_dict, quantizer)
+
+        return compressed_data
+
+    def reconstruct_worker_grads(self, agent_id, worker_broadcast_data, worker_count, global_dims):
+        # make sure the order of execution is correct
+        assert agent_id == self.curr_agent_id
+        # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
+        self.agent_list_check.append(agent_id)
+        assert all([a == i % worker_count for i, a in enumerate(self.agent_list_check)])
+        curr_round_id = len([a for a in self.agent_list_check if a == 0]) - 1
+        assert curr_round_id == self.curr_round_id
+
+        # **************
+        quantizer = self.wz_quantizer_list[agent_id]
+        side_info = self._get_side_info_for_grad_recons(agent_id)
+        result_dict, result_vec = _reconstruction_protocol(worker_broadcast_data, side_info, global_dims, quantizer)
+
+        # **************
+        self._post_reconstruction_processing(agent_id, worker_count, global_dims, result_vec)
+
+        # **************
+        return result_dict
 
     def to_worker_prep_data_for_transfer(self, agent_id):
-        assert self.curr_agent_id == agent_id
+        assert agent_id == self.curr_agent_id
         quantizer_encoder_state_dict = self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.state_dict()
-
         quantizer_encoder_state_dict = change_dtype_recursive(quantizer_encoder_state_dict, torch.float16)
         return compress_data_list(quantizer_encoder_state_dict)
 
-    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
-                                         force_use_diff_model=None):
-        quantizer = force_use_diff_model
-        if force_use_diff_model is None:  # *****
-            assert self.curr_agent_id == agent_id
-
-            quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
-
-            #**********
-            quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
-                                            for k, v in quantizer_encoder_state_dict.items()}
-            self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
-                quantizer_encoder_state_dict)
-
-            quantizer = self.wz_quantizer_list[agent_id]
-
-        #**********
-        grad_dict = change_dtype_recursive(grad_dict, torch.float32)
-        grad_flat, shapes_dict = dict_to_array(grad_dict)
-
-        #**********
-        quantizer.vec_slices = _get_vec_slices(shapes_dict)
-
-        # **********
-        bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat)
-
-        #**********
-        (norm_fact_vec), (outlier_positions, outlier_max, outlier_sign) = extra_enc_data
-
-        #**********
-        bin_count = quantizer.wz_pl_model.bins_per_plane
-        outlier_bins_vector = torch.stack([a[outlier_positions] for a in bins_vector])
-        for i in range(len(bins_vector)):
-            bins_vector[i][outlier_positions] = bin_count
-        bins_vector = torch.concat([bins_vector, outlier_bins_vector], dim=1)
-
-        #**********
-        # compress the bins_vector using RANS
-        prob_per_bin = [get_real_bin_prob(b, bin_count + 1)[1].numpy() for b in bins_vector]
-        prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
-        temp = change_dtype_recursive(prob_per_bin, torch.float32)
-        bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
-
-        #**********
-        norm_fact_vec, outlier_max = change_dtype_recursive([norm_fact_vec, outlier_max], torch.float16)
-
-        outlier_count = len(outlier_positions)
-        temp = [8, 16, 32, 64][np.argmax(np.array([8, 16, 32, 64]) / np.log2(outlier_count + 1) > 1)]
-        outlier_count = change_dtype_recursive(outlier_count, eval(f'torch.uint{temp}'))
-
-        outlier_sign = np.packbits((outlier_sign>0), bitorder='big')
-
-        #**********
-        return compress_data_list(((bin_vec_compressed, prob_per_bin), (norm_fact_vec),
-                                   (outlier_count, outlier_sign, outlier_max)))
-
-    # %%
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims,
-                               force_use_diff_model=None):
-        quantizer = force_use_diff_model
-        if force_use_diff_model is None:  # *****
-            assert self.curr_agent_id == agent_id
-
-            # assuming that self.previous_data_list has order based on agents like 0, 1, 2, 0, 1, 2, ...
-            self.agent_list_check.append(agent_id)
-            assert all([a == i % worker_count for i, a in enumerate(self.agent_list_check)])
-            curr_round_id = len([a for a in self.agent_list_check if a == 0]) - 1
-            assert curr_round_id == self.curr_round_id
-
-            # ****
-            quantizer = self.wz_quantizer_list[agent_id]
-
-        model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
-
-        # ******
-        (bin_vec_compressed, prob_per_bin), (norm_fact_vec, ), (outlier_count, outlier_sign, outlier_max) =\
-                 decompress_data_list(worker_broadcast_data)
-        prob_per_bin, norm_fact_vec, outlier_max =\
-            change_dtype_recursive([prob_per_bin, norm_fact_vec, outlier_max], torch.float32)
-        outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count].astype(int)*2-1
-
-        # ******
-        bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size + outlier_count)
-                        for i, bvc in enumerate(bin_vec_compressed)]
-
-        # ******
-        if outlier_count > 0:
-            bin_count = quantizer.wz_pl_model.bins_per_plane
-            outlier_positions = np.where(bin_data[0] == bin_count)[0]
-            for i in range(len(bin_data)):
-                bin_data[i][outlier_positions] = bin_data[i][-outlier_count:]
-                bin_data[i] = bin_data[i][:-outlier_count]
-
-        # decode the bin data to get the vector
-        side_info_data_list = self._get_side_info_data_list(agent_id, force_use_diff_model)
-
-        extra_enc_data = (norm_fact_vec,), (outlier_positions, outlier_max, outlier_sign)
-        res_vector = quantizer.decoding_process(bin_data, side_info_data_list, encoding_extra_data=extra_enc_data)
-
-        # ******
-        result_dict = array_to_dict_with_shapes(res_vector, global_model_dims)
-        result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
-
-        # ************
-        if force_use_diff_model is not None: # *******
-            return result_dict, res_vector
-
-        # Use post-processing logic
-        return self._post_reconstruction_processing(agent_id, worker_count, res_vector, result_dict)
-
     # todo only send recons, seperate the compr process. change reporting too
     def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
+        assert agent_id == self.curr_agent_id
+
+        # *************
         if self.no_global_quantization:
             res = change_dtype_recursive(server_model_state_dict, torch.float16)
             compressed = compress_data_list(res)
@@ -255,117 +296,105 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             recons = {k: torch.tensor(v) for k, v in res.items()}
             return recons, compressed
 
+        # *************
         # send the previous returned data as it's the same per each round for all workers
         if agent_id != 0:
-            return self.last_global_model_recon_comp_data
+            return self.last_global_comp
 
-        old_quantizer = self.global_model_transfer_quantizer
+        # *************
         model_stat_vec, global_model_dims = dict_to_array(server_model_state_dict)
+        side_info = self.past_global_model_recons_vec
 
-        new_quantizer = old_quantizer
+        # *************
         if not self.warmup:
             print('        - training quant for global model transfer')
 
-            si_count = len(self.past_global_model_recon_dict)
-            new_quantizer = QuantizerWithDataPrep(
-                wz_pl_model=self.wz_pl_model_class(
-                        max(4 // (self.curr_round_id), 2), max(32 // (self.curr_round_id), 16), 1,
-                        si_count, 10, False, lr=1e-3, reconst_ld=1000, tau=1.5
-                    ).to(torch.float32),
-                count_side_info_data=si_count, enable_progress_bar=old_quantizer.enable_progress_bar,
-                train_sample_size=old_quantizer.train_sample_size, user_logger=None,
+            quantizer = _train_model(
+                model_stat_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                bins_per_plane=max(32 // (self.curr_round_id), 16),
                 vec_slices=_get_vec_slices(global_model_dims),
-            )
-
-            model_stat_vec += np.random.normal(0, np.sqrt(1e-8), len(model_stat_vec), ).astype(np.float32)
-
-            new_quantizer.train_model(model_stat_vec, self.past_global_model_recon_dict,
-                                      epoch=self.epoch_count, batch_size=10_000)
-
-        self.flag_global_model_transfer = True
-
-        compressed = self.to_server_prep_data_for_transfer(
-            None, server_model_state_dict, None, force_use_diff_model=new_quantizer, )
-
-        recons, recons_vector = self.reconstruction_process(
-            None, compressed, None, global_model_dims, force_use_diff_model=new_quantizer)
-
-        # ******
-        temp = self.past_global_model_recon_dict
-        error_diff = OrderedDict({k: server_model_state_dict[k]- v for k, v in recons.items()})
-        compressed_error_diff = self.to_server_prep_data_for_transfer(
-            None, error_diff, None,
-            force_use_diff_model=self.global_model_transfer_quantizer, )
-        recons_error_diff, recons_vector_error_diff = self.reconstruction_process(
-            None, compressed, None, global_model_dims,
-            force_use_diff_model=self.global_model_transfer_quantizer)
-        self.past_global_model_recon_dict=temp
-        recons = OrderedDict({k: v+recons_error_diff[k] for k, v in recons.items()})
-
-        # ******
-        self.flag_global_model_transfer = False
-
-        self.past_global_model_recon_dict += [change_dtype_recursive(recons_vector, torch.float16)]
-
-        if len(self.past_global_model_recon_dict) > 10:
-            self.past_global_model_recon_dict.pop(0)
-
-        self.last_global_model_recon_comp_data = (recons, (compressed, compressed_error_diff))
-
-        return recons, compressed
-
-    def _prep_for_next_agent(self, curr_agent_id, worker_count):
-        assert not self.warmup
-
-        temp = len(self.prev_d_flat) - worker_count
-        self.current_side_info_list = self.prev_d_flat[:temp] + self.prev_d_flat[temp + 1:]
-
-        next_agent = (curr_agent_id + 1) % worker_count
-        qz = self.wz_quantizer_list[next_agent]
-        self.wz_quantizer_list[next_agent] = QuantizerWithDataPrep(
-            wz_pl_model=self.wz_pl_model_class(
-                inp_dim=1, side_info_size=len(self.current_side_info_list),
-                lr=qz.wz_pl_model.lr,
-                bins_per_plane=max(16 // (self.curr_round_id + 1), 2),
-                num_planes=2,
-                reconst_ld=qz.wz_pl_model.reconst_ld,
-                tau=qz.wz_pl_model.tau,
-                marginal=self.curr_round_id <= 2,
-            ).to(torch.float32),
-            count_side_info_data=len(self.current_side_info_list), enable_progress_bar=qz.enable_progress_bar,
-            train_sample_size=qz.train_sample_size, user_logger=qz.user_logger,
-            vec_slices=qz.vec_slices,
-        )
-
-        last_recent_grads = self.prev_d_flat[temp] +\
-                            np.random.normal(0, np.sqrt(1e-8), len(self.prev_d_flat[temp]), ).astype(np.float32)
-
-        self.wz_quantizer_list[next_agent].train_model(
-            last_recent_grads, self.current_side_info_list, epoch=self.epoch_count, batch_size=10_000)
-
-    def _get_side_info_data_list(self, agent_id, force_use_diff_model=None):
-        """Get side info data list - can be overridden by child classes."""
-        if force_use_diff_model is not None:
-            return self.past_global_model_recon_dict
+                user_logger=None, reconst_ld=1000)
         else:
-            return [] if self.warmup else self.current_side_info_list
+            quantizer = self.wz_basic_quantizer
 
-    def _post_reconstruction_processing(self, agent_id, worker_count, res_vector, result_dict):
-        """Post-reconstruction processing - can be overridden by child classes."""
-        # ************
-        self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
+        # *************
+        compressed, uncompressed_encode_data = _compression_protocol(server_model_state_dict, quantizer)
+        recons_dict, recons_vec = _reconstruction_protocol(
+            compressed, side_info, global_model_dims, quantizer)
 
+        # refine the reconstruction with the error diff
+        copied_vec_slices = [a for a in self.wz_basic_quantizer.vec_slices]
+        self.wz_basic_quantizer.vec_slices = [slice(None)]
+
+        error_diff = OrderedDict({k: server_model_state_dict[k] - rec for k, rec in recons_dict.items()})
+        compressed_diff, uncompressed_diff_encode_data = _compression_protocol(error_diff, self.wz_basic_quantizer)
+        recons_diff_dict, recons_diff_vec = _reconstruction_protocol(
+            compressed_diff, [], global_model_dims, self.wz_basic_quantizer)
+
+        self.wz_basic_quantizer.vec_slices = copied_vec_slices
+
+        recons_vec = recons_vec + recons_diff_vec
+        recons_dict = OrderedDict({k: recons_dict[k] + recons_diff_dict[k] for k in recons_dict.keys()})
+
+        # *************
+        self.past_global_model_recons_vec += [change_dtype_recursive(recons_vec, torch.float16)]
+
+        if len(self.past_global_model_recons_vec) > 10:
+            self.past_global_model_recons_vec.pop(0)
+
+        entire_compressed_data = compress_data_list((uncompressed_encode_data, uncompressed_diff_encode_data))
+        self.last_global_comp = (recons_dict, entire_compressed_data)
+
+        return self.last_global_comp
+
+    def _get_side_info_for_grad_recons(self, agent_id):
+        if self.warmup:
+            return []
+
+        side_info = []
+        for i, past_grads_agent in enumerate(self.past_worker_grad_recons_vec):
+            temp = past_grads_agent
+            if i == agent_id:
+                temp = temp[:-1]
+            side_info.extend(temp)
+        return side_info
+
+    def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
+        assert agent_id == self.curr_agent_id
+
+        # **************
+        self.past_worker_grad_recons_vec[agent_id].append(change_dtype_recursive(curr_recons_vector, torch.float16))
+
+        # **************
         # detect if we are in warmup phase
         if agent_id + 1 >= worker_count:
             self.warmup = False
 
-        # assuming not in warmup phase, we have at least one complete round, so we train the next WZ_models
+        # **************
+        # we have at least one complete round, so we train the next WZ_models
         if not self.warmup:
-            self._prep_for_next_agent(agent_id, worker_count)
+            next_agent = (agent_id + 1) % worker_count
+            target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
+            side_info = self._get_side_info_for_grad_recons(next_agent)
+            quantizer = _train_model(
+                target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
+                vec_slices=_get_vec_slices(dict_shape),
+                user_logger=self.wz_basic_quantizer.user_logger, reconst_ld=1000)
+            self.wz_quantizer_list[next_agent] = quantizer
 
-        return result_dict
 
-def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2, rounds=2):
+def _test_main(brod_prot_class, worker_count=2, rounds=2):
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
+                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
+    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
+    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
+
+    base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
+                                           count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
+
+    broadcast_prot = brod_prot_class(worker_count, base_quantizer)
+
     # --------------------------------
     torch.set_float32_matmul_precision('medium')
     import logging
@@ -396,12 +425,12 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
                 grad_test_data[i][j][k] = grad_test_data[i - 1][j - 1][k] + v * 0.1
 
     # simulate the WZ encoding and reconstruction process --------------------------------
-    for round, grad_per_round in enumerate(grad_test_data):
+    for round_id, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
-            broadcast_prot.start_round_agent_process(ag_id, round)
+            broadcast_prot.start_round_agent_process(ag_id, round_id)
 
-            print(f'>> Round {round}, Agent {ag_id}')
-            recon_model_param = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad)
+            print(f'>> round_id {round_id}, Agent {ag_id}')
+            recon_model_param = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad_per_round[0])
             recon_model_param = recon_model_param[0]
 
             print('          - Preparing data for transfer to worker...')
@@ -410,17 +439,20 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
             print('          - Preparing data for transfer to server...')
             encoded_ag_broadcast = broadcast_prot.to_server_prep_data_for_transfer(
                 ag_id, grad, server_data_sent_to_worker)
-            decoded_ag_broadcast = decompress_data_list(encoded_ag_broadcast)
 
             print('          - reconstructing data received...')
-            decoded_agent_broadcast = broadcast_prot.reconstruction_process(
+            decoded_agent_broadcast = broadcast_prot.reconstruct_worker_grads(
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
 
             # print the mspe
-            temp = np.mean(np.concat([grad[k].cpu()**2 for k in grad.keys()]))
-            temp = [np.mean(np.concat([(grad[k]-a[k]).cpu()**2 for k in grad.keys()]))/temp
-                    for a in [decoded_agent_broadcast, recon_model_param]]
-            print('          - MSPE:', temp)
+            grad_avg_v = np.mean(np.concat([grad[k].cpu() ** 2 for k in grad.keys()]))
+            grad_mspe=[(grad[k] - v).cpu() ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
+            grad_mspe = np.mean(np.concat(grad_mspe))
+
+            global_avg_v = np.mean(np.concat([grad[k].cpu() ** 2 for k in grad.keys()]))
+            global_mspe=[(grad_per_round[0][k] - v).cpu() ** 2/global_avg_v for k, v in recon_model_param.items()]
+            global_mspe = np.mean(np.concat(global_mspe))
+            print(f'     > MSPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
 
     # check output size and correctness
     for i, grad in enumerate(grad_test_data[-1]):
@@ -429,15 +461,7 @@ def _test_main(broadcast_prot: WZServerTrainingPerRoundProtocol, worker_count=2,
 
 
 if __name__ == "__main__":
-    k = 2
-    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
-                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
-    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
-    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
+    bp_f = lambda worker_count, base_quantizer: (
+        WZServerTrainingPerRoundProtocol(worker_count, base_quantizer, epoch_count=1))
+    _test_main(bp_f, worker_count=2, rounds=3)
 
-    base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
-                            count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
-
-    broadcast_prot = WZServerTrainingPerRoundProtocol(k, base_quantizer)
-
-    _test_main(broadcast_prot, worker_count=k, rounds=3)

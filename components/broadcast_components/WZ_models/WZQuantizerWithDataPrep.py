@@ -99,11 +99,13 @@ class QuantizerWithDataPrep(WZQuantizer):
     def _post_process_grads(self, vector, normal_param, outlier_param):
         norm_factors,  = normal_param
         outlier_positions, outlier_max, outlier_sign = outlier_param
-        assert len(np.unique(outlier_sign))==2 and outlier_sign.max()==1 and outlier_sign.min()==-1
+
         # outlier ----------
-        if len(outlier_positions) != 0:
-            vector[outlier_positions] =\
-                (np.abs(vector[outlier_positions]) * outlier_max + self.outlier_threshold)*outlier_sign
+        if len(outlier_positions)!=0:
+            assert len(np.unique(outlier_sign))==2 and outlier_sign.max()==1 and outlier_sign.min()==-1
+            if len(outlier_positions) != 0:
+                vector[outlier_positions] =\
+                    (np.abs(vector[outlier_positions]) * outlier_max + self.outlier_threshold)*outlier_sign
 
         # normalization ----------
         for i, v_slc in enumerate(self.vec_slices):
