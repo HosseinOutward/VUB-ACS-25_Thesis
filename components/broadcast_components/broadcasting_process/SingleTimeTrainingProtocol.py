@@ -40,7 +40,7 @@ class SingleTimeTrainingProtocol(WZServerTrainingPerRoundProtocol):
                     target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                     bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
                     vec_slices=_get_vec_slices(dict_shape),
-                    user_logger=self.wz_basic_quantizer.user_logger, reconst_ld=1000)
+                    user_logger=self.wz_basic_quantizer.user_logger)
                 self.wz_quantizer_list[i] = quantizer
 
 
