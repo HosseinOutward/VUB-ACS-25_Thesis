@@ -10,9 +10,9 @@ class WorkersideTrainingWithAccumErrorProtocol(WorkersideTrainingProtocol):
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         # add the past accumulated error to the grad_dict
-        temp = {k: grad_dict[k] for k in grad_dict.keys()}
+        temp = {k: grad_dict[k].cpu() for k in grad_dict.keys()}
         if self.accum_error[agent_id] is not None:
-            grad_dict = OrderedDict({k: grad_dict[k] + self.accum_error[agent_id][k] for k in grad_dict.keys()})
+            grad_dict = OrderedDict({k: grad_dict[k] + self.accum_error[agent_id][k].cuda() for k in grad_dict.keys()})
         self.accum_error[agent_id]=temp
 
         return super().to_server_prep_data_for_transfer(agent_id, grad_dict, encoder_data_sent_by_server)

@@ -8,6 +8,8 @@ class OnlyGlobalModel(WZServerTrainingPerRoundProtocol):
         return (grad_dict, )
 
     def reconstruct_worker_grads(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
+        if agent_id == worker_count-1:
+            self.warmup=False
         return worker_broadcast_data[0]
 
 if __name__ == "__main__":
