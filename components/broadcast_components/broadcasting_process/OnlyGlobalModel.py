@@ -4,20 +4,15 @@ from components.broadcast_components.broadcasting_process.ServerTrainingPerRound
 
 
 class OnlyGlobalModel(WZServerTrainingPerRoundProtocol):
-    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
-                                         force_use_diff_model=None):
-        if force_use_diff_model is None:
-            return (grad_dict, )
-        return super().to_server_prep_data_for_transfer(agent_id, grad_dict, encoder_data_sent_by_server,
-                                                       force_use_diff_model)
+    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+        return (grad_dict, )
 
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count,
-                               global_model_dims, force_use_diff_model=None):
-        if force_use_diff_model is None:
-            return worker_broadcast_data[0]
-        if self.curr_round_id!=0: self.warmup=False
-        return super().reconstruction_process(agent_id, worker_broadcast_data,
-                                              worker_count, global_model_dims, force_use_diff_model)[0]
+    def reconstruct_worker_grads(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
+        return worker_broadcast_data[0]
 
-    # def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
-    #     return server_model_state_dict, None
+if __name__ == "__main__":
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
+
+    bp_f = lambda worker_count, base_quantizer: (
+        OnlyGlobalModel(worker_count, base_quantizer))
+    _test_main(bp_f, worker_count=2, rounds=4)
