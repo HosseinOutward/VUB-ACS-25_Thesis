@@ -1,135 +1,98 @@
-import numpy as np
 import torch
-from sqlalchemy.util import OrderedDict
 
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
-    WZServerTrainingPerRoundProtocol, change_dtype_recursive, decompress_data_list, dict_to_array, _get_vec_slices
+    WZServerTrainingPerRoundProtocol, change_dtype_recursive, dict_to_array, _get_vec_slices, _train_model
 
 
 class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, hybrid_round_num=5):
-        super().__init__(agent_count, wz_base_quantizer)
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, hybrid_round_num=5, **kwargs):
+        super().__init__(agent_count, wz_base_quantizer, **kwargs)
         self.hybrid_round_num = hybrid_round_num
         self.is_hybrid_round_f = lambda round_id: round_id % self.hybrid_round_num == 0 and not self.warmup
         self.past_workerside_grads = [[] for _ in range(agent_count)]
 
-    def _build_worker_side_quantizer(self, old_quantizer, training_target, side_info):
-        print('****************training the workerside model')
-        if old_quantizer.user_logger is not None:
-            assert old_quantizer.user_logger.agent_id == self.curr_agent_id
-            assert old_quantizer.user_logger.round_id == self.curr_round_id
-            old_quantizer.user_logger.agent_id = (self.curr_agent_id - 1) % len(self.past_workerside_grads)
-            old_quantizer.user_logger.round_id = self.curr_round_id if self.curr_agent_id != 0 \
-                                                                    else self.curr_round_id - 1
-
-        new_quantizer = QuantizerWithDataPrep(
-            wz_pl_model=self.wz_pl_model_class(
-                2, int(max(self.hybrid_round_num * 16 // (self.curr_round_id + 1), 4)), 1, len(side_info), 10, False,
-                lr=1e-3, reconst_ld=400, tau=1.5).to(torch.float32),
-            count_side_info_data=len(side_info), enable_progress_bar=old_quantizer.enable_progress_bar,
-            train_sample_size=old_quantizer.train_sample_size, user_logger=old_quantizer.user_logger,
-            vec_slices=old_quantizer.vec_slices,
-        )
-
-        side_info = change_dtype_recursive(side_info, torch.float32)
-        temp = np.random.normal(0, np.sqrt(1e-8), len(training_target), ).astype(np.float32)
-        new_quantizer.train_model(training_target+temp, side_info, epoch=self.epoch_count, batch_size=10_000)
-
-        bins, extra_enc_data = new_quantizer.encoding_process(training_target)
-        recons_vect = new_quantizer.decoding_process(bins, side_info, encoding_extra_data=extra_enc_data)
-
-        if old_quantizer.user_logger is not None:
-            old_quantizer.user_logger.agent_id = self.curr_agent_id
-            old_quantizer.user_logger.round_id = self.curr_round_id
-
-        return new_quantizer, recons_vect
-
-    def _prep_for_next_agent(self, curr_agent_id, worker_count):
-        next_agent = (curr_agent_id + 1) % worker_count
-        coming_round = self.curr_round_id + 1 if next_agent == 0 else self.curr_round_id
-
-        if coming_round == 1 and next_agent == 0:
-            print('********** loading first round results to the memory')
-            for i, a in enumerate(self.prev_d_flat):
-                self.past_workerside_grads[i] += [a]
-
-        if self.is_hybrid_round_f(coming_round):
-            print('********** skipping training for next agent as its the hybrid round')
-            self.prev_d_flat[-1] = self.past_workerside_grads[curr_agent_id][-1]
-            return
-
-        super()._prep_for_next_agent(curr_agent_id, worker_count)
-
     def to_worker_prep_data_for_transfer(self, agent_id):
         res = super().to_worker_prep_data_for_transfer(agent_id)
-        if self.is_hybrid_round_f(self.curr_round_id) or (self.curr_round_id == 0 and self.curr_agent_id == 0):
-            return res, [res]
-        return res, None
-
-    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server,
-                                         force_use_diff_model=None):
-        if encoder_data_sent_by_server is not None:
-            encoder_data_sent_by_server = encoder_data_sent_by_server[0]
-
-        if force_use_diff_model is not None:  # *****
-            return super().to_server_prep_data_for_transfer(
-                agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
-
-        assert self.curr_agent_id == agent_id
-
-        quantizer_encoder_state_dict = decompress_data_list(encoder_data_sent_by_server)
-        quantizer_encoder_state_dict = {k: torch.tensor(v, dtype=torch.float32)
-                                        for k, v in quantizer_encoder_state_dict.items()}
-        self.wz_quantizer_list[agent_id].wz_pl_model.coding_model.encoder.load_state_dict(
-            quantizer_encoder_state_dict)
-
-        # Handle hybrid round logic
+        # to simulate the cost of sending the decoder too. assuming similar size to encoder
         if self.is_hybrid_round_f(self.curr_round_id):
-            grad_dict = change_dtype_recursive(grad_dict, torch.float32)
+            return res, [res]*1
+        return res
 
-            # too lazy. used by workerside training child class
-            if hasattr(self, 'accum_error'):
-                grad_dict = OrderedDict({k: grad_dict[k] + self.accum_error[agent_id][k] for k in grad_dict.keys()})
-                self.accum_error[agent_id] = None
+    def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
+        # to compensate for changes to to_worker_prep_data_for_transfer
+        if self.is_hybrid_round_f(self.curr_round_id):
+            encoder_data_sent_by_server=encoder_data_sent_by_server[0]
 
-            grad_flat, shapes_dict = dict_to_array(grad_dict)
-
-            self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
-            self.wz_quantizer_list[agent_id].vec_slices = _get_vec_slices(shapes_dict)
-
-            quantizer, recons_vect = self._build_worker_side_quantizer(
-                self.wz_quantizer_list[agent_id], grad_flat, self.current_side_info_list)
-
+        # ***********
+        if self.is_hybrid_round_f(self.curr_round_id):
+            target_vec, dict_shape = dict_to_array(grad_dict)
+            side_info = self._get_side_info_for_grad_recons(agent_id, is_hybrid_round_flag=True)
+            quantizer = _train_model(
+                target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id + 1), 4)),
+                vec_slices=_get_vec_slices(dict_shape),
+                user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[agent_id] = quantizer
-            self.past_workerside_grads[self.curr_agent_id].append(
-                change_dtype_recursive(recons_vect, torch.float16))
-
-            force_use_diff_model = quantizer
 
         return super().to_server_prep_data_for_transfer(
-            agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
+            agent_id, grad_dict, encoder_data_sent_by_server)
 
-    def _get_side_info_data_list(self, agent_id, force_use_diff_model=None):
-        if self.flag_global_model_transfer:
-            assert force_use_diff_model is not None
-            return self.past_global_model_recon_dict
-        elif force_use_diff_model is not None:
-            return self.past_workerside_grads[agent_id]
-        return [] if self.warmup else self.current_side_info_list
+    def _get_side_info_for_grad_recons(self, agent_id, is_hybrid_round_flag=None):
+        is_hybrid_round=self.is_hybrid_round_f(self.curr_round_id)
+        if is_hybrid_round_flag is not None:
+            assert is_hybrid_round == is_hybrid_round_flag and not self.warmup
+
+        if not is_hybrid_round:
+            return super()._get_side_info_for_grad_recons(agent_id)
+
+        # hybrid round
+        assert not self.warmup
+        return self.past_workerside_grads[agent_id]
+
+    def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
+        assert agent_id == self.curr_agent_id
+
+        # **************
+        new_side_info_to_add = change_dtype_recursive(curr_recons_vector, torch.float16)
+        self.past_worker_grad_recons_vec[agent_id].append(new_side_info_to_add)
+
+        if len(self.past_worker_grad_recons_vec[agent_id]) > self.si_window_size:
+            self.past_worker_grad_recons_vec[agent_id].pop(0)
+
+        # **************
+        # detect if we are in warmup phase
+        if agent_id + 1 >= worker_count and self.warmup:
+            assert self.curr_round_id == 0
+            self.warmup = False
+
+            assert all([len(a)==1 for a in self.past_worker_grad_recons_vec])
+            self.past_workerside_grads = [[a[0]] for a in self.past_worker_grad_recons_vec]
+
+        # **************
+        # if the next round is hybrid, we don't need to train a new quantizer now
+        next_agent = (agent_id + 1) % worker_count
+        coming_round = self.curr_round_id + int(next_agent==0)
+        if not self.warmup and not self.is_hybrid_round_f(coming_round):
+            target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
+            side_info = self._get_side_info_for_grad_recons(next_agent)
+            quantizer = _train_model(
+                target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
+                vec_slices=_get_vec_slices(dict_shape),
+                user_logger=self.wz_basic_quantizer.user_logger)
+            self.wz_quantizer_list[next_agent] = quantizer
+
+        if self.is_hybrid_round_f(self.curr_round_id):
+            assert not self.warmup
+            self.past_workerside_grads[agent_id].append(new_side_info_to_add)
+            if len(self.past_workerside_grads[agent_id]) > self.si_window_size:
+                self.past_workerside_grads[agent_id].pop(0)
 
 
 if __name__ == "__main__":
-    from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
-    k = 2
-    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
-                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
-    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
-    wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
-
-    base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=100_000,
-                                          count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
-    broadcast_prot = HybridWZBroadcastProtocol(k, base_quantizer, hybrid_round_num=2)
-    _test_main(broadcast_prot, worker_count=k, rounds=5)
+    bp_f = lambda worker_count, base_quantizer: (
+        HybridWZBroadcastProtocol(worker_count, base_quantizer, epoch_count=1, hybrid_round_num=3))
+    _test_main(bp_f, worker_count=2, rounds=4)
