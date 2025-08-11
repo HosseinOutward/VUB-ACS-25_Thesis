@@ -1,100 +1,47 @@
 import numpy as np
 import torch
 
-from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
-from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import\
-    WZServerTrainingPerRoundProtocol, change_dtype_recursive
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep, _get_vec_slices
+from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
+    WZServerTrainingPerRoundProtocol, change_dtype_recursive, _train_model
 
 
 class SingleTimeTrainingProtocol(WZServerTrainingPerRoundProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep):
-        super().__init__(agent_count, wz_base_quantizer)
-        # Override some attributes for single-time training behavior
-        self.single_time_training_completed = [False] * agent_count
-        self.training_side_info_prev_d_flat = None
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, epoch_count=45):
+        super().__init__(agent_count, wz_base_quantizer, epoch_count, True)
 
-    def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
-        # For single time training, we don't use quantization for global model transfer
-        self.no_global_quantization = True
-        return super().model_transfer_to_worker_from_server(agent_id, server_model_state_dict)
-
-    def _get_side_info_data_list(self, agent_id, force_use_diff_model=None):
-        """Override to provide single-time training specific side info logic."""
-        if force_use_diff_model is not None:
-            return self.past_global_model_recon_dict
-
-        # Single time training logic: use previous gradients as side info
-        if self.model_training_counter[agent_id] == 0:
+    def _get_side_info_for_grad_recons(self, agent_id):
+        if self.warmup:
             return []
+
+        assert all([len(self.past_worker_grad_recons_vec[agent_id]) == 1])
+        side_info = [a[0] for i,a in enumerate(self.past_worker_grad_recons_vec) if i != agent_id]
+        return side_info
+
+    def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
+        assert agent_id == self.curr_agent_id
+
+        if self.warmup:
+            self.past_worker_grad_recons_vec[agent_id].append(change_dtype_recursive(curr_recons_vector, torch.float16))
         else:
-            return self.prev_d_flat[:agent_id] + self.prev_d_flat[agent_id + 1:]
+            self.past_worker_grad_recons_vec[agent_id] = change_dtype_recursive(curr_recons_vector, torch.float16)
 
-    def _post_reconstruction_processing(self, agent_id, worker_count, res_vector, result_dict):
-        """Override to handle single-time training specific post-processing."""
-        # Update tracking for single time training
-        assert len(self.prev_d_flat) <= worker_count
-        if len(self.prev_d_flat) == worker_count:
-            self.prev_d_flat[agent_id] = change_dtype_recursive(res_vector, torch.float16)
-        else:
-            self.prev_d_flat.append(change_dtype_recursive(res_vector, torch.float16))
-            if len(self.prev_d_flat) == worker_count:
-                self.training_side_info_prev_d_flat = [a for a in self.prev_d_flat]
+        # **************
+        # detect if we are in warmup phase
+        if agent_id + 1 >= worker_count and self.warmup:
+            assert all([len(self.past_worker_grad_recons_vec[agent_id]) == 1])
 
-        # Train models if in warmup phase
-        if self.warmup and len(self.prev_d_flat) == worker_count:
-            self._generate_models_single_time(agent_id, worker_count, res_vector)
-
-        # Exit warmup when all models are trained once
-        if np.all([a == 1 for a in self.model_training_counter]) and self.warmup:
             self.warmup = False
-            del self.training_side_info_prev_d_flat
 
-        return result_dict
-
-    def _generate_models_single_time(self, curr_agent_id, worker_count, res_vector):
-        """Generate models for single time training - only trains each model once."""
-        target_id = (curr_agent_id + 1) % worker_count
-
-        # Ensure training happens in order
-        curr_counter = self.model_training_counter[target_id]
-        past_counters = self.model_training_counter[:target_id]
-        if target_id == 0:
-            past_counters = self.model_training_counter[1:]
-            curr_counter -= 1
-        assert np.all([curr_counter + 1 == a for a in past_counters]), \
-            'The order of model training isn\'t compatible.'
-        self.model_training_counter[target_id] += 1
-
-        # Prepare training data
-        side_info = self.training_side_info_prev_d_flat[:target_id] + \
-                   self.training_side_info_prev_d_flat[target_id + 1:]
-        grads = self.training_side_info_prev_d_flat[target_id].copy()
-
-        # Create new quantizer with updated parameters
-        qz = self.wz_quantizer_list[target_id]
-        self.wz_quantizer_list[target_id] = QuantizerWithDataPrep(
-            wz_pl_model=self.wz_pl_model_class(
-                inp_dim=1, side_info_size=len(side_info),
-                lr=qz.wz_pl_model.lr,
-                bins_per_plane=max(16 // (self.curr_round_id + 1), 2),
-                num_planes=2,
-                reconst_ld=qz.wz_pl_model.reconst_ld,
-                tau=qz.wz_pl_model.tau,
-                marginal=self.curr_round_id <= 2,
-            ).to(torch.float32),
-            count_side_info_data=len(side_info),
-            enable_progress_bar=qz.enable_progress_bar,
-            train_sample_size=qz.train_sample_size,
-            user_logger=qz.user_logger,
-            vec_slices=qz.vec_slices,
-        )
-
-        # Add noise and train
-        grads = change_dtype_recursive(grads, torch.float32)
-        grads += np.random.normal(0, np.sqrt(1e-8), len(grads)).astype(np.float32)
-
-        self.wz_quantizer_list[target_id].train_model(
-            grads, side_info, epoch=self.epoch_count, batch_size=10_000)
+            for i in range(worker_count):
+                target_vec = self.past_worker_grad_recons_vec[i][0]
+                side_info = self._get_side_info_for_grad_recons(i)
+                quantizer = _train_model(
+                    target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                    bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
+                    vec_slices=_get_vec_slices(dict_shape),
+                    user_logger=self.wz_basic_quantizer.user_logger, reconst_ld=1000)
+                self.wz_quantizer_list[i] = quantizer
 
 
 if __name__ == "__main__":
