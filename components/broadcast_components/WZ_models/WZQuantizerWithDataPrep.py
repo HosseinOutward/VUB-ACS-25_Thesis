@@ -102,7 +102,8 @@ class QuantizerWithDataPrep(WZQuantizer):
 
         # outlier ----------
         if len(outlier_positions)!=0:
-            assert len(np.unique(outlier_sign))==2 and outlier_sign.max()==1 and outlier_sign.min()==-1
+            assert len(np.unique(outlier_sign)) in [1,2]
+            assert outlier_sign.max() in [1,-1] and outlier_sign.min() in [1,-1]
             if len(outlier_positions) != 0:
                 vector[outlier_positions] =\
                     (np.abs(vector[outlier_positions]) * outlier_max + self.outlier_threshold)*outlier_sign

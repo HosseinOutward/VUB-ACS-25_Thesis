@@ -349,7 +349,10 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         if len(self.past_global_model_recons_vec) > self.si_window_size:
             self.past_global_model_recons_vec.pop(0)
 
-        entire_compressed_data = compress_data_list((uncompressed_encode_data, uncompressed_diff_encode_data))
+        entire_compressed_data = compress_data_list([
+            (uncompressed_encode_data, uncompressed_diff_encode_data),
+            quantizer.wz_pl_model.coding_model.decoder.state_dict(),
+        ])
         self.last_global_comp = (recons_dict, entire_compressed_data)
 
         return self.last_global_comp
@@ -364,6 +367,9 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             if i == agent_id:
                 temp = temp[:-1]
             side_info.extend(temp)
+
+        temp = self.curr_round_id*len(self.past_worker_grad_recons_vec)+self.curr_agent_id
+        assert len(side_info) in [temp, temp-1]
         return side_info
 
     def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
@@ -377,7 +383,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
         # **************
         # detect if we are in warmup phase
-        if agent_id + 1 >= worker_count:
+        if agent_id + 1 >= worker_count and self.warmup:
             assert self.curr_round_id == 0
             self.warmup = False
 
