@@ -113,6 +113,12 @@ def _compression_protocol(grad_dict, quantizer):
     grad_flat, shapes_dict = dict_to_array(grad_dict)
 
     # **********
+    temp=_get_vec_slices(shapes_dict)
+    # check if the vec_slices are the same as the quantizer's
+    check_same_slice_f = lambda s1,s2: s1.start==s2.start and s1.stop==s2.stop and s1.step==s2.step
+    if (quantizer.vec_slices is not None) \
+            and (not check_same_slice_f(quantizer.vec_slices[0], slice(None)) or len(quantizer.vec_slices)!=1):
+        assert all([a == b for a, b in zip(temp, quantizer.vec_slices)])
     quantizer.vec_slices = _get_vec_slices(shapes_dict)
 
     # **********
@@ -234,6 +240,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
         self.wz_quantizer_list = [wz_base_quantizer for _ in range(agent_count)]
 
+        self.si_window_size = 25
         self.past_worker_grad_recons_vec = [[] for _ in range(agent_count)]
         self.past_global_model_recons_vec = []
         self.agent_list_check = []
@@ -339,7 +346,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         # *************
         self.past_global_model_recons_vec += [change_dtype_recursive(recons_vec, torch.float16)]
 
-        if len(self.past_global_model_recons_vec) > 10:
+        if len(self.past_global_model_recons_vec) > self.si_window_size:
             self.past_global_model_recons_vec.pop(0)
 
         entire_compressed_data = compress_data_list((uncompressed_encode_data, uncompressed_diff_encode_data))
@@ -365,9 +372,13 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         # **************
         self.past_worker_grad_recons_vec[agent_id].append(change_dtype_recursive(curr_recons_vector, torch.float16))
 
+        if len(self.past_worker_grad_recons_vec[agent_id]) > self.si_window_size:
+            self.past_worker_grad_recons_vec[agent_id].pop(0)
+
         # **************
         # detect if we are in warmup phase
         if agent_id + 1 >= worker_count:
+            assert self.curr_round_id == 0
             self.warmup = False
 
         # **************
@@ -380,7 +391,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
                 vec_slices=_get_vec_slices(dict_shape),
-                user_logger=self.wz_basic_quantizer.user_logger, reconst_ld=1000)
+                user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[next_agent] = quantizer
 
 
