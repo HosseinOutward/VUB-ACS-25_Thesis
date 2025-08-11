@@ -1,9 +1,10 @@
 import numpy as np
 import torch
+from sqlalchemy.util import OrderedDict
 
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
-    WZServerTrainingPerRoundProtocol, change_dtype_recursive, decompress_data_list, dict_to_array, compress_data_list
+    WZServerTrainingPerRoundProtocol, change_dtype_recursive, decompress_data_list, dict_to_array, _get_vec_slices
 
 
 class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
@@ -30,8 +31,10 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             train_sample_size=old_quantizer.train_sample_size, user_logger=old_quantizer.user_logger,
             vec_slices=old_quantizer.vec_slices,
         )
+
         side_info = change_dtype_recursive(side_info, torch.float32)
-        new_quantizer.train_model(training_target, side_info, epoch=self.epoch_count, batch_size=10_000)
+        temp = np.random.normal(0, np.sqrt(1e-8), len(training_target), ).astype(np.float32)
+        new_quantizer.train_model(training_target+temp, side_info, epoch=self.epoch_count, batch_size=10_000)
 
         bins, extra_enc_data = new_quantizer.encoding_process(training_target)
         recons_vect = new_quantizer.decoding_process(bins, side_info, encoding_extra_data=extra_enc_data)
@@ -84,11 +87,16 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         # Handle hybrid round logic
         if self.is_hybrid_round_f(self.curr_round_id):
             grad_dict = change_dtype_recursive(grad_dict, torch.float32)
+
+            # too lazy. used by workerside training child class
+            if hasattr(self, 'accum_error'):
+                grad_dict = OrderedDict({k: grad_dict[k] + self.accum_error[agent_id][k] for k in grad_dict.keys()})
+                self.accum_error[agent_id] = None
+
             grad_flat, shapes_dict = dict_to_array(grad_dict)
-            grad_flat += np.random.normal(0, np.sqrt(1e-8), len(grad_flat), ).astype(np.float32)
 
             self.current_side_info_list = [a for a in self.past_workerside_grads[agent_id]]
-            self.wz_quantizer_list[agent_id].vec_slices = self._get_vec_slices(shapes_dict)
+            self.wz_quantizer_list[agent_id].vec_slices = _get_vec_slices(shapes_dict)
 
             quantizer, recons_vect = self._build_worker_side_quantizer(
                 self.wz_quantizer_list[agent_id], grad_flat, self.current_side_info_list)
@@ -101,6 +109,14 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
 
         return super().to_server_prep_data_for_transfer(
             agent_id, grad_dict, encoder_data_sent_by_server, force_use_diff_model)
+
+    def _get_side_info_data_list(self, agent_id, force_use_diff_model=None):
+        if self.flag_global_model_transfer:
+            assert force_use_diff_model is not None
+            return self.past_global_model_recon_dict
+        elif force_use_diff_model is not None:
+            return self.past_workerside_grads[agent_id]
+        return [] if self.warmup else self.current_side_info_list
 
 
 if __name__ == "__main__":

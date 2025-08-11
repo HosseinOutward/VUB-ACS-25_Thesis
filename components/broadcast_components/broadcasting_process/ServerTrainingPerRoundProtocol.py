@@ -269,8 +269,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             si_count = len(self.past_global_model_recon_dict)
             new_quantizer = QuantizerWithDataPrep(
                 wz_pl_model=self.wz_pl_model_class(
-                        2, max(16 // (self.curr_round_id + 1), 2), 1,
-                        si_count, 10, False, lr=1e-3, reconst_ld=400, tau=1.5
+                        max(4 // (self.curr_round_id), 2), max(32 // (self.curr_round_id), 16), 1,
+                        si_count, 10, False, lr=1e-3, reconst_ld=1000, tau=1.5
                     ).to(torch.float32),
                 count_side_info_data=si_count, enable_progress_bar=old_quantizer.enable_progress_bar,
                 train_sample_size=old_quantizer.train_sample_size, user_logger=None,
@@ -282,18 +282,35 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             new_quantizer.train_model(model_stat_vec, self.past_global_model_recon_dict,
                                       epoch=self.epoch_count, batch_size=10_000)
 
+        self.flag_global_model_transfer = True
+
         compressed = self.to_server_prep_data_for_transfer(
             None, server_model_state_dict, None, force_use_diff_model=new_quantizer, )
 
         recons, recons_vector = self.reconstruction_process(
             None, compressed, None, global_model_dims, force_use_diff_model=new_quantizer)
 
+        # ******
+        temp = self.past_global_model_recon_dict
+        error_diff = OrderedDict({k: server_model_state_dict[k]- v for k, v in recons.items()})
+        compressed_error_diff = self.to_server_prep_data_for_transfer(
+            None, error_diff, None,
+            force_use_diff_model=self.global_model_transfer_quantizer, )
+        recons_error_diff, recons_vector_error_diff = self.reconstruction_process(
+            None, compressed, None, global_model_dims,
+            force_use_diff_model=self.global_model_transfer_quantizer)
+        self.past_global_model_recon_dict=temp
+        recons = OrderedDict({k: v+recons_error_diff[k] for k, v in recons.items()})
+
+        # ******
+        self.flag_global_model_transfer = False
+
         self.past_global_model_recon_dict += [change_dtype_recursive(recons_vector, torch.float16)]
 
         if len(self.past_global_model_recon_dict) > 10:
             self.past_global_model_recon_dict.pop(0)
 
-        self.last_global_model_recon_comp_data = (recons, compressed)
+        self.last_global_model_recon_comp_data = (recons, (compressed, compressed_error_diff))
 
         return recons, compressed
 

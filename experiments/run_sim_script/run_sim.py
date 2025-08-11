@@ -1,8 +1,13 @@
-proto_combo = ['12', '34', '56']
 proto_choices = ['no_proto',
                  'all_out', 'balanced_hybrid',
                  'hybrid', 'no_proto_only_global',
-                 'simple', 'worker-side', ] + proto_combo
+                 'simple', 'worker-side',
+                 'worker-side-with-error-accum']
+proto_combo = [str(i) for i in range(0,len(proto_choices))]
+proto_combo += [''.join([str(i), str(j)])
+                for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
+proto_choices += proto_combo
+
 if __name__ == "__main__":
     import gc
     import argparse
@@ -37,7 +42,7 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", "`Trainer.fit` stopped: ")
 
     #%%
-    data_folder = r'data'
+    data_folder = r'../../data'
     dataset = [
         FasterSVHN(
 
@@ -58,6 +63,7 @@ if __name__ == "__main__":
 
     #%%
     def f(proto_name):
+        print('Running protocol {}'.format(proto_name))
         worker_count = 5
         batch_size = 15_000
 
@@ -92,6 +98,9 @@ if __name__ == "__main__":
             elif proto_name=='no_proto_only_global':
                 from components.broadcast_components.broadcasting_process.OnlyGlobalModel import OnlyGlobalModel
                 broadcast_prot_base = OnlyGlobalModel(worker_count, base_quantizer)
+            elif proto_name=='worker-side-with-error-accum':
+                from components.broadcast_components.broadcasting_process.WorkersideTrainingWithAccumError import WorkersideTrainingWithAccumErrorProtocol
+                broadcast_prot_base = WorkersideTrainingWithAccumErrorProtocol(worker_count, base_quantizer)
             else:
                 raise ValueError(f'Unknown protocol: {proto_name}')
 
@@ -118,7 +127,7 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
         f(args.protocol)
     else:
-        for i in range(3):
+        for i in range(len(args.protocol)):
             try:
                 f(proto_choices[int(args.protocol[i:i+1])])
             except Exception as e:
