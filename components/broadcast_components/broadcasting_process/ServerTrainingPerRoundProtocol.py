@@ -393,6 +393,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             next_agent = (agent_id + 1) % worker_count
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent)
+            assert len(side_info) == self.curr_round_id*worker_count+agent_id
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
