@@ -49,7 +49,7 @@ class RawBroadcastProtocol:
         return
 
     # %%
-    def reconstruction_process(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
+    def reconstruct_worker_grads(self, agent_id, worker_broadcast_data, worker_count, global_model_dims):
         return worker_broadcast_data[0]
 
     def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
@@ -253,6 +253,9 @@ class FLSimulator:
             ag.local_model.load_state_dict(state_dict_data)
             ag.local_model.current_step_info['worker_id'] = ag.agent_id
 
+        # todo have a better way to set the global model
+        self.global_model.load_state_dict(state_dict_data)
+
     def _aggregate_models(self, grad_dict_per_agent: Optional[List[Dict]] = None):
         sample_size_per_agent = [agent.data_size for agent in self.agents]
 
@@ -304,7 +307,7 @@ class FLSimulator:
         encoded_ag_broadcast = self.agents[ag_id].get_worker_broadcast(
             server_data_sent_to_worker, current_ag_encoding_function)
 
-        decoded_agent_broadcast = broadcast_prot.reconstruction_process(
+        decoded_agent_broadcast = broadcast_prot.reconstruct_worker_grads(
             ag_id, encoded_ag_broadcast, self.num_agents, self.model_shape_with_grads_dict, )
 
         return decoded_agent_broadcast
