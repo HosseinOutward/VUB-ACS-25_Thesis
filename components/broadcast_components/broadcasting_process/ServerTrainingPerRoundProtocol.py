@@ -119,7 +119,7 @@ def _compression_protocol(grad_dict, quantizer):
     if (quantizer.vec_slices is not None) \
             and (not check_same_slice_f(quantizer.vec_slices[0], slice(None)) or len(quantizer.vec_slices)!=1):
         assert all([a == b for a, b in zip(temp, quantizer.vec_slices)])
-    quantizer.vec_slices = _get_vec_slices(shapes_dict)
+    quantizer.vec_slices = temp
 
     # **********
     bins_vector, extra_enc_data = quantizer.encoding_process(grad_flat)
@@ -192,7 +192,7 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
 
     # ******
     result_dict = array_to_dict_with_shapes(res_vector, global_model_dims)
-    result_dict = {k: torch.tensor(v).to('cuda') for k, v in result_dict.items()}
+    result_dict = {k: torch.tensor(v) for k, v in result_dict.items()}
     return result_dict, res_vector
 
 
@@ -315,30 +315,33 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
             quantizer = _train_model(
                 model_stat_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=max(32 // (self.curr_round_id), 16),
+                bins_per_plane=max(32 // (self.curr_round_id+1), 16),
                 vec_slices=_get_vec_slices(global_model_dims),
                 user_logger=None, reconst_ld=1000)
         else:
             quantizer = self.wz_basic_quantizer
 
         # *************
-        compressed, uncompressed_encode_data = _compression_protocol(server_model_state_dict, quantizer)
-        recons_dict, recons_vec = _reconstruction_protocol(
-            compressed, side_info, global_model_dims, quantizer)
-
         # refine the reconstruction with the error diff
-        copied_vec_slices = [a for a in self.wz_basic_quantizer.vec_slices]
+        copied_vec_slices = None
+        if self.wz_basic_quantizer.vec_slices is not None:
+            copied_vec_slices = [a for a in self.wz_basic_quantizer.vec_slices]
         self.wz_basic_quantizer.vec_slices = [slice(None)]
 
-        error_diff = OrderedDict({k: server_model_state_dict[k] - rec for k, rec in recons_dict.items()})
+        # *************
+        compressed, uncompressed_encode_data = _compression_protocol(server_model_state_dict, quantizer)
+        recons_dict, recons_vec = _reconstruction_protocol(compressed, side_info, global_model_dims, quantizer)
+
+        error_diff = OrderedDict({k: server_model_state_dict[k].cpu() - rec for k, rec in recons_dict.items()})
         compressed_diff, uncompressed_diff_encode_data = _compression_protocol(error_diff, self.wz_basic_quantizer)
         recons_diff_dict, recons_diff_vec = _reconstruction_protocol(
             compressed_diff, [], global_model_dims, self.wz_basic_quantizer)
 
-        self.wz_basic_quantizer.vec_slices = copied_vec_slices
-
         recons_vec = recons_vec + recons_diff_vec
         recons_dict = OrderedDict({k: recons_dict[k] + recons_diff_dict[k] for k in recons_dict.keys()})
+
+        # *************
+        self.wz_basic_quantizer.vec_slices = copied_vec_slices
 
         # *************
         self.past_global_model_recons_vec += [change_dtype_recursive(recons_vec, torch.float16)]
@@ -439,13 +442,17 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
             for k, v in grad_test_data[i][j].items():
                 grad_test_data[i][j][k] = grad_test_data[i - 1][j - 1][k] + v * 0.1
 
+    global_dict = [OrderedDict({k:v for k,v in grad_test_data[i][0].items()}) for i in range(rounds)]
+    for i in range(rounds):
+        global_dict[i]['extra_global'] = torch.normal(0, 1, size=(100,)).to('cuda')
+
     # simulate the WZ encoding and reconstruction process --------------------------------
     for round_id, grad_per_round in enumerate(grad_test_data):
         for ag_id, grad in enumerate(grad_per_round):
             broadcast_prot.start_round_agent_process(ag_id, round_id)
 
             print(f'>> round_id {round_id}, Agent {ag_id}')
-            recon_model_param = broadcast_prot.model_transfer_to_worker_from_server(ag_id, grad_per_round[0])
+            recon_model_param = broadcast_prot.model_transfer_to_worker_from_server(ag_id, global_dict[0])
             recon_model_param = recon_model_param[0]
 
             print('          - Preparing data for transfer to worker...')
@@ -461,11 +468,11 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
 
             # print the mspe
             grad_avg_v = np.mean(np.concat([grad[k].cpu() ** 2 for k in grad.keys()]))
-            grad_mspe=[(grad[k] - v).cpu() ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
+            grad_mspe=[(grad[k].cpu() - v.cpu()) ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
             grad_mspe = np.mean(np.concat(grad_mspe))
 
-            global_avg_v = np.mean(np.concat([grad[k].cpu() ** 2 for k in grad.keys()]))
-            global_mspe=[(grad_per_round[0][k] - v).cpu() ** 2/global_avg_v for k, v in recon_model_param.items()]
+            global_avg_v = np.mean(np.concat([global_dict[0][k].cpu() ** 2 for k in global_dict[0].keys()]))
+            global_mspe=[(global_dict[0][k].cpu() - v.cpu()) ** 2/global_avg_v for k, v in recon_model_param.items()]
             global_mspe = np.mean(np.concat(global_mspe))
             print(f'     > MSPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
 

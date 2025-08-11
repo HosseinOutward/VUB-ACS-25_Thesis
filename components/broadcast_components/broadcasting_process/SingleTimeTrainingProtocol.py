@@ -23,7 +23,8 @@ class SingleTimeTrainingProtocol(WZServerTrainingPerRoundProtocol):
         if self.warmup:
             self.past_worker_grad_recons_vec[agent_id].append(change_dtype_recursive(curr_recons_vector, torch.float16))
         else:
-            self.past_worker_grad_recons_vec[agent_id] = change_dtype_recursive(curr_recons_vector, torch.float16)
+            assert len(self.past_worker_grad_recons_vec[agent_id])==1
+            self.past_worker_grad_recons_vec[agent_id][0] = change_dtype_recursive(curr_recons_vector, torch.float16)
 
         # **************
         # detect if we are in warmup phase
