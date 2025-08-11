@@ -17,7 +17,7 @@ class OnlyGlobalModel(WZServerTrainingPerRoundProtocol):
             return worker_broadcast_data[0]
         if self.curr_round_id!=0: self.warmup=False
         return super().reconstruction_process(agent_id, worker_broadcast_data,
-                                              worker_count, global_model_dims, force_use_diff_model)
+                                              worker_count, global_model_dims, force_use_diff_model)[0]
 
     # def model_transfer_to_worker_from_server(self, agent_id, server_model_state_dict):
     #     return server_model_state_dict, None

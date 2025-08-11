@@ -383,7 +383,8 @@ class FLSimulator:
 
         # final global model report -----------------------------------------------
         print("\nfinal global model metrics")
-        self._log_report(self.global_model, shared_train_loader, shared_test_loader, 3, 'global')
+        self._log_report(self.global_model, shared_train_loader, shared_test_loader,
+                         self.communication_rounds, 'global')
 
         #  -----------------------------------------------
         del shared_train_loader, shared_test_loader

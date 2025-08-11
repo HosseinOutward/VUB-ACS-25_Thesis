@@ -21,8 +21,10 @@ def get_obj_size(obj):
         return len(obj) * (obj._dtype.bitwidth // 8)
     elif isinstance(obj, bytes):
         return len(obj)
+    elif obj is None:
+        return 1
     else:
-        raise
+        raise TypeError(f"Unsupported object type: {type(obj)}")
 
 
 class BroadcastMetricGatheringUtilities:
