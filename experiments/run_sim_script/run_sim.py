@@ -1,8 +1,9 @@
-proto_choices = ['no_proto',
-                 'all_out', 'balanced_hybrid',
-                 'hybrid', 'no_proto_only_global',
-                 'simple', 'worker-side',
-                 'worker-side-with-error-accum']
+import numpy as np
+proto_choices = ['no_proto', # 0
+                 'all_out', 'balanced_hybrid', # 1 2
+                 'hybrid', 'no_proto_only_global', # 3 4
+                 'simple', 'worker-side', # 5 6
+                 'worker-side-with-error-accum'] # 7
 proto_combo = [str(i) for i in range(0,len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
                 for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
@@ -27,7 +28,7 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
     parser.add_argument('--protocol', type=str, choices=proto_choices,)
-    parser.add_argument('--global_quant', type=str, default=False)
+    parser.add_argument('--no_global_quant', type=str, default=False)
 
     args = parser.parse_args()
 
@@ -42,12 +43,13 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", "`Trainer.fit` stopped: ")
 
     #%%
+    data_folder = r'data'
     data_folder = r'../../data'
     dataset = [
         FasterSVHN(
 
 
-            # limit_count = 10,
+            limit_count = 10,
 
 
             root=data_folder+'/SVHN', split=s,
@@ -64,12 +66,14 @@ if __name__ == "__main__":
     #%%
     def f(proto_name):
         print('Running protocol {}'.format(proto_name))
-        worker_count = 5
+        worker_count = 2
         batch_size = 15_000
 
         # *****************
 
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=proto_name)
+        if args.no_global_quant:
+            proto_name += '_no_global_quant'
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')#, name=proto_name)
 
         broadcast_prot = None
         if proto_name != 'no_proto':
@@ -106,7 +110,7 @@ if __name__ == "__main__":
 
             broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
-            if args.global_quant:
+            if args.no_global_quant:
                 broadcast_prot.no_global_quantization = True
 
         # *****************
@@ -128,9 +132,9 @@ if __name__ == "__main__":
         f(args.protocol)
     else:
         for i in range(len(args.protocol)):
-            try:
+            # try:
                 f(proto_choices[int(args.protocol[i:i+1])])
-            except Exception as e:
-                print(f'\n     ***************\n'
-                      f'Error in protocol {proto_choices[int(args.protocol[i:i+1])]}: {e}\n'
-                      f'\n     ***************\n')
+            # except Exception as e:
+            #     print(f'\n     ***************\n'
+            #           f'Error in protocol {proto_choices[int(args.protocol[i:i+1])]}: {e}\n'
+            #           f'\n     ***************\n')
