@@ -123,6 +123,7 @@ class QuantizerWithDataPrep(WZQuantizer):
         return bins, (normal_param, outlier_param)
 
     def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
+        side_info_data_list = [self._apply_pre_process(a, *encoding_extra_data)[0] for a in side_info_data_list]
         res = super().decoding_process(quantized_data, side_info_data_list, None, batch_size)
         res = self._post_process_grads(res, *encoding_extra_data)
         return res
@@ -133,4 +134,5 @@ class QuantizerWithDataPrep(WZQuantizer):
 
     def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
+        side_info_data_list = [self._apply_pre_process(a, normal_param, outlier_param)[0] for a in side_info_data_list]
         super().train_model(grad_vector, side_info_data_list, *args, **kwargs)

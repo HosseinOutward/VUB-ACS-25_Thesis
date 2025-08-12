@@ -2,7 +2,8 @@ import torch
 
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
-    WZServerTrainingPerRoundProtocol, change_dtype_recursive, dict_to_array, _get_vec_slices, _train_model
+    WZServerTrainingPerRoundProtocol, change_dtype_recursive, dict_to_array, _get_vec_slices, _train_model, \
+    compress_data_list
 
 
 class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
@@ -27,21 +28,30 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         # ***********
         if self.is_hybrid_round_f(self.curr_round_id):
             target_vec, dict_shape = dict_to_array(grad_dict)
-            side_info = self._get_side_info_for_grad_recons(agent_id, is_hybrid_round=True)
-            quantizer = _train_model(
+            side_info = self._get_side_info_for_grad_recons(agent_id, force_is_hybrid_round=True)
+
+            if self.wz_basic_quantizer.user_logger:
+                self.wz_basic_quantizer.user_logger.round_id -= 1
+
+            quantizer:QuantizerWithDataPrep = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id + 1), 4)),
+                bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id/2 + 1), 4)),
                 vec_slices=_get_vec_slices(dict_shape),
                 user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[agent_id] = quantizer
 
-        return super().to_server_prep_data_for_transfer(
-            agent_id, grad_dict, encoder_data_sent_by_server)
+            encoder_data_sent_by_server = quantizer.wz_pl_model.coding_model.encoder.state_dict()
+            encoder_data_sent_by_server = compress_data_list(encoder_data_sent_by_server)
 
-    def _get_side_info_for_grad_recons(self, agent_id, is_hybrid_round=None):
-        if is_hybrid_round is None:
-            is_hybrid_round = self.is_hybrid_round_f(self.curr_round_id)
-        if not is_hybrid_round:
+            if self.wz_basic_quantizer.user_logger:
+                self.wz_basic_quantizer.user_logger.round_id += 1
+
+        return super().to_server_prep_data_for_transfer(agent_id, grad_dict, encoder_data_sent_by_server)
+
+    def _get_side_info_for_grad_recons(self, agent_id, force_is_hybrid_round=None):
+        if force_is_hybrid_round is None:
+            force_is_hybrid_round = self.is_hybrid_round_f(self.curr_round_id)
+        if not force_is_hybrid_round:
             return super()._get_side_info_for_grad_recons(agent_id)
 
         # hybrid round
@@ -77,13 +87,13 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         next_agent = (agent_id + 1) % worker_count
         coming_round = self.curr_round_id + int(next_agent==0)
         coming_is_hybrid = self.is_hybrid_round_f(coming_round)
-        if not self.warmup and not self.is_hybrid_round_f(coming_round):
+        if not self.warmup and not coming_is_hybrid:
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
-            side_info = self._get_side_info_for_grad_recons(next_agent, is_hybrid_round=coming_is_hybrid)
+            side_info = self._get_side_info_for_grad_recons(next_agent, force_is_hybrid_round=coming_is_hybrid)
             assert len(side_info) == self.curr_round_id*worker_count+agent_id
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
+                bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
                 vec_slices=_get_vec_slices(dict_shape),
                 user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[next_agent] = quantizer

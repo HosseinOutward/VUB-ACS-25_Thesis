@@ -21,7 +21,7 @@ def get_real_bin_prob(bin_no, bin_count):
 
 
 class PL_EncoderDecoder_ANN(pl.LightningModule):
-    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=4, lr=8e-4, reconst_ld=400, marginal=False):
+    def __init__(self, inp_dim, side_info_size, bin_count=None, tau=1.5, lr=1e-3, reconst_ld=400, marginal=False):
         super().__init__()
         side_info_size = side_info_size if side_info_size != 0 else 1
         self.reconst_ld = reconst_ld
