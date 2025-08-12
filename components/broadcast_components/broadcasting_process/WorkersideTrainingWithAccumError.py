@@ -12,7 +12,8 @@ class WorkersideTrainingWithAccumErrorProtocol(WorkersideTrainingProtocol):
         # add the past accumulated error to the grad_dict
         temp = {k: grad_dict[k].cpu() for k in grad_dict.keys()}
         if self.accum_error[agent_id] is not None:
-            grad_dict = OrderedDict({k: grad_dict[k] + self.accum_error[agent_id][k].cuda() for k in grad_dict.keys()})
+            grad_dict =\
+                OrderedDict({k: grad_dict[k].cpu()+self.accum_error[agent_id][k].cpu() for k in grad_dict.keys()})
         self.accum_error[agent_id]=temp
 
         return super().to_server_prep_data_for_transfer(agent_id, grad_dict, encoder_data_sent_by_server)
@@ -29,4 +30,4 @@ if __name__ == "__main__":
 
     bp_f = lambda worker_count, base_quantizer: (
         WorkersideTrainingWithAccumErrorProtocol(worker_count, base_quantizer))
-    _test_main(bp_f, worker_count=2, rounds=4)
+    _test_main(bp_f, worker_count=5, rounds=50)

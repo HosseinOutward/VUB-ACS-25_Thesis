@@ -315,7 +315,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
             quantizer = _train_model(
                 model_stat_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=max(32 // (self.curr_round_id+1), 16),
+                bins_per_plane=int(max(32 // (self.curr_round_id/2+1), 16)),
                 vec_slices=_get_vec_slices(global_model_dims),
                 user_logger=None, reconst_ld=1000)
         else:
@@ -369,6 +369,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             side_info.extend(temp)
 
         temp = self.curr_round_id*len(self.past_worker_grad_recons_vec)+self.curr_agent_id
+        temp = min(temp, self.si_window_size*len(self.past_worker_grad_recons_vec)-1)
         assert len(side_info) in [temp, temp-1]
         return side_info
 
@@ -393,18 +394,18 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             next_agent = (agent_id + 1) % worker_count
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent)
-            assert len(side_info) == self.curr_round_id*worker_count+agent_id
+            assert len(side_info) == min(self.curr_round_id*worker_count+agent_id, self.si_window_size*worker_count-1)
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=max(16 // (self.curr_round_id + 1), 3),
+                bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
                 vec_slices=_get_vec_slices(dict_shape),
                 user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[next_agent] = quantizer
 
 
-def _test_main(brod_prot_class, worker_count=2, rounds=2):
+def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False):
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
-                                     bins_per_plane=16, lr=1e-5, marginal=True).to(torch.float32)
+                                     bins_per_plane=16, lr=1e-3, marginal=True).to(torch.float32)
     path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
@@ -413,6 +414,8 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
 
     broadcast_prot = brod_prot_class(worker_count, base_quantizer)
 
+    if no_global_quant:
+        broadcast_prot.no_global_quantization = True
     # --------------------------------
     torch.set_float32_matmul_precision('medium')
     import logging
@@ -429,7 +432,7 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
     model_shape_dict = {
         f'aaa_{i}': (*np.random.randint(1, 2, size=np.random.randint(2)),
                      (np.random.randint(1_000, 10_000) * 1000) // 1000)
-        for i in range(3)
+        for i in range(4)
     }
 
     grad_test_data = [
@@ -441,6 +444,15 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
         for j in range(1, worker_count):
             for k, v in grad_test_data[i][j].items():
                 grad_test_data[i][j][k] = grad_test_data[i - 1][j - 1][k] + v * 0.1
+
+    assert worker_count<10
+    model_shape_dict['aaa_0']=(100,)
+    for i in range(rounds):
+        for j in range(worker_count):
+            grad_test_data[i][j]['aaa_0']=torch.zeros(model_shape_dict['aaa_0'][0])
+            grad_test_data[i][j]['aaa_0']+=(i+1)*100+(j+1)*10
+            grad_test_data[i][j]['aaa_0']+= 5 + (2*torch.rand(model_shape_dict['aaa_0'][0])-1)*2
+            grad_test_data[i][j]['aaa_0']*=(torch.rand(model_shape_dict['aaa_0'][0])>0.5)*2-1
 
     global_dict = [OrderedDict({k:v for k,v in grad_test_data[i][0].items()}) for i in range(rounds)]
     for i in range(rounds):
@@ -467,12 +479,15 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
 
             # print the mspe
-            grad_avg_v = np.mean(np.concat([grad[k].cpu() ** 2 for k in grad.keys()]))
-            grad_mspe=[(grad[k].cpu() - v.cpu()) ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
+            grad_avg_v = np.mean(np.concat(
+                [grad[k].flatten().cpu() ** 2 for k in grad.keys()]))
+            grad_mspe=[(grad[k].cpu() - v.cpu()).flatten() ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
             grad_mspe = np.mean(np.concat(grad_mspe))
 
-            global_avg_v = np.mean(np.concat([global_dict[0][k].cpu() ** 2 for k in global_dict[0].keys()]))
-            global_mspe=[(global_dict[0][k].cpu() - v.cpu()) ** 2/global_avg_v for k, v in recon_model_param.items()]
+            global_avg_v = np.mean(np.concat(
+                [global_dict[0][k].cpu().flatten() ** 2 for k in global_dict[0].keys()]))
+            global_mspe=[
+                (global_dict[0][k].cpu() - v.cpu()).flatten() ** 2/global_avg_v for k, v in recon_model_param.items()]
             global_mspe = np.mean(np.concat(global_mspe))
             print(f'     > MSPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
 
@@ -485,5 +500,5 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2):
 if __name__ == "__main__":
     bp_f = lambda worker_count, base_quantizer: (
         WZServerTrainingPerRoundProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=3)
+    _test_main(bp_f, worker_count=5, rounds=50)
 
