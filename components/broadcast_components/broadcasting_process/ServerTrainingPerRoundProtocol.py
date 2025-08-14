@@ -197,7 +197,7 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
 
 
 def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
-                 bins_per_plane, vec_slices, user_logger, reconst_ld=None):
+                 bins_per_plane, vec_slices, user_logger, reconst_ld=None) -> QuantizerWithDataPrep:
     assert len(side_info) != 0
 
     reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
@@ -231,11 +231,16 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
 
 
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep,
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, global_base_quantizer = None,
                  epoch_count=45, no_global_quantization=False):
         assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
+
+        if global_base_quantizer is None:
+            global_base_quantizer = wz_base_quantizer
+
         self.epoch_count = epoch_count
         self.wz_basic_quantizer = wz_base_quantizer
+        self.global_wz_basic_quantizer = global_base_quantizer
         self.no_global_quantization = no_global_quantization
 
         self.wz_quantizer_list = [wz_base_quantizer for _ in range(agent_count)]
@@ -315,7 +320,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
             quantizer = _train_model(
                 model_stat_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=int(max(32 // (self.curr_round_id/2+1), 16)),
+                bins_per_plane=int(max(32 // (self.curr_round_id/2+1), 6)),
                 vec_slices=_get_vec_slices(global_model_dims),
                 user_logger=None, reconst_ld=1000)
         else:
@@ -333,9 +338,10 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         recons_dict, recons_vec = _reconstruction_protocol(compressed, side_info, global_model_dims, quantizer)
 
         error_diff = OrderedDict({k: server_model_state_dict[k].cpu() - rec for k, rec in recons_dict.items()})
-        compressed_diff, uncompressed_diff_encode_data = _compression_protocol(error_diff, self.wz_basic_quantizer)
+        compressed_diff, uncompressed_diff_encode_data = _compression_protocol(
+            error_diff, self.global_wz_basic_quantizer)
         recons_diff_dict, recons_diff_vec = _reconstruction_protocol(
-            compressed_diff, [], global_model_dims, self.wz_basic_quantizer)
+            compressed_diff, [], global_model_dims, self.global_wz_basic_quantizer)
 
         recons_vec = recons_vec + recons_diff_vec
         recons_dict = OrderedDict({k: recons_dict[k] + recons_diff_dict[k] for k in recons_dict.keys()})
@@ -416,6 +422,13 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False)
 
     if no_global_quant:
         broadcast_prot.no_global_quantization = True
+    else:
+        temp = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=1,
+                                     bins_per_plane=8, lr=1e-3, marginal=True).to(torch.float32)
+        temp.load_state_dict(torch.load(r'../../../data/basicRNN_global_correction.pt', map_location='cpu'))
+        temp = QuantizerWithDataPrep(temp, train_sample_size=200_000, count_side_info_data=0,
+                                               enable_progress_bar=True, vec_slices=None)
+        broadcast_prot.global_wz_basic_quantizer = temp
     # --------------------------------
     torch.set_float32_matmul_precision('medium')
     import logging
