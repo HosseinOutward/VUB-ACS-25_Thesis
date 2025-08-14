@@ -90,7 +90,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         if not self.warmup and not coming_is_hybrid:
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent, force_is_hybrid_round=coming_is_hybrid)
-            assert len(side_info) == self.curr_round_id*worker_count+agent_id
+            assert len(side_info) == min(self.curr_round_id*worker_count+agent_id, self.si_window_size*worker_count-1)
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
@@ -104,5 +104,5 @@ if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     bp_f = lambda worker_count, base_quantizer: (
-        HybridWZBroadcastProtocol(worker_count, base_quantizer, epoch_count=1, hybrid_round_num=3))
-    _test_main(bp_f, worker_count=2, rounds=4)
+        HybridWZBroadcastProtocol(worker_count, base_quantizer, epoch_count=1, hybrid_round_num=5))
+    _test_main(bp_f, worker_count=5, rounds=50)

@@ -17,4 +17,4 @@ if __name__ == "__main__":
 
     bp_f = lambda worker_count, base_quantizer: (
         OnlyGlobalModel(worker_count, base_quantizer))
-    _test_main(bp_f, worker_count=2, rounds=4)
+    _test_main(bp_f, worker_count=2, rounds=6)
