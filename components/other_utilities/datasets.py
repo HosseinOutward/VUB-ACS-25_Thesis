@@ -183,3 +183,67 @@ def _cleanup_all_shared_memory():
 
 # Register cleanup function to run at exit
 atexit.register(_cleanup_all_shared_memory)
+
+
+
+if __name__ == "__main__":
+    from components.FL_sim import CustomSampler
+    import time
+    from torchvision import transforms
+
+    dataset = [
+        FasterSVHN(
+            # limit_count = 10,
+            root='../../data/SVHN', split=s,
+            transform=transforms.Compose([
+                transforms.Resize(32),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.4377, 0.4438, 0.4728],
+                    std=[0.1980, 0.2010, 0.1970]),
+            ])
+        ) for s in ['train', 'test']]
+
+    sampler = CustomSampler(len(dataset[0]), 5,
+        True, True, False)
+
+    shared_train_loader = torch.utils.data.DataLoader(
+        dataset[0], batch_size=15000,
+        num_workers=10, persistent_workers=True, sampler=sampler)
+
+    shared_test_loader = torch.utils.data.DataLoader(
+        dataset[1], batch_size=15000 * 3, shuffle=False,
+        num_workers=5, persistent_workers=True)
+
+    print(f"Dataset length: {len(dataset[0])}, {len(dataset[1])}")
+
+    # Measure time for dataset iteration
+    start_time = time.time()
+    for _ in range(10):
+        for i in range(5):
+            for _ in dataset[0]:
+                pass
+
+            sampler.set_agent_partition(i)
+            idxes = list(iter(sampler))
+            for _ in dataset[0][idxes]:
+                pass
+            for _ in dataset[1]:
+                pass
+    end_time = time.time()
+    print(f"dataset: {(end_time - start_time)*1000:.2f} ms")
+
+    # Measure time for DataLoader iteration
+    start_time = time.time()
+    for _ in range(10):
+        for i in range(5):
+            sampler.set_agent_partition('ALL')
+            for _ in shared_train_loader:
+                pass
+            sampler.set_agent_partition(i)
+            for _ in shared_train_loader:
+                pass
+            for _ in shared_test_loader:
+                pass
+    end_time = time.time()
+    print(f"dataloader: {(end_time - start_time)*1000:.2f} ms")
