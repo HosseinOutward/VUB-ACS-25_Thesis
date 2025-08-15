@@ -332,12 +332,16 @@ class FLSimulator:
         loss, auc = 0, 0
         data_count = 0
         model.eval()
+        model.cuda()
         with torch.no_grad():
             for batch in dataloader:
+                batch = [b.cuda() for b in batch]
                 b_loss, (b_auc,) = model.get_loss_etc(batch)
                 loss += b_loss.item() * len(batch[0])
                 auc += b_auc * len(batch[0])
                 data_count += len(batch[0])
+                batch = [b.cpu() for b in batch]
+        model.cpu()
         return loss/data_count, auc/data_count
 
     def run_simulation(self, broadcast_prot=None, ):

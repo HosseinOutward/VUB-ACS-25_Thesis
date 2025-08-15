@@ -7,6 +7,11 @@ proto_choices = ['no_proto', # 0
 proto_combo = [str(i) for i in range(0,len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
                 for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
+proto_combo += [''.join([str(i), str(j), str(k)])
+                for i in range(0, len(proto_choices))
+                for j in range(0, len(proto_choices))
+                for k in range(0, len(proto_choices))
+                if i != j and i != k and j != k]
 proto_choices += proto_combo
 
 if __name__ == "__main__":
@@ -15,6 +20,7 @@ if __name__ == "__main__":
     import logging
     import warnings
     import torch
+    import traceback
     import torchvision.transforms as transforms
 
     from components.other_utilities.models_to_train import ResNetPLModel
@@ -49,7 +55,7 @@ if __name__ == "__main__":
         FasterSVHN(
 
 
-            limit_count = 10,
+            # limit_count = 10,
 
 
             root=data_folder+'/SVHN', split=s,
@@ -66,14 +72,14 @@ if __name__ == "__main__":
     #%%
     def f(proto_name):
         print('Running protocol {}'.format(proto_name))
-        worker_count = 2
+        worker_count = 5
         batch_size = 15_000
 
         # *****************
-
-        if args.no_global_quant:
-            proto_name += '_no_global_quant'
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')#, name=proto_name)
+        temp = proto_name
+        if args.no_global_quant!=False:
+            temp += '_no_global_quant'
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')#, name=temp)
 
         broadcast_prot = None
         if proto_name != 'no_proto':
@@ -82,7 +88,8 @@ if __name__ == "__main__":
             wz_model.load_state_dict(torch.load(f'{data_folder}/basicRNN_2plane_4bins_state.pt', map_location='cpu'))
 
             base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
-                    count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger)
+                    count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger,
+                                                   no_outlier_normalization=True)
 
             if proto_name=='all_out':
                 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import WZServerTrainingPerRoundProtocol
@@ -110,7 +117,7 @@ if __name__ == "__main__":
 
             broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
-            if args.no_global_quant:
+            if args.no_global_quant!=False:
                 broadcast_prot.no_global_quantization = True
 
         # *****************
@@ -132,9 +139,11 @@ if __name__ == "__main__":
         f(args.protocol)
     else:
         for i in range(len(args.protocol)):
-            # try:
+            try:
                 f(proto_choices[int(args.protocol[i:i+1])])
-            # except Exception as e:
-            #     print(f'\n     ***************\n'
-            #           f'Error in protocol {proto_choices[int(args.protocol[i:i+1])]}: {e}\n'
-            #           f'\n     ***************\n')
+            except Exception as e:
+                print(f'\n     ***************\n'
+                      f'Error in protocol {proto_choices[int(args.protocol[i:i+1])]}: {e}\n'
+                      f'\n     ***************\n')
+                # print the stack trace
+                traceback.print_exc()
