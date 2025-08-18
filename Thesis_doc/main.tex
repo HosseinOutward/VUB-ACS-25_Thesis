@@ -1,0 +1,54 @@
+\documentclass[a4paper]{book}
+
+% Load the VUB package.
+% This has many options, please read the documentation at
+% https://gitlab.com/rubdos/texlive-vub
+\usepackage{template_data//vub}
+
+% Some highly suggested packages, please read their manuals.
+%\usepackage{cleveref}
+%\usepackage[natbib,style=apa]{biblatex}
+%\addbibresource{bibliography.bib}
+
+\title{Use of Learned Wyner-Ziv quantizer on Distributed Learning }
+% \pretitle{\flushleft{Graduation thesis submitted in partial fulfilment of the requirements for the degree of de Ingenieurswetenschappen: Computerwetenschappen}}
+% \subtitle{}
+\author{(Seyed) Hossein Mohammadi}
+\date{August 2025}
+\promotors{Promotors: prof.\ dr.\ Nikos Deligiannis \and dr.\ Pourya Behmandpoor \and ir. Brent De Weerdt}
+\faculty{Engineering - ETROVUB} % Note: without the word "Faculty"!
+
+\begin{document}
+\frontmatter
+\maketitle%
+
+% Oftentimes, you need add a second language title.
+\title{Gebruik van een geleerde Wyner-Ziv-kwantiseerder bij gedistribueerd leren}
+% \pretitle{\flushleft{Proefschrift ingediend met het oog op het behalen van de graad van Master of Science in de Ingenieurswetenschappen: Computerwetenschappen}}%
+% \subtitle{mijn ondertitel}
+\date{Augustus 2025}%
+\faculty{Ingenieurswetenschappen}%
+\maketitle%
+
+\chapter*{Abstract}
+\input{Chapters/0-Abstract.tex}
+
+\tableofcontents%
+
+\mainmatter%
+\part{First part}%
+
+Optionally, you use parts, and those parts contain chapters.
+
+\part{Second Part}%
+
+Optionally, you use parts, and those parts contain chapters.
+
+\backmatter%
+\chapter{Conclusion}
+
+% Add bibliography using BibTeX
+\bibliographystyle{plain}
+\bibliography{Chapters/Cites}
+
+\end{document}
