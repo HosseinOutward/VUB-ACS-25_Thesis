@@ -191,7 +191,7 @@ def plot_stats(stat_dict, no_raw=False):
                    marker='o', color=colors_per_method[method], alpha=0.9)
 
         # just to make the axis line up. the line is the same (division by constant)
-        bit_rate = temp/(total_params/1024/1024)
+        bit_rate = temp/(total_params/1024/1024) * 8
         ax2.plot(bit_rate, label=f'Practical Bit Rate - {method}', alpha=0)
 
     ax2.set_ylabel('Bit Rate (bits/parameter)')

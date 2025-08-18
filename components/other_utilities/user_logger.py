@@ -1,4 +1,6 @@
 import os
+
+import numpy as np
 import pandas as pd
 from copy import deepcopy
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -262,6 +264,49 @@ def get_unified_data_tables(name, worker_count):
                 k: [broadcast_entire_stats[method][k][temp(i)].values for i in range(round_count)]
                 for k in broadcast_entire_stats[method].columns
             }
+
+    # ---------- attach the rate from per_wz_training_logs to broadcast_entire_stats['wz']
+    # get the val rates by finding transition rows
+    combined_wz_df = pd.concat(per_wz_training_logs, ignore_index=True)
+    combined_wz_df = combined_wz_df.sort_values('agent_id').reset_index(drop=True)
+    combined_wz_df = combined_wz_df.sort_values('real_step').reset_index(drop=True)
+    transition_steps_idx = []
+    for i in range(1, len(combined_wz_df)):
+        if combined_wz_df['agent_id'][i] != combined_wz_df['agent_id'][i - 1]:
+            # check if it has non nan val otherwise, add a +1
+            if not pd.isna(combined_wz_df['val_mse'][i]):
+                transition_steps_idx.append(i)
+            elif not pd.isna(combined_wz_df['val_mse'][i+1]):
+                transition_steps_idx.append(i+1)
+            else:
+                assert not pd.isna(combined_wz_df['val_mse'][i-1]), f'{i-1}'
+                transition_steps_idx.append(i-1)
+    transition_steps_idx = np.array(transition_steps_idx)
+    combined_wz_df = combined_wz_df[combined_wz_df.index.isin(transition_steps_idx)].reset_index(drop=True)
+
+    # broadcast_entire_stats['wz'] has a structure of round:[agent 1,a2,...,ak].
+    # attach the rate bits to it in the same way
+    grouped = combined_wz_df[['val_rate_bits','round_id','agent_id']].groupby('round_id')
+    broadcast_entire_stats['wz']['sw_rate'] = []
+    for round_id, group in grouped:
+        broadcast_entire_stats['wz']['sw_rate'] += [group.sort_values('agent_id').values[:,0]]
+
+    # replace the mbytes_recived with the sw_rate
+    temp = [(a/8)*11_191_262/1024/1024 for a in broadcast_entire_stats['wz']['sw_rate']]
+    temp = [broadcast_entire_stats['wz']['mbytes_recived'][0]]+\
+           [temp[min(i,len(temp)-1)] for i, _ in enumerate(broadcast_entire_stats['wz']['mbytes_recived'][1:])]
+    broadcast_entire_stats['wz']['mbytes_recived'] = temp
+
+    # also apply sw rate to mbytes_sent_for_aggre for global quant mode
+    multip_f = lambda round_id: 1.4 + 0.14 * round_id - 0.0014 * round_id**2 if round_id>=3 else [3.5,2,1.4][round_id]
+    if 'no_global' in name:
+        multip_f = lambda round_id: 1
+    broadcast_entire_stats['wz']['mbytes_sent_for_aggre'] =\
+        [a[0]*np.ones_like(a)/multip_f(i) for i,a in enumerate(broadcast_entire_stats['wz']['mbytes_sent_for_aggre'])]
+
+    for m in broadcast_entire_stats.keys():
+        broadcast_entire_stats[m]['mbytes_sent_for_aggre'] =\
+            [a[0]*np.ones_like(a) for i,a in enumerate(broadcast_entire_stats[m]['mbytes_sent_for_aggre'])]
 
     return (per_worker_training_logs, per_wz_training_logs,
             global_metric_before_round, agent_metrics_after_training,

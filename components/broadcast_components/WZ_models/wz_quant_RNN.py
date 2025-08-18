@@ -62,7 +62,8 @@ class PL_EncoderDecoder_ANN(pl.LightningModule):
         self.log(f'{name_prefix}_mape%', recons_loss, prog_bar=True)
 
         self.log(f'{name_prefix}_mse', F.mse_loss(inp_rec, inp), prog_bar=True)
-        self.log(f'{name_prefix}_rate_bits', torch.mean(-torch.log2(p_u + 1e-12)), prog_bar=True)
+        temp = [torch.mean(-torch.log2(a + 1e-12)).cpu().numpy() for a in p_u]
+        self.log(f'{name_prefix}_rate_bits', np.sum(temp), prog_bar=True)
 
         practical_p_u, _ = get_real_bin_prob(bin_no_vec, self.bin_count)
         self.log(f'{name_prefix}_real_bit_r', torch.mean(-torch.log2(practical_p_u + 1e-12)), prog_bar=True)
@@ -157,7 +158,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             self.coding_model.forward(single_grad_param, side_info, tau=tau_t)
 
         loss = 0.0
-        pu_vec = torch.ones(len(single_grad_param), dtype=torch.float32, device=single_grad_param.device)
+        pu_vec = [None for i in range(self.num_planes)]
         for i in range(self.num_planes):
             # reconstruction component of the loss
             dist = F.mse_loss(reconstruct[i], single_grad_param)
@@ -167,7 +168,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             # rate component of the loss
             p_ux = soft_codes[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
-            pu_vec*=p_u
+            pu_vec[i]=p_u.detach()
             rate_loss = torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
             rate_weight = lambda x:((x-1) + np.exp(x * np.log(abs(self.tau_rate))))/abs(self.tau_rate)
             rate_weight = rate_weight(training_prog) if self.tau_rate <= 0 else 1-rate_weight(1-training_prog)
@@ -175,7 +176,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         loss = loss / self.num_planes
         f = lambda x: [a.detach() for a in x]
         return [loss, reconstruct[-1].detach(), single_grad_param,
-                    f(bins_no), pu_vec.detach(), f(soft_codes), f(prior_probs)]
+                    f(bins_no), pu_vec, f(soft_codes), f(prior_probs)]
 
     def new_compute_loss(self, batch, batch_idx):
         single_grad_param, side_info = batch
