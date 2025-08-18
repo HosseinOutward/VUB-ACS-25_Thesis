@@ -31,21 +31,50 @@
 \maketitle%
 
 \chapter*{Abstract}
-\input{Chapters/0-Abstract.tex}
+\input{Chapters/0-Abstract}
 
 \tableofcontents%
 
 \mainmatter%
-\part{First part}%
 
-Optionally, you use parts, and those parts contain chapters.
+% Chapter 1: Introduction
+\chapter{Introduction}
+\input{Chapters/chapter_1_intro/1-1_background}
+\input{Chapters/chapter_1_intro/1-2_motivation}
+\input{Chapters/chapter_1_intro/1-3_objectives_contributions}
+\input{Chapters/chapter_1_intro/1-4_outline}
 
-\part{Second Part}%
+% Chapter 2: Related Works
+\chapter{Related Works}
+\input{Chapters/chapter_2_related_works/2-1_autoencoder_gradient_compression}
+\input{Chapters/chapter_2_related_works/2-2_slepian_wolf_coding}
+\input{Chapters/chapter_2_related_works/2-3_learned_quantizers}
+\input{Chapters/chapter_2_related_works/2-4_wyner_ziv_quantizers_gradients}
+\input{Chapters/chapter_2_related_works/2-5_quantization_gradient_compression}
 
-Optionally, you use parts, and those parts contain chapters.
+% Chapter 3: Materials and Methods
+\chapter{Materials and Methods}
+\input{Chapters/chapter_3_materials_methods/3-1_data_model_training_setting}
+\input{Chapters/chapter_3_materials_methods/3-2_correlation_between_workers}
+\input{Chapters/chapter_3_materials_methods/3-3_learned_layered_quantizer}
+\input{Chapters/chapter_3_materials_methods/3-4_wz_binning_behavior}
+\input{Chapters/chapter_3_materials_methods/3-5_pre_post_processing}
+\input{Chapters/chapter_3_materials_methods/3-6_rans_coding}
+\input{Chapters/chapter_3_materials_methods/3-7_hybrid_interval_switching}
+\input{Chapters/chapter_3_materials_methods/3-8_global_gradient_quantization}
+
+% Chapter 4: Results and Discussion
+\chapter{Results and Discussion}
+\input{Chapters/chapter_4_results_discussion/4-1_gains_over_baselines}
+\input{Chapters/chapter_4_results_discussion/4-2_all_out_dsc_settings}
+\input{Chapters/chapter_4_results_discussion/4-3_comparison_other_methods}
+
+% Chapter 5: Conclusion and Future Work
+\chapter{Conclusion and Future Work}
+\input{Chapters/chapter_5_conclusion_future/5-1_conclusions}
+\input{Chapters/chapter_5_conclusion_future/5-2_future_work}
 
 \backmatter%
-\chapter{Conclusion}
 
 % Add bibliography using BibTeX
 \bibliographystyle{plain}
