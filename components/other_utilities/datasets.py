@@ -5,64 +5,63 @@ import weakref
 import numpy as np
 import torch
 from PIL import Image
-from torchvision.datasets import SVHN
+from torchvision.datasets import SVHN, ImageNet
 
 # Global registry to track shared memory objects for cleanup
 _shared_memory_registry = weakref.WeakSet()
 
 
-class FasterSVHN(SVHN):
+class FasterDatasetBase:
+    """Base class for faster dataset implementations with shared memory"""
+
     def __init__(self, *args, limit_count=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self._is_main_process = True  # Track if this is the main process that created shared memory
+        self._is_main_process = True
 
         if not hasattr(self, '_shared_data_name'):
             self._create_shared_data(limit_count)
-            # Register for cleanup
             _shared_memory_registry.add(self)
         else:
-            self._is_main_process = False  # This is a worker process
+            self._is_main_process = False
             self._connect_shared_data()
 
+    def _get_raw_data(self):
+        """Override this method in subclasses to provide raw data"""
+        raise NotImplementedError
+
     def _create_shared_data(self, limit_count):
-        data = self.data
-        labels = self.labels
+        raw_data, raw_labels = self._get_raw_data()
+
         if limit_count:
-            if limit_count>len(data):
-                print('limiting samples to max count of', len(data))
+            if limit_count > len(raw_data):
+                print('limiting samples to max count of', len(raw_data))
             else:
-                rand_idx = np.random.choice(data.shape[0], limit_count, replace=False)
-                data = data[rand_idx]
-                labels = labels[rand_idx]
+                rand_idx = np.random.choice(len(raw_data), limit_count, replace=False)
+                raw_data = [raw_data[i] for i in rand_idx]
+                raw_labels = [raw_labels[i] for i in rand_idx]
 
         processed_data = []
         processed_labels = []
 
-        for i, (img, target) in enumerate(zip(data, labels)):
-            img = Image.fromarray(np.transpose(img, (1, 2, 0)))
-            if self.transform is not None:
-                img = self.transform(img)
-            processed_data.append(img.numpy() if torch.is_tensor(img) else np.array(img))
-
-            target = int(target)
-            if self.target_transform is not None:
-                target = self.target_transform(target)
-            processed_labels.append(target)
+        for img, target in zip(raw_data, raw_labels):
+            processed_img = self._process_image(img)
+            processed_target = self._process_target(target)
+            processed_data.append(processed_img)
+            processed_labels.append(processed_target)
 
         # Convert to numpy arrays
         self.processed_data = np.array(processed_data)
         self.processed_labels = np.array(processed_labels, dtype=int)
 
-        # Create shared memory for data
+        # Create shared memory
         data_size = self.processed_data.nbytes
         label_size = self.processed_labels.nbytes
 
         try:
-            # Create shared memory blocks
             self.shared_data_mem = shared_memory.SharedMemory(
-                create=True, size=data_size, name=f'svhn_data_{id(self)}')
+                create=True, size=data_size, name=f'{self._get_memory_prefix()}_data_{id(self)}')
             self.shared_labels_mem = shared_memory.SharedMemory(
-                create=True, size=label_size, name=f'svhn_labels_{id(self)}')
+                create=True, size=label_size, name=f'{self._get_memory_prefix()}_labels_{id(self)}')
 
             # Copy data to shared memory
             shared_data_array = np.ndarray(
@@ -75,7 +74,7 @@ class FasterSVHN(SVHN):
             shared_data_array[:] = self.processed_data[:]
             shared_labels_array[:] = self.processed_labels[:]
 
-            # Store metadata for workers
+            # Store metadata
             self._shared_data_name = self.shared_data_mem.name
             self._shared_labels_name = self.shared_labels_mem.name
             self._data_shape = self.processed_data.shape
@@ -83,42 +82,51 @@ class FasterSVHN(SVHN):
             self._labels_shape = self.processed_labels.shape
             self._labels_dtype = self.processed_labels.dtype
 
-            # Use shared arrays as our data
             self.data = shared_data_array
             self.labels = shared_labels_array
 
         except Exception as e:
             raise f"Failed to create shared memory: {e}"
 
+    def _process_image(self, img):
+        """Override in subclasses for dataset-specific image processing"""
+        if self.transform is not None:
+            img = self.transform(img)
+        return img.numpy() if torch.is_tensor(img) else np.array(img)
+
+    def _process_target(self, target):
+        """Override in subclasses for dataset-specific target processing"""
+        target = int(target)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return target
+
+    def _get_memory_prefix(self):
+        """Override in subclasses to provide memory name prefix"""
+        raise NotImplementedError
+
+    # Reuse all other methods from FasterSVHN
     def _connect_shared_data(self):
-        """Connect to existing shared memory (for worker processes)"""
         try:
-            # Connect to existing shared memory
             self.shared_data_mem = shared_memory.SharedMemory(name=self._shared_data_name)
             self.shared_labels_mem = shared_memory.SharedMemory(name=self._shared_labels_name)
 
-            # Create numpy arrays backed by shared memory
             self.data = np.ndarray(
                 self._data_shape, dtype=self._data_dtype,
-                buffer=self.shared_data_mem.buf
-            )
+                buffer=self.shared_data_mem.buf)
             self.labels = np.ndarray(
                 self._labels_shape, dtype=self._labels_dtype,
-                buffer=self.shared_labels_mem.buf
-            )
+                buffer=self.shared_labels_mem.buf)
 
         except Exception as e:
             print(f"Failed to connect to shared memory: {e}")
-            # This shouldn't happen in normal operation
             raise
 
     def __getitem__(self, index: int):
         return torch.from_numpy(self.data[index].copy()), self.labels[index]
 
     def __getstate__(self):
-        """Custom pickling to transfer shared memory info to workers"""
         state = self.__dict__.copy()
-        # Include shared memory metadata for workers
         if hasattr(self, '_shared_data_name'):
             state['_shared_data_name'] = self._shared_data_name
             state['_shared_labels_name'] = self._shared_labels_name
@@ -127,7 +135,6 @@ class FasterSVHN(SVHN):
             state['_labels_shape'] = self._labels_shape
             state['_labels_dtype'] = self._labels_dtype
 
-        # Remove large arrays and shared memory objects from pickle
         state.pop('data', None)
         state.pop('labels', None)
         state.pop('processed_data', None)
@@ -138,40 +145,61 @@ class FasterSVHN(SVHN):
         return state
 
     def __setstate__(self, state):
-        """Custom unpickling to reconnect to shared memory"""
         self.__dict__.update(state)
-        self._is_main_process = False  # Worker processes are not main
+        self._is_main_process = False
         if hasattr(self, '_shared_data_name'):
-            # Worker process: connect to shared memory
             self._connect_shared_data()
 
     def __del__(self):
-        """Destructor to clean up shared memory"""
         self.cleanup_shared_memory()
 
     def cleanup_shared_memory(self):
-        """Clean up shared memory (call this when done)"""
         try:
             if hasattr(self, 'shared_data_mem'):
                 self.shared_data_mem.close()
-                # Only unlink (delete) if this is the main process that created it
                 if self._is_main_process:
                     try:
                         self.shared_data_mem.unlink()
                     except FileNotFoundError:
-                        pass  # Already unlinked
+                        pass
 
             if hasattr(self, 'shared_labels_mem'):
                 self.shared_labels_mem.close()
-                # Only unlink (delete) if this is the main process that created it
                 if self._is_main_process:
                     try:
                         self.shared_labels_mem.unlink()
                     except FileNotFoundError:
-                        pass  # Already unlinked
-
+                        pass
         except Exception:
-            pass  # Ignore cleanup errors
+            pass
+
+
+class FasterSVHN(FasterDatasetBase, SVHN):
+    def _get_raw_data(self):
+        return self.data, self.labels
+
+    def _process_image(self, img):
+        img = Image.fromarray(np.transpose(img, (1, 2, 0)))
+        return super()._process_image(img)
+
+    def _get_memory_prefix(self):
+        return 'svhn'
+
+
+class FasterImageNet(FasterDatasetBase, ImageNet):
+    def _get_raw_data(self):
+        samples = self.samples
+        images = [s[0] for s in samples]
+        labels = [s[1] for s in samples]
+        return images, labels
+
+    def _process_image(self, img_path):
+        with open(img_path, 'rb') as f:
+            img = Image.open(f).convert('RGB')
+        return super()._process_image(img)
+
+    def _get_memory_prefix(self):
+        return 'imagenet'
 
 
 def _cleanup_all_shared_memory():
