@@ -1,4 +1,6 @@
 import numpy as np
+from torchvision.datasets import ImageNet
+
 proto_choices = ['no_proto', # 0
                  'all_out', 'balanced_hybrid', # 1 2
                  'hybrid', 'no_proto_only_global', # 3 4
@@ -49,25 +51,22 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", "`Trainer.fit` stopped: ")
 
     #%%
-    data_folder = r'data'
     data_folder = r'../../data'
+    imagenet_transforms = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        ),
+    ])
     dataset = [
-        FasterSVHN(
-
-
-            # limit_count = 10,
-
-
-            root=data_folder+'/SVHN', split=s,
-            transform=transforms.Compose([
-                transforms.Resize(32),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=[0.4377, 0.4438, 0.4728],
-                    std=[0.1980, 0.2010, 0.1970]
-                ),
-            ])
-        ) for s in ['train', 'test']]
+        ImageNet(
+            root=data_folder + '/ImageNet', split=s,
+            transform=imagenet_transforms
+        ) for s in ['train', 'val']
+    ]
 
     #%%
     def f(proto_name):
@@ -122,8 +121,8 @@ if __name__ == "__main__":
 
         # *****************
 
-        model = ResNetPLModel(num_classes=10, resnet_version='resnet18', lr=0.005,)
-        model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
+        model = ResNetPLModel(num_classes=10, resnet_version='resnet50', lr=0.005,)
+        model.load_state_dict(torch.load(f'{data_folder}/resnet50_svhn.pth', map_location='cpu'))
 
         # *****************
         sim = FLSimulator(
