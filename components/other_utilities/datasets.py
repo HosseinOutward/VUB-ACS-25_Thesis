@@ -1,11 +1,12 @@
 from multiprocessing import shared_memory
 import atexit
 import weakref
+import os
 
 import numpy as np
 import torch
 from PIL import Image
-from torchvision.datasets import SVHN, ImageNet
+from torchvision.datasets import SVHN, ImageNet, ImageFolder
 
 # Global registry to track shared memory objects for cleanup
 _shared_memory_registry = weakref.WeakSet()
@@ -200,6 +201,29 @@ class FasterImageNet(FasterDatasetBase, ImageNet):
 
     def _get_memory_prefix(self):
         return 'imagenet'
+
+
+class FasterImageNette(FasterDatasetBase, ImageFolder):
+    """ImageNette dataset implementation that doesn't require ILSVRC2012_devkit_t12.tar.gz"""
+
+    def __init__(self, root, split='train', **kwargs):
+        # ImageNette has 'train' and 'val' splits
+        data_path = os.path.join(root, 'imagenette2', split)
+        super().__init__(data_path, **kwargs)
+
+    def _get_raw_data(self):
+        samples = self.samples
+        images = [s[0] for s in samples]
+        labels = [s[1] for s in samples]
+        return images, labels
+
+    def _process_image(self, img_path):
+        with open(img_path, 'rb') as f:
+            img = Image.open(f).convert('RGB')
+        return super()._process_image(img)
+
+    def _get_memory_prefix(self):
+        return 'imagenette'
 
 
 def _cleanup_all_shared_memory():
