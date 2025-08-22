@@ -1,0 +1,15 @@
+% Chapter 3: Materials and Methods
+\section{Learned Layered Quantizer for Model Gradients}
+
+The learned layered quantizer has been discuseed in the realted work section. Here we will discuss the implementation details of the learned layered quantizer and how it is used in our distributed learning setting.
+
+During the length of the training and communication rounds, the scale of the gradient values tend to become smaller as the global model converges. This can cause problems for the quantizer as it may not be able to effectively quantize small values without chaning the reconstruction weight, lambda. To address this, we change the loss fucntion from MSE, which is sensitive to scale, to MSPE (Mean Squared Percentage Error) which is scale invariant. This allows the quantizer to focus on minimizing the relative error rather than the absolute error, making it more robust to changes in scale, assuming the general shape of the distrivution does not change.
+\begin{equation}
+    MSPE = \frac{1}{N} \sum_{i=1}^{N} \left( \frac{y_i - \hat{y}_i}{y_i} \right)^2
+\end{equation}
+where \(y_i\) is the true value, \(\hat{y}_i\) is the reconstructed value, and \(N\) is the number of samples.
+Its important to note that depending on the batch size, the divdor in mspe can be less accurate, so its best to calculate an average over batches during training.
+
+Another issue is that the model tends to not utilize most the avialbe bins. this is because during the initial training epochs, the gumble softmax temperature is high, leading to a more uniform distribution over the quantization bins which is neede for the model to find the optimal bin assignments to reduce the rate loss. however, this tends to mean that during the initial training epochs, the quantizer is more effected by the rate loss than the distortion loss. By having a schadual for the rate loss, we can inccrease the models bin usage. its important that this schadual doesnt start from zero, as this can lead to the model not being able to find a good bin assignment. we found that a 80\% reduction in the rate loss at the start of training works well, then we exponentially reduce the reduction.
+
+
