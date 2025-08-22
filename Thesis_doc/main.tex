@@ -10,6 +10,10 @@
 %\usepackage[natbib,style=apa]{biblatex}
 %\addbibresource{bibliography.bib}
 
+% Ensure sane PDF bookmarks: open chapters/sections directly (no implicit parts)
+\usepackage[hidelinks,bookmarksopen=true,bookmarksopenlevel=2,bookmarksnumbered=true]{hyperref}
+\usepackage{bookmark}
+
 \title{Use of Learned Wyner-Ziv quantizer on Distributed Learning }
 % \pretitle{\flushleft{Graduation thesis submitted in partial fulfilment of the requirements for the degree of de Ingenieurswetenschappen: Computerwetenschappen}}
 % \subtitle{}
@@ -33,7 +37,12 @@
 \chapter*{Abstract}
 \input{Chapters/0-Abstract}
 
+% Add a top-level bookmark for the ToC, then reset hierarchy for main matter
+\pdfbookmark[0]{Table of Contents}{toc}
 \tableofcontents%
+
+% Make chapters the root level of bookmarks (avoids implicit "Part" groupings)
+\bookmarksetup{startatroot}
 
 \mainmatter%
 
@@ -46,9 +55,9 @@
 
 % Chapter 2: Related Works
 \chapter{Related Works}
-\input{Chapters/chapter_2_related_works/2-1_autoencoder_gradient_compression}
+\input{Chapters/chapter_2_related_works/2-1_basic_knowladge}
 \input{Chapters/chapter_2_related_works/2-2_slepian_wolf_coding}
-\input{Chapters/chapter_2_related_works/2-3_learned_quantizers}
+\input{Chapters/chapter_2_related_works/2-3_autoencoder_gradient_compression}
 \input{Chapters/chapter_2_related_works/2-4_wyner_ziv_quantizers_gradients}
 \input{Chapters/chapter_2_related_works/2-5_quantization_gradient_compression}
 
@@ -56,8 +65,8 @@
 \chapter{Materials and Methods}
 \input{Chapters/chapter_3_materials_methods/3-1_data_model_training_setting}
 \input{Chapters/chapter_3_materials_methods/3-2_correlation_between_workers}
-\input{Chapters/chapter_3_materials_methods/3-3_learned_layered_quantizer}
-\input{Chapters/chapter_3_materials_methods/3-4_wz_binning_behavior}
+\input{Chapters/chapter_3_materials_methods/3-4_learned_layered_quantizer}
+\input{Chapters/chapter_3_materials_methods/3-3_wz_binning_behavior}
 \input{Chapters/chapter_3_materials_methods/3-5_pre_post_processing}
 \input{Chapters/chapter_3_materials_methods/3-6_rans_coding}
 \input{Chapters/chapter_3_materials_methods/3-7_hybrid_interval_switching}

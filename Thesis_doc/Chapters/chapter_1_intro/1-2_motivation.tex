@@ -1,4 +1,25 @@
 \section{Motivation}
 
-% • Learned DSC in FL: encoder structure; gradient correlations and distributions
-% • Issues with past attempts
+\subsection{Potentials of Distributed Source Coding in Federated/Distributed Learning}
+    \subsubsection{Correlation between gradients}
+
+\subsection{Learned Wyner-Ziv Quantizer in Federated Learning}
+    \subsubsection{Differences with past DSC implementations in Federated Learning}
+        % Expanding beyond focus on entire model compression and to quantizer
+
+        % Other DSC quantizer methods in Federated Learning
+
+        % Learned DSC Quantizer
+        % Faster than past DSC methods
+
+    \subsubsection{Grounds for using DSC Quantizer in Federated Learning}
+        % correlation between accumulated gradient for single parameters across workers
+        % Distribution shift
+
+
+
+%
+%Communication is the dominant bottleneck in synchronous federated learning. In FedSGD, every round requires each worker to transmit a dense gradient vector whose entries are statistically related across workers and over time. Prior measurements (e.g., mutual information between workers’ gradients) indicate non‑trivial cross‑worker and temporal correlations. Distributed source coding (DSC)—and specifically Wyner–Ziv (WZ) coding with decoder‑only side information—directly targets such correlated sources: workers emit compact symbols, and the server reconstructs them by exploiting side information it already holds.
+%
+%Existing approaches to gradient compression take two broad views. One line compresses the entire model vector (e.g., low‑precision or entropy coding of the concatenated gradient). Another focuses on per‑parameter quantization, ranging from binary/ternary schemes to learned quantizers, with occasional DSC‑like ideas layered in. However, in the approaches which use classical DSC constructions are complex and resource‑intensive. Our approach differs by using a learned WZ quantizer trained on‑the‑fly. This offers two practical advantages: it is computationally lighter than conventional code‑design pipelines, and it is flexible, adapting to the statistics encountered during training.
+
