@@ -108,7 +108,13 @@ def shape_dict_to_vect_slices(dict_shapes):
 
 
 # %%
+recent_outlier_positions = None
 def fix_outlier_in_prior(prior_vect_, outlier_pos):
+    global recent_outlier_positions
+    if outlier_pos is None:
+        outlier_pos = recent_outlier_positions
+    recent_outlier_positions = outlier_pos
+
     temp = np.full(prior_vect_.shape[:-1] + (1,), 0, dtype=prior_vect_.dtype)
     prior_vect = np.concatenate([prior_vect_, temp], axis=-1)
     prior_vect = np.concatenate([prior_vect, prior_vect[:, outlier_pos]], axis=1)
@@ -116,7 +122,12 @@ def fix_outlier_in_prior(prior_vect_, outlier_pos):
     prior_vect[:, outlier_pos]/=1.+0.01
     return prior_vect
 
-
+__debug_rans_check__ = {
+    'given_prob': None,
+    'given_bins': None,
+    'encoded_data': None,
+    'decoded_data': None,
+}
 def _compression_protocol(grad_dict, quantizer):
     grad_dict = change_dtype_recursive(grad_dict, torch.float32)
     grad_flat, shapes_dict = dict_to_array(grad_dict)
@@ -146,11 +157,14 @@ def _compression_protocol(grad_dict, quantizer):
     # **********
     # compress the bins_vector using RANS
     if quantizer.wz_pl_model.coding_model.marginal:
-        prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, [])
+        prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, []).numpy()
     else:
-        prior_vect = quantizer.get_set_training_posterior_cdf()
-    quantizer.training_posterior_cdf = prior_vect.numpy()
-    prior_vect = quantizer.training_posterior_cdf
+        prior_vect = quantizer.get_set_training_posterior_cdf().numpy()
+    quantizer.training_posterior_cdf = prior_vect
+    prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
+
+    __debug_rans_check__['given_prob'] = prior_vect
+    __debug_rans_check__['given_bins'] = bins_vector.numpy()
 
     bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, prior_vect)]
 
@@ -177,7 +191,7 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
 
     # ******
-    (bin_vec_compressed, ), (norm_fact_vec,), (outlier_count, outlier_sign, outlier_max, outlier_positions) = \
+    (bin_vec_compressed, ), (norm_fact_vec,), (outlier_count, outlier_sign, outlier_max) = \
         decompress_data_list(compressed_data)
     norm_fact_vec, outlier_max = \
         change_dtype_recursive([norm_fact_vec, outlier_max], torch.float32)
@@ -188,7 +202,12 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
 
     # ******
     prior_vect = quantizer.training_posterior_cdf
-    bin_data = [rans_batch_decode(bvc, prior_vect[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
+    prior_vect = fix_outlier_in_prior(prior_vect, None)
+    bin_data = [rans_batch_decode(bvc, prior_vect[i], model_size+outlier_count)
+                             for i, bvc in enumerate(bin_vec_compressed)]
+
+    assert np.all(__debug_rans_check__['given_prob'] == prior_vect)
+    assert np.all(__debug_rans_check__['given_bins'] == np.array(bin_data))
 
     # ******
     outlier_positions=[]
