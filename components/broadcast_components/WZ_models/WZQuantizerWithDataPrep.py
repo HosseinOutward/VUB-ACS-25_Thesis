@@ -60,8 +60,10 @@ def _get_vec_slices(shapes_dict):
 #%%
 # todo remove the vec_slices and have it be an arg for the functions as an extra
 class QuantizerWithDataPrep(WZQuantizer):
-    def __init__(self, *args, vec_slices=None, outlier_threshold=1.3, no_outlier_normalization=False, **kwargs):
+    def __init__(self, *args, vec_slices=None, outlier_threshold=1.3,
+                 no_outlier_normalization=False, no_normalization=False, **kwargs):
         super().__init__(*args, **kwargs)
+        self.no_normalization = no_normalization
         self.no_outlier_normalization = no_outlier_normalization
         self.outlier_threshold = outlier_threshold
 
@@ -77,7 +79,10 @@ class QuantizerWithDataPrep(WZQuantizer):
         if normal_param is not None:
             norm_factors, = normal_param
         else:
-            norm_factors = [get_normalization_factor(vector[v_slc]) for v_slc in self.vec_slices]
+            if self.no_normalization:
+                norm_factors = [1 for v_slc in self.vec_slices]
+            else:
+                norm_factors = [get_normalization_factor(vector[v_slc]) for v_slc in self.vec_slices]
             normal_param = (norm_factors, )
 
         assert all([isinstance(a, slice) for a in self.vec_slices])
