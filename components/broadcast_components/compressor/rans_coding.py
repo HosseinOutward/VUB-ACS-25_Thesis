@@ -37,6 +37,7 @@ def rans_batch_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.n
 
     batches = [(data_symbols[i:i+batch_size], probs_per_bin[i:i+batch_size])
                     for i in range(0, len(data_symbols), batch_size)]
+    return [rans_encode(*batch) for batch in batches]
 
     max_cpu_processes = os.cpu_count() - 1
     with Pool(max_cpu_processes) as p:
