@@ -14,6 +14,7 @@ class WZQuantizer:
         from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
         self.val_indices = None
+        self.training_posterior_cdf = None
         self.enable_progress_bar = enable_progress_bar
         self.user_logger = user_logger
 
@@ -38,6 +39,19 @@ class WZQuantizer:
         self.wz_pl_model.to('cpu')
         torch.cuda.empty_cache()
         return all_res
+
+    def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
+        if self.wz_pl_model.coding_model.marginal:
+            self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0]
+            return self.training_posterior_cdf
+
+        if grad_vector is None or side_info_data_list is None:
+            assert grad_vector is None and side_info_data_list is None
+            assert self.training_posterior_cdf is not None
+        else:
+            self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0]
+
+        return self.training_posterior_cdf
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
         if type(grad_vector) != torch.Tensor:
@@ -111,13 +125,14 @@ class WZQuantizer:
         return res
 
     # todo have multiple input data and train on all of them in one run (change sampler)
-    def train_model(self, input_data, side_info_data_list: List, epoch=10, batch_size=50_000, device=[0]):
+    def train_model(self, input_data_, side_info_data_list_: List, epoch=10, batch_size=50_000, device=[0]):
         # return
 
-        assert len(side_info_data_list) == self.count_side_info_data
+        assert len(side_info_data_list_) == self.count_side_info_data
+        side_info_data_list = side_info_data_list_
         if self.count_side_info_data == 0:
-            side_info_data_list = [np.zeros(len(input_data))]
-        input_data = torch.tensor(input_data).unsqueeze(1).to(torch.float32)
+            side_info_data_list = [np.zeros(len(input_data_))]
+        input_data = torch.tensor(input_data_).unsqueeze(1).to(torch.float32)
         side_info_data_list = torch.tensor(np.array(side_info_data_list)).T.to(torch.float32)
 
         train_dataset = torch.utils.data.TensorDataset(input_data, side_info_data_list)
@@ -184,6 +199,8 @@ class WZQuantizer:
             logger=logger,
         )
         trainer.fit(self.wz_pl_model, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+
+        _ = self.get_set_training_posterior_cdf(input_data_, side_info_data_list_)
 
         # Safer cleanup approach that doesn't interfere with PyTorch Lightning's teardown
         try:

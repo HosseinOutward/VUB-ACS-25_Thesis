@@ -108,6 +108,15 @@ def shape_dict_to_vect_slices(dict_shapes):
 
 
 # %%
+def fix_outlier_in_prior(prior_vect_, outlier_pos):
+    temp = np.full(prior_vect_.shape[:-1] + (1,), 0, dtype=prior_vect_.dtype)
+    prior_vect = np.concatenate([prior_vect_, temp], axis=-1)
+    prior_vect = np.concatenate([prior_vect, prior_vect[:, outlier_pos]], axis=1)
+    prior_vect[:,outlier_pos,-1] = 0.01
+    prior_vect[:, outlier_pos]/=1.+0.01
+    return prior_vect
+
+
 def _compression_protocol(grad_dict, quantizer):
     grad_dict = change_dtype_recursive(grad_dict, torch.float32)
     grad_flat, shapes_dict = dict_to_array(grad_dict)
@@ -136,10 +145,14 @@ def _compression_protocol(grad_dict, quantizer):
 
     # **********
     # compress the bins_vector using RANS
-    prob_per_bin = [get_real_bin_prob(b, bin_count + 1)[1].numpy() for b in bins_vector]
-    prob_per_bin = change_dtype_recursive(prob_per_bin, torch.float16)
-    temp = change_dtype_recursive(prob_per_bin, torch.float32)
-    bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, temp)]
+    if quantizer.wz_pl_model.coding_model.marginal:
+        prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, [])
+    else:
+        prior_vect = quantizer.get_set_training_posterior_cdf()
+    quantizer.training_posterior_cdf = prior_vect.numpy()
+    prior_vect = quantizer.training_posterior_cdf
+
+    bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, prior_vect)]
 
     # **********
     norm_fact_vec, outlier_max = change_dtype_recursive([norm_fact_vec, outlier_max], torch.float16)
@@ -151,7 +164,7 @@ def _compression_protocol(grad_dict, quantizer):
     outlier_sign = np.packbits((outlier_sign > 0), bitorder='big') if outlier_count>0 else None
 
     # **********
-    bin_rans_data = (bin_vec_compressed, prob_per_bin)
+    bin_rans_data = (bin_vec_compressed, )
     normal_param = (norm_fact_vec,)
     outlier_param = (outlier_count, outlier_sign, outlier_max)
     return (
@@ -164,18 +177,18 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     model_size = np.sum([int(np.prod(shape)) for shape in global_model_dims.values()])
 
     # ******
-    (bin_vec_compressed, prob_per_bin), (norm_fact_vec,), (outlier_count, outlier_sign, outlier_max) = \
+    (bin_vec_compressed, ), (norm_fact_vec,), (outlier_count, outlier_sign, outlier_max, outlier_positions) = \
         decompress_data_list(compressed_data)
-    prob_per_bin, norm_fact_vec, outlier_max = \
-        change_dtype_recursive([prob_per_bin, norm_fact_vec, outlier_max], torch.float32)
+    norm_fact_vec, outlier_max = \
+        change_dtype_recursive([norm_fact_vec, outlier_max], torch.float32)
     if outlier_count!=0:
         outlier_sign = np.unpackbits(outlier_sign, bitorder='big')[:outlier_count].astype(int) * 2 - 1
     else:
         assert outlier_sign is None
 
     # ******
-    bin_data = [rans_batch_decode(bvc, prob_per_bin[i], model_size + outlier_count)
-                for i, bvc in enumerate(bin_vec_compressed)]
+    prior_vect = quantizer.training_posterior_cdf
+    bin_data = [rans_batch_decode(bvc, prior_vect[i], model_size) for i, bvc in enumerate(bin_vec_compressed)]
 
     # ******
     outlier_positions=[]
@@ -513,5 +526,5 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False)
 if __name__ == "__main__":
     bp_f = lambda worker_count, base_quantizer: (
         WZServerTrainingPerRoundProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=5, rounds=50)
+    _test_main(bp_f, worker_count=2, rounds=50)
 

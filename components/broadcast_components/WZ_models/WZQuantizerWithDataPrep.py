@@ -139,6 +139,7 @@ class QuantizerWithDataPrep(WZQuantizer):
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
+        side_info_data_list = [self._apply_pre_process(a, normal_param, outlier_param)[0] for a in side_info_data_list]
         return super().get_prior_and_softcodes(grad_vector, side_info_data_list, batch_size)
 
     def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
