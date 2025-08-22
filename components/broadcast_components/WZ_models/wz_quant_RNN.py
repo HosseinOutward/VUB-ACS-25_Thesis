@@ -1,6 +1,4 @@
 import pytorch_lightning as pl
-from torch.nn import functional as F
-
 from components.broadcast_components.WZ_models.WZ_quantizer import WZQuantizer, plot_bins
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN, EncoderDecoder
 import torch
@@ -267,10 +265,6 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
 
         bins_list, soft_codes = self.coding_model.encode(x=grad_vector, tau=None, force_softmax=True)
         priors = self.coding_model.get_priors(codes=soft_codes, y=side_info, tau=None)
-
-        for i in range(self.num_planes):
-            soft_codes[i] = soft_codes[i][torch.arange(len(bins_list[i])), bins_list[i]]
-            priors[i] = priors[i][torch.arange(len(bins_list[i])), bins_list[i]]
 
         return torch.stack(priors), torch.stack(soft_codes)
 

@@ -2,13 +2,15 @@ import numpy as np
 import rans.rANSCoder as rans
 import numba.typed
 
-batch_size=50_000
+batch_size=1_000_000
 
 
 def rans_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.ndarray:
+    assert len(data_symbols)==len(probs_per_bin), "data_symbols and probs_per_bin must have the same length"
+
     encoder = rans.Encoder()
-    for s in data_symbols:
-        encoder.encode_symbol(probs_per_bin, s)
+    for s, probs in zip(data_symbols, probs_per_bin):
+        encoder.encode_symbol(probs, s)
     res = encoder.get_encoded()
     return np.array(res, dtype=eval(f'np.{res._dtype}'))
 
@@ -19,24 +21,26 @@ def rans_decode(encoded_state, freqs:np.ndarray, length_decoded:int):
     assert str(encoded_state._dtype)=='uint32'
 
     decoder = rans.Decoder(encoded_state.copy())
-    decoded_data = []
-    for _ in range(length_decoded):
-        decoded_data.append(decoder.decode_symbol(freqs.copy()))
-    return np.array(decoded_data[::-1])
+
+    freqs=freqs.copy()
+    decoded_data = [None] * length_decoded
+    for i in range(length_decoded - 1, -1, -1):
+        decoded_data[i] = decoder.decode_symbol(freqs[i])
+    return np.array(decoded_data)
 
 
 def rans_batch_encode(data_symbols:np.ndarray, probs_per_bin:np.ndarray) -> np.ndarray:
     # return data_symbols
 
     from multiprocessing import Pool
-    from functools import partial
     import os
 
-    batches = [data_symbols[i:i+batch_size] for i in range(0, len(data_symbols), batch_size)]
+    batches = [(data_symbols[i:i+batch_size], probs_per_bin[i:i+batch_size])
+                    for i in range(0, len(data_symbols), batch_size)]
 
     max_cpu_processes = os.cpu_count() - 1
     with Pool(max_cpu_processes) as p:
-        encoded_batches = p.map(partial(rans_encode, probs_per_bin=probs_per_bin), batches)
+        encoded_batches = p.starmap(rans_encode, batches)
     return encoded_batches
 
 
@@ -54,7 +58,9 @@ def rans_batch_decode(encoded_state, freqs:np.ndarray, length_decoded:int) -> np
     if num_batches > 0:
         batch_sizes.append(last_batch_size)
 
-    args_for_starmap = [(e, freqs, bs) for e, bs in zip(encoded_state, batch_sizes)]
+    freqs_batches = [freqs[i:i+batch_size] for i in range(0, len(freqs), batch_size)]
+
+    args_for_starmap = [(e, freqs_batches[i], bs) for i, (e, bs) in enumerate(zip(encoded_state, batch_sizes))]
 
     max_cpu_processes = os.cpu_count() - 1
     with Pool(max_cpu_processes) as p:
@@ -68,32 +74,61 @@ if __name__ == '__main__':
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import compress_data_list
 
-    data = np.abs(np.random.normal(0,3, size=1_831_000)//1)
+    np.random.seed(0)
+
+    data = np.abs(np.random.normal(0,3, size=2_831_000)//1)
     data = np.clip(data, 0, 10).astype(np.uint8)
     probs = np.array(
             [uq/len(data) for uq in np.unique(data, return_counts=True)[1]]
         ).astype(np.float16).astype(np.float32)
+    probs = np.array([probs]*len(data))
 
-    # Test single encode/decode
-    print('\nTesting single encode/decode...')
-    t0 = time.time()
-    for i in range(0, len(data)+batch_size-1, batch_size):
-        encoded = rans_encode(data[i:i+batch_size], probs)
-        decoded = rans_decode(encoded, probs, len(data[i:i+batch_size]))
-    t1 = time.time()
+    probs += np.random.random(size=probs.shape)
+    probs /= np.sum(probs, axis=1, keepdims=True)
 
-    print("speed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',)
+    # add a row of zeros to individual probs (second dim) to test its effects
+    # probs = np.concatenate([probs, np.zeros((len(probs), 1), dtype=probs.dtype)], axis=1)
 
-    # Test single encode/decode
+    org_byte_size = get_obj_size(compress_data_list(data)) / (1024 * 1024)
+    print(f"\n      org: {org_byte_size:.2f}MB")
+
+    # Test single encode/decode ----------------
     print('\n\n************\ntesting pooling...')
     t0 = time.time()
-    temp=rans_batch_encode(data, probs)
-    decoded = rans_batch_decode(temp, probs, len(data))
+    encoded=rans_batch_encode(data.copy(), probs.copy())
+    decoded = rans_batch_decode(encoded, probs.copy(), len(data))
+    byte_size = get_obj_size(compress_data_list(encoded)) / (1024 * 1024)
     t1 = time.time()
 
-    byte_size = get_obj_size(compress_data_list(temp)) / (1024 * 1024)
-    org_byte_size = get_obj_size(compress_data_list(data)) / (1024 * 1024)
+    print("Decoded Data error:", np.sum(np.abs(data-decoded)),
+          "\nspeed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',
+          f"\nencoded size: {byte_size:.2f}MB (x{org_byte_size/byte_size:.2f})",)
 
-    print("Decoded Data:", np.sum(np.abs(data-decoded)),
-          "speed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',
-          f"encoded size: {byte_size:.2f}MB (org: {org_byte_size:.2f}MB)",)
+
+    # Test single encode/decode ----------------
+    print('\n\n************\nTesting single encode/decode...')
+    t0 = time.time()
+    encoded = rans_encode(data.copy(), probs.copy())
+    decoded = rans_decode(encoded, probs.copy(), len(data))
+    byte_size = get_obj_size(compress_data_list(encoded)) / (1024 * 1024)
+    t1 = time.time()
+
+    print("Decoded Data error:", np.sum(np.abs(data-decoded)),
+          "\nspeed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',
+          f"\nencoded size: {byte_size:.2f}MB (x{org_byte_size/byte_size:.2f})",)
+
+    # Test single encode/decode ----------------
+    print('\n\n************\nTesting batching without parallelization encode/decode...')
+    t0 = time.time()
+    byte_size=0
+    temp=0
+    for i in range(0, len(data)+batch_size-1, batch_size):
+        encoded = rans_encode(data[i:i+batch_size], probs[i:i+batch_size])
+        decoded = rans_decode(encoded, probs[i:i+batch_size], len(data[i:i+batch_size]))
+        byte_size+= get_obj_size(compress_data_list(encoded)) / (1024 * 1024)
+        temp+=np.sum(np.abs(data[i:i+batch_size] - decoded))
+    t1 = time.time()
+
+    print("Decoded Data error:", temp,
+          "\nspeed:", int(len(data) // (t1 - t0)), 'sym/sec', f'({t1 - t0:.2f}s)',
+          f"\nencoded size: {byte_size:.2f}MB (x{org_byte_size/byte_size:.2f})",)
