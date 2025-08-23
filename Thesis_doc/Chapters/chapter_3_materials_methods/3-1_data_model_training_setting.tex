@@ -1,8 +1,8 @@
 % Chapter 3: Materials and Methods
 \section{Data, Model, and Training Setting}
 
-The configuration is SVHN with IID split, trained with resnet18 in a synchronous FL setup with SGD optimizer.
+The main configuration used accross this thesis is the SVHN with IID split, trained with resnet18 in a synchronous FL setup with SGD optimizer.
 
-The grads are accumulated per batch in each workers memory and at the end it will be sent to the server using a compression protocol which is supposed to compress at the worker and reconstruct the data at the server
-
-The reconstructed grads will be given to fedSGD to compute an average grad and applying it to the model as part of the aggregation step. the resulting model is then sent to workers, potentially using the similar protocols.
+The grads are accumulated per batch in each workers memory and at the end it will be sent to the server using one of the developed compression protocols. this protocol will be responsible for pre-processing the grads, compressing them and sending them to the server, and later it will be used by the server to decompress and post-process the reconstructed gradiants.
+The reconstructed grads will be given to fedSGD to compute an average grad and applying it to the model as part of the aggregation step.
+the resulting model is then sent to workers, potentially using the similar protocols.
