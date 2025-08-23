@@ -70,6 +70,12 @@ class WZQuantizer:
 
         prior, soft_codes = zip(*all_priors)
         prior, soft_codes = [torch.cat(a, dim=1) for a in [prior, soft_codes]]
+
+        bins_vector = [torch.argmax(sc, dim=-1) for sc in soft_codes]
+        for i in range(prior.shape[0]):
+            prior[i, np.arange(prior.shape[1]), bins_vector[i]] += 1e-6
+            prior[i] /= prior[i].sum(axis=-1, keepdims=True)
+
         return prior, soft_codes
 
     def encoding_process(self, grad_vector, batch_size=500_000):
