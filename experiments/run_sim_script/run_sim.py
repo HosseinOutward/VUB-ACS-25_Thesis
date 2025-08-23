@@ -63,7 +63,7 @@ if __name__ == "__main__":
         dataset = [
             FasterSVHN(
 
-                limit_count = 10,
+                limit_count = 10000,
 
                 root=data_folder + '/SVHN', split=s,
                 transform=transforms.Compose([
