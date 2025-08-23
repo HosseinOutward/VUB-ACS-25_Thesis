@@ -117,10 +117,20 @@ def fix_outlier_in_prior(prior_vect_, outlier_pos):
 
     temp = np.full(prior_vect_.shape[:-1] + (1,), 0, dtype=prior_vect_.dtype)
     prior_vect = np.concatenate([prior_vect_, temp], axis=-1)
+
     prior_vect = np.concatenate([prior_vect, prior_vect[:, outlier_pos]], axis=1)
-    prior_vect[:,outlier_pos,-1] = 0.01
-    prior_vect[:, outlier_pos]/=1.+0.01
+
+    prior_vect[:,outlier_pos,-1] = 0.05
+    prior_vect[:, outlier_pos]/=1.+0.05
     return prior_vect
+
+
+def fix_zero_probs(prior_vect, bins_vector):
+    for i in range(prior_vect.shape[0]):
+        prior_vect[i, np.arange(prior_vect.shape[1]), bins_vector[i]] += 1e-6
+        prior_vect[i] /= prior_vect[i].sum(axis=-1, keepdims=True)
+    return prior_vect
+
 
 __debug_rans_check__ = {
     'given_prob': None,
@@ -162,6 +172,7 @@ def _compression_protocol(grad_dict, quantizer):
         prior_vect = quantizer.get_set_training_posterior_cdf()
     quantizer.training_posterior_cdf = prior_vect
     prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
+    prior_vect = fix_zero_probs(prior_vect, bins_vector)
 
     __debug_rans_check__['given_prob'] = prior_vect
     __debug_rans_check__['given_bins'] = bins_vector.numpy()
