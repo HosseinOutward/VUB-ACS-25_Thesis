@@ -11,8 +11,11 @@ class MarginalOnly(WZServerTrainingPerRoundProtocol):
     side_info_vec_size = None
     def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
         super()._post_reconstruction_processing(agent_id, worker_count, dict_shape, curr_recons_vector)
-        self.side_info_vec_size = curr_recons_vector.shape[-1]
-        self.past_worker_grad_recons_vec[agent_id][-1]=None
+        if self.side_info_vec_size is None:
+            self.side_info_vec_size = curr_recons_vector.shape[-1]
+
+        if len(self.past_worker_grad_recons_vec[agent_id])>=2:
+            self.past_worker_grad_recons_vec[agent_id][-2]=None
 
     def _get_side_info_for_grad_recons(self, agent_id):
         ans = super()._get_side_info_for_grad_recons(agent_id)
