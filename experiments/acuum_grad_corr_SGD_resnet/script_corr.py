@@ -125,6 +125,7 @@ if __name__ == '__main__':
     # model.load_state_dict(torch.load('data/resnet18_svhn.pth', map_location='cpu'))
 
     # *****************
+    client_epochs_per_round = __epoch_count__
     sim = FLSimulator(
         pl_model=model, num_agents=2, communication_rounds=50, client_epochs_per_round=__epoch_count__,
         batch_size=__batch_size__, dataset_train=dataset[0], dataset_test=dataset[1],

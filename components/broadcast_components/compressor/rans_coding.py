@@ -73,22 +73,23 @@ def rans_batch_decode(encoded_state, freqs:np.ndarray, length_decoded:int) -> np
 if __name__ == '__main__':
     import time
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size
-    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import compress_data_list
+    from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import compress_data_list, \
+    fix_outlier_in_prior
 
     np.random.seed(0)
 
     data = np.abs(np.random.normal(0,3, size=2_831_000)//1)
     data = np.clip(data, 0, 10).astype(np.uint8)
-    probs = np.array(
-            [uq/len(data) for uq in np.unique(data, return_counts=True)[1]]
-        ).astype(np.float16).astype(np.float32)
-    probs = np.array([probs]*len(data))
 
+    probs = np.array(
+        [uq/len(data) for uq in np.unique(data, return_counts=True)[1]]).astype(np.float16).astype(np.float32)
+    probs = np.array([probs]*len(data))
     probs += np.random.random(size=probs.shape)
     probs /= np.sum(probs, axis=1, keepdims=True)
 
-    # add a row of zeros to individual probs (second dim) to test its effects
-    # probs = np.concatenate([probs, np.zeros((len(probs), 1), dtype=probs.dtype)], axis=1)
+    outlier_pos = np.random.choice(np.arange(len(data)), 100000)
+    data = np.concatenate([data, data[outlier_pos]])
+    probs = fix_outlier_in_prior(np.array([probs]), outlier_pos)[0]
 
     org_byte_size = get_obj_size(compress_data_list(data)) / (1024 * 1024)
     print(f"\n      org: {org_byte_size:.2f}MB")
