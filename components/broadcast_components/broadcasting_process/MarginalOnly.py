@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
@@ -7,34 +8,16 @@ from components.broadcast_components.broadcasting_process.ServerTrainingPerRound
 
 
 class MarginalOnly(WZServerTrainingPerRoundProtocol):
+    side_info_vec_size = None
     def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
-        assert agent_id == self.curr_agent_id
+        super()._post_reconstruction_processing(agent_id, worker_count, dict_shape, curr_recons_vector)
+        self.side_info_vec_size = curr_recons_vector.shape[-1]
+        self.past_worker_grad_recons_vec[agent_id][-1]=None
 
-        # **************
-        self.past_worker_grad_recons_vec[agent_id].append([0])
-
-        if len(self.past_worker_grad_recons_vec[agent_id]) > self.si_window_size:
-            self.past_worker_grad_recons_vec[agent_id].pop(0)
-
-        # **************
-        # detect if we are in warmup phase
-        if agent_id + 1 >= worker_count and self.warmup:
-            assert self.curr_round_id == 0
-            self.warmup = False
-
-        # **************
-        # we have at least one complete round, so we train the next WZ_models
-        if not self.warmup:
-            next_agent = (agent_id + 1) % worker_count
-            target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
-            side_info = []
-            quantizer = _train_model(
-                target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
-                vec_slices=_get_vec_slices(dict_shape),
-                user_logger=self.wz_basic_quantizer.user_logger,
-                marginal=True)
-            self.wz_quantizer_list[next_agent] = quantizer
+    def _get_side_info_for_grad_recons(self, agent_id):
+        ans = super()._get_side_info_for_grad_recons(agent_id)
+        ans = [np.zeros(self.side_info_vec_size, dtype=np.float32)]*len(ans)
+        return ans
 
 
 if __name__ == "__main__":
