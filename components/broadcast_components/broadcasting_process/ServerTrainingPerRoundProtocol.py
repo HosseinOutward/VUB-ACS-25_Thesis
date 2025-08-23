@@ -232,7 +232,7 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
 
 
 def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
-                 bins_per_plane, vec_slices, user_logger, reconst_ld=None) -> QuantizerWithDataPrep:
+                 bins_per_plane, vec_slices, user_logger, reconst_ld=None, marginal=False) -> QuantizerWithDataPrep:
     assert len(side_info) != 0
 
     reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
@@ -247,7 +247,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
             inp_dim=1,
             side_info_size=len(side_info),
             num_planes=2,
-            marginal=False,
+            marginal=marginal,
 
             lr=qz.wz_pl_model.lr,
             bins_per_plane=bins_per_plane,
