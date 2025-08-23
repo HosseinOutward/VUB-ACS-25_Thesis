@@ -101,6 +101,7 @@ if __name__ == "__main__":
     def f(proto_name):
         worker_count = 5
         batch_size = 15_000
+        batch_size = 15_000//2
 
         # *****************
         temp = proto_name
