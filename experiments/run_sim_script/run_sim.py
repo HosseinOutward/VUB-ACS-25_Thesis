@@ -57,13 +57,13 @@ if __name__ == "__main__":
 
     # %%
     data_folder = r'data'
-    data_folder = r'../../data'
+    # data_folder = r'../../data'
 
     if args.dataset_name == 'SVHN':
         dataset = [
             FasterSVHN(
 
-                limit_count = 10000,
+                # limit_count = 10000,
 
                 root=data_folder + '/SVHN', split=s,
                 transform=transforms.Compose([
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     def f(proto_name):
         worker_count = 5
         batch_size = 15_000
-        batch_size = 15_000//2
+        # batch_size = 15_000//2
 
         # *****************
         temp = proto_name
@@ -112,7 +112,7 @@ if __name__ == "__main__":
         if args.no_normalization != False:
             temp += '_no_normalization'
 
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')#, name=proto_name)
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=proto_name)
         print('Running protocol {}'.format(temp))
 
         broadcast_prot = None
@@ -181,8 +181,8 @@ if __name__ == "__main__":
 
         # *****************
 
-        model = ResNetPLModel(num_classes=num_classes, resnet_version='resnet50', lr=0.005, )
-        # model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
+        model = ResNetPLModel(num_classes=num_classes, resnet_version='resnet18', lr=0.005, )
+        model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
 
         # *****************
         sim = FLSimulator(
