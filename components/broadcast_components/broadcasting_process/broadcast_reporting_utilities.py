@@ -46,7 +46,12 @@ class BroadcastMetricGatheringUtilities:
     def __getattribute__(self, item):
         if item in ['broadcast_protocol', 'base_stat_dict', 'running_stats',
                     'round_stats', 'entire_stats', 'original_grads',
-                    'current_agent_id', 'user_logger', ]:
+                    'current_agent_id', 'user_logger',
+                    '_reset_running_stats_step_end',
+                    'to_worker_prep_data_for_transfer',
+                    'to_server_prep_data_for_transfer',
+                    'reconstruct_worker_grads',
+                    'model_transfer_to_worker_from_server',]:
             return object.__getattribute__(self, item)
         else:
             protocol = object.__getattribute__(self, 'broadcast_protocol')

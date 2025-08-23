@@ -104,16 +104,16 @@ if __name__ == "__main__":
         # batch_size = 15_000//2
 
         # *****************
-        temp = proto_name
+        complete_name = proto_name
         if args.no_global_quant != False:
-            temp += '_no_global_quant'
+            complete_name += '_no_global_quant'
         if args.no_outlier_handling != False:
-            temp += '_no_outlier_handling'
+            complete_name += '_no_outlier_handling'
         if args.no_normalization != False:
-            temp += '_no_normalization'
+            complete_name += '_no_normalization'
 
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=proto_name)
-        print('Running protocol {}'.format(temp))
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=complete_name)
+        print('Running protocol {}'.format(complete_name))
 
         broadcast_prot = None
         if proto_name != 'no_proto':

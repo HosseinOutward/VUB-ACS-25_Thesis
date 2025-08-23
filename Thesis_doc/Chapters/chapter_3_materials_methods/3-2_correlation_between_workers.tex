@@ -1,9 +1,27 @@
 \section{Assessing the Motivations Relating to Correlation Between Workers}
 
 \subsection{correlation Between Workers}
-Empirical evidence of cross‑worker and temporal correlations in gradients
-A key question is whether the right form of correlation exists for WZ decoding to be effective. Our decoder aims to reconstruct an accumulated gradient for the next update using a short history of past reconstructions (from the same worker and, in the all‑workers variant, from other workers as well). Measuring correlation at the wrong granularity can be misleading: comparing a single per‑batch gradient across workers tends to show weak correlation (small steps on small data subsets), while comparing only one accumulated gradient per round yields too few pairs and mixes signals that are many epochs apart which doesn't tell us how well neighboring rounds are related. We therefore evaluate accumulated gradients within a round—a sliding window over the last  steps—so we obtain many pairs at meaningful temporal distances. Empirically, this reveals consistent cross‑worker similarity at the scale relevant to reconstruction (figure to be added).
+It's already been established that gradients from different workers exhibit significant correlation, as discussed in the section 1.3. But those analyses didn't focus on the correlation between single parameters of the model, and instead looked into either layer-wise oor whole model relationships.
+Since we are making a DSC quantizer, we need to ensure that there is sufficient correlation between the gradients of individual parameters across workers.
 
+calculating this correlation can be difficult due to the low number of pair samples that can be obtained during short period of training; but we need to be careful as measuring correlation at the wrong granularity can be misleading:
+comparing a single per‑batch gradient across workers tends to show weak correlation (small steps on small data subsets), while comparing only one accumulated gradient per round yields too few pairs and mixes signals that are many epochs apart which doesn't tell us how well neighboring rounds are related. This is important since our model uses imidiate previous rounds to reconstruct the next.
+We therefore evaluate accumulated gradients within a sliding window the size of a single round over all steps, so we obtain many pairs at meaningful temporal distances. Empirically, this reveals consistent cross‑worker similarity at the scale relevant to reconstruction.
+
+\figure[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/calc correlationpng}
+    \caption{Correlation between workers' gradients over time, computed using a sliding window approach to capture meaningful temporal relationships.}
+    \label{fig:calc correlation}
+\endfigure
 
 \subsection{Distribution Shift}
-Finally, we account for distribution shift. WZ decoders are sensitive to changes in the distribution of inputs and targets. In our setting, the server learns to reconstruct from past reconstructions, so drift over rounds can compound error. Two design choices address this: (i) per‑layer normalization (e.g., 99th‑percentile scaling) keeps dynamic ranges comparable across layers and rounds; and (ii) a hybrid switching policy that transitions from all‑workers DSC to a worker‑only regime after a fixed number of rounds, once the MSPE begins to rise. Together, these choices preserve the benefits of side information early while maintaining stability later.
+An important consideration is how the distribution of gradients may shift over time, because the quantizer is sensitive to the shape of the distribution. We'll discuss this more in the 4th chapter.
+In our setting, the server learns to reconstruct from past reconstructions, so drift over rounds can compound error. Two design choices address this: (i) per‑layer normalization (e.g., 99th‑percentile scaling) keeps dynamic ranges comparable across layers and rounds; and (ii) a hybrid switching policy that transitions from all‑workers DSC to a worker‑only regime after a fixed number of rounds, once the MSPE begins to rise. Together, these choices preserve the benefits of side information early while maintaining stability later.
+
+\figure[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution shift.png}
+    \caption{Distribution shift over training rounds, illustrating the changes in gradient distributions and the effectiveness of our mitigation strategies.}
+    \label{fig:distribution shift}
+\endfigure
