@@ -23,8 +23,8 @@ def change_dtype_recursive(obj, dtype):
         return [change_dtype_recursive(x, dtype) for x in obj]
     elif isinstance(obj, OrderedDict):
         return OrderedDict({k: change_dtype_recursive(v, dtype) for k, v in obj.items()})
-    elif isinstance(obj, (int, float, complex, np.integer, np.floating, np.complexfloating)):
-        return torch.tensor([], dtype=dtype).numpy().dtype.type(obj)
+    elif isinstance(obj, (int, float, np.integer, np.floating,)):
+        return torch.tensor(obj, dtype=dtype).item()
     elif obj is None:
         return None
     else:

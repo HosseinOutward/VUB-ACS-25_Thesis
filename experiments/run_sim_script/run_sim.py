@@ -111,7 +111,7 @@ if __name__ == "__main__":
         if args.no_normalization != False:
             temp += '_no_normalization'
 
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/')#, name=proto_name)
         print('Running protocol {}'.format(temp))
 
         broadcast_prot = None
@@ -159,10 +159,8 @@ if __name__ == "__main__":
             else:
                 raise ValueError(f'Unknown protocol: {proto_name}')
 
-            broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
-
             if args.no_global_quant != False:
-                broadcast_prot.no_global_quantization = True
+                broadcast_prot_base.no_global_quantization = True
             else:
                 # Add global error correction quantizer if global quantization is not disabled
                 temp = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=1,
@@ -170,13 +168,15 @@ if __name__ == "__main__":
                 temp.load_state_dict(torch.load(f'{data_folder}/basicRNN_global_correction.pt', map_location='cpu'))
                 temp = QuantizerWithDataPrep(temp, train_sample_size=200_000, count_side_info_data=0,
                                              enable_progress_bar=True, vec_slices=None)
-                broadcast_prot.global_wz_basic_quantizer = temp
+                broadcast_prot_base.global_wz_basic_quantizer = temp
 
             if args.no_outlier_handling != False:
                 wz_model.no_outlier_normalization = True
 
             if args.no_normalization != False:
                 wz_model.no_normalization = True
+
+            broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
         # *****************
 
