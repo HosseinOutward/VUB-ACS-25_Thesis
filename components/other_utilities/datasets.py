@@ -52,7 +52,7 @@ class FasterDatasetBase:
 
         # Convert to numpy arrays
         self.processed_data = np.array(processed_data)
-        self.processed_labels = np.array(processed_labels, dtype=int)
+        self.processed_labels = np.array(processed_labels, dtype=np.int64)
 
         # Create shared memory
         data_size = self.processed_data.nbytes
@@ -124,7 +124,7 @@ class FasterDatasetBase:
             raise
 
     def __getitem__(self, index: int):
-        return torch.from_numpy(self.data[index].copy()), self.labels[index]
+        return torch.from_numpy(self.data[index].copy()), torch.tensor(self.labels[index], dtype=torch.long)
 
     def __getstate__(self):
         state = self.__dict__.copy()

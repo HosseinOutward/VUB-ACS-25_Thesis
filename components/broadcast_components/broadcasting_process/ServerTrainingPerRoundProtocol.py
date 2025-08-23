@@ -157,9 +157,9 @@ def _compression_protocol(grad_dict, quantizer):
     # **********
     # compress the bins_vector using RANS
     if quantizer.wz_pl_model.coding_model.marginal:
-        prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, []).numpy()
+        prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, [])
     else:
-        prior_vect = quantizer.get_set_training_posterior_cdf().numpy()
+        prior_vect = quantizer.get_set_training_posterior_cdf()
     quantizer.training_posterior_cdf = prior_vect
     prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
 
@@ -444,7 +444,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False):
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
                                      bins_per_plane=16, lr=1e-3, marginal=True).to(torch.float32)
-    path_to_basic = r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
+    path_to_basic = r'D:\App External Data\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
@@ -524,16 +524,16 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False)
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
 
             # print the mspe
-            grad_avg_v = np.mean(np.concat(
+            grad_avg_v = np.mean(np.concatenate(
                 [grad[k].flatten().cpu() ** 2 for k in grad.keys()]))
             grad_mspe=[(grad[k].cpu() - v.cpu()).flatten() ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
-            grad_mspe = np.mean(np.concat(grad_mspe))
+            grad_mspe = np.mean(np.concatenate(grad_mspe))
 
-            global_avg_v = np.mean(np.concat(
+            global_avg_v = np.mean(np.concatenate(
                 [global_dict[0][k].cpu().flatten() ** 2 for k in global_dict[0].keys()]))
             global_mspe=[
                 (global_dict[0][k].cpu() - v.cpu()).flatten() ** 2/global_avg_v for k, v in recon_model_param.items()]
-            global_mspe = np.mean(np.concat(global_mspe))
+            global_mspe = np.mean(np.concatenate(global_mspe))
             print(f'     > MSPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
 
     # check output size and correctness
