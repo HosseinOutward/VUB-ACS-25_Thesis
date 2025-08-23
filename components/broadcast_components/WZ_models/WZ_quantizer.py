@@ -58,7 +58,11 @@ class WZQuantizer:
             grad_tensor = torch.tensor(grad_vector).to(torch.float32)
         else:
             grad_tensor = grad_vector.to(torch.float32)
-        side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32).T
+
+        side_info_array = torch.tensor(np.array(side_info_data_list), dtype=torch.float32)
+        if self.count_side_info_data != 0:
+            side_info_array = side_info_array.T
+
         total_size = len(grad_tensor)
 
         def func(start_i, end_idx):

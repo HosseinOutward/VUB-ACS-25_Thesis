@@ -365,7 +365,9 @@ class FLSimulator:
             print("")
 
             # Train each agent for the number of epochs
+            print("  - setting local models...\n")
             self._set_local_models(broadcast_prot.model_transfer_to_worker_from_server)
+
             current_round_grad_list = []
             for ag_id, ag in enumerate(self.agents):
                 broadcast_prot.start_round_agent_process(ag_id, round_s)

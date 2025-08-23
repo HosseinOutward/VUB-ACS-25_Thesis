@@ -44,9 +44,11 @@ class BroadcastMetricGatheringUtilities:
         self.user_logger = user_logger
 
     def __getattribute__(self, item):
-        try:
+        if item in ['broadcast_protocol', 'base_stat_dict', 'running_stats',
+                    'round_stats', 'entire_stats', 'original_grads',
+                    'current_agent_id', 'user_logger', ]:
             return object.__getattribute__(self, item)
-        except AttributeError:
+        else:
             protocol = object.__getattribute__(self, 'broadcast_protocol')
             return getattr(protocol, item)
 
