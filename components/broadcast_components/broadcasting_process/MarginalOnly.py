@@ -32,7 +32,8 @@ class MarginalOnly(WZServerTrainingPerRoundProtocol):
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
                 vec_slices=_get_vec_slices(dict_shape),
-                user_logger=self.wz_basic_quantizer.user_logger)
+                user_logger=self.wz_basic_quantizer.user_logger,
+                marginal=True)
             self.wz_quantizer_list[next_agent] = quantizer
 
 
