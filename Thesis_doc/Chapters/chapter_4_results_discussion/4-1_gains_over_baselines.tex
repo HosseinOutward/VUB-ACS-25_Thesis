@@ -6,4 +6,5 @@
 % comparison against worker‑only WZ regime
 
 \subsection{Global Quantization}
-% comparison against shared global quantizer (no side‑information)
+Here we will compress the global model sent by the server using similar quantization methods. This step is not the same kind of DSC, as it relies more on temporal redundancy, compared to how for gradients we relied on other workers gradients as side information. However, it is still a form of distributed source coding, and is worth exploring. Especially considering that it might show us how well the quantizer performs for parameters compression, which could be used for fedAVG, as opposed to gradients compression.
+

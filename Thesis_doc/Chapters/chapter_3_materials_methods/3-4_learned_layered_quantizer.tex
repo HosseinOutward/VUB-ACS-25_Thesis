@@ -1,15 +1,26 @@
 % Chapter 3: Materials and Methods
-\section{Learned Layered Quantizer for Model Gradients}
+\section{Changes to the Learned Layered Quantizer for Model Gradients}
 
-The learned layered quantizer has been discuseed in the realted work section. Here we will discuss the implementation details of the learned layered quantizer and how it is used in our distributed learning setting.
+The learned layered quantizer is discussed in the related work section. Here, we detail our implementation and how it is used in the distributed learning setting.
 
-During the length of the training and communication rounds, the scale of the gradient values tend to become smaller as the global model converges. This can cause problems for the quantizer as it may not be able to effectively quantize small values without chaning the reconstruction weight, lambda. To address this, we change the loss fucntion from MSE, which is sensitive to scale, to MSPE (Mean Squared Percentage Error) which is scale invariant. This allows the quantizer to focus on minimizing the relative error rather than the absolute error, making it more robust to changes in scale, assuming the general shape of the distrivution does not change.
+\subsection{Distortion Loss Normalization}
+Over the course of training and communication rounds, gradient magnitudes decrease as the global model converges. Using a fixed reconstruction weight $\lambda$ with a scale-sensitive distortion (e.g., MSE) can therefore miscalibrate optimization: small gradients become relatively underweighted. As magnitudes contract, a quantizer with effectively fixed bin widths (or slowly adapting boundaries) provides coarse resolution near zero: many coefficients collapse into a few central bins, tail values risk saturation, and the resulting absolute errors remain small enough that the fixed $\lambda$ does not penalize them strongly. In practice this reduces the encoder’s incentive to devote bits to late-round fine structure, so relative error grows; after inverse scaling, these biased reconstructions propagate through FedSGD and can impede convergence. Since the distributional \emph{shape} is approximately stable, we replace MSE with the scale-invariant \emph{Mean Squared Percentage Error} (MSPE). This shifts the objective toward minimizing \emph{relative} error, improving robustness to scale changes.
+
+
 \begin{equation}
-    MSPE = \frac{1}{N} \sum_{i=1}^{N} \left( \frac{y_i - \hat{y}_i}{y_i} \right)^2
+    \mathrm{MSPE}(y,\hat{y}) \;=\; \frac{\|y - \hat{y}\|_2^2}{\frac{1}{N}\sum_{i=1}^N y_i^2}
 \end{equation}
-where \(y_i\) is the true value, \(\hat{y}_i\) is the reconstructed value, and \(N\) is the number of samples.
-Its important to note that depending on the batch size, the divdor in mspe can be less accurate, so its best to calculate an average over batches during training.
 
-Another issue is that the model tends to not utilize most the avialbe bins. this is because during the initial training epochs, the gumble softmax temperature is high, leading to a more uniform distribution over the quantization bins which is neede for the model to find the optimal bin assignments to reduce the rate loss. however, this tends to mean that during the initial training epochs, the quantizer is more effected by the rate loss than the distortion loss. By having a schadual for the rate loss, we can inccrease the models bin usage. its important that this schadual doesnt start from zero, as this can lead to the model not being able to find a good bin assignment. we found that a 80\% reduction in the rate loss at the start of training works well, then we exponentially reduce the reduction.
+Here, $y$ denotes the true values, $\hat{y}$ the reconstructed values, and $N$ the dimensionality. In practice, the denominator can be noisy for small batch sizes; we therefore estimate it as a running average across batches/rounds to stabilize training.
 
+\subsection{Rate Loss Scheduling}
+A recurrent issue is underutilization of the available bins: the model often settles on a small subset even under high reconstruction weight $\lambda$. This persists in non-DSC settings where, intuitively, sufficiently large $\lambda$ should encourage using more bins.
 
+We attribute this to early-training dynamics. At high Gumbel–Softmax temperature, encoder outputs are relatively diffuse, while the learned prior simultaneously adapts to these transient assignments. The rate term can then dominate prematurely, implicitly constraining exploration and reducing effective bin usage.
+
+To mitigate this, we \emph{schedule} the rate-loss weight so that it starts reduced and increases over training. Crucially, it must not start at zero (which can prevent discovering effective bin configurations and harm DSC gains). We found that an initial \textbf{80\% reduction} works well, followed by exponential annealing toward full weight:
+\[
+\alpha(t) \;=\; 1 - (1 - \alpha_0)\,e^{-t/\tau},
+\quad \alpha_0 = 0.2,
+\]
+where $\alpha(t)$ multiplies the rate term at training step/epoch $t$ and $\tau$ controls the annealing speed. This schedule increases bin utilization without sacrificing eventual rate minimization.

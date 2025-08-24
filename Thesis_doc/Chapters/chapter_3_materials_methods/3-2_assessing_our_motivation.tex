@@ -17,11 +17,18 @@ We therefore evaluate accumulated gradients within a sliding window the size of 
 
 \subsection{Distribution Shift}
 An important consideration is how the distribution of gradients may shift over time, because the quantizer is sensitive to the shape of the distribution. We'll discuss this more in the 4th chapter.
-In our setting, the server learns to reconstruct from past reconstructions, so drift over rounds can compound error. Two design choices address this: (i) per‑layer normalization (e.g., 99th‑percentile scaling) keeps dynamic ranges comparable across layers and rounds; and (ii) a hybrid switching policy that transitions from all‑workers DSC to a worker‑only regime after a fixed number of rounds, once the MSPE begins to rise. Together, these choices preserve the benefits of side information early while maintaining stability later.
+To assess this, we track the distribution of gradients over time using metrics like KL divergence which can be seen in figure \ref{fig:distribution shift kl div}, as well as visualizing the distributions directly as shown in figure \ref{fig:distribution shift}. as we can see, the general shape of the distribution remains relatively stable, with only minor shifts in the beginning of training.
 
 \figure[htbp]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution shift.png}
-    \caption{Distribution shift over training rounds, illustrating the changes in gradient distributions and the effectiveness of our mitigation strategies.}
+    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution change - kl div}
+    \caption{Three different distributions of gradients observed over time, showing very small shifts.}
+    \label{fig:distribution shift kl div}
+\endfigure
+
+\figure[htbp]
+    \centering
+    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution change}
+    \caption{Three different distributions of gradients observed over time, showing very small shifts.}
     \label{fig:distribution shift}
 \endfigure
