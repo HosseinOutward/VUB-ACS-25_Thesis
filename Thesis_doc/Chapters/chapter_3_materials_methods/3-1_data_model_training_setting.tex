@@ -1,8 +1,5 @@
-% Chapter 3: Materials and Methods
 \section{Data, Model, and Training Setting}
 
-The main configuration used accross this thesis is the SVHN with IID split, trained with resnet18 in a synchronous FL setup with SGD optimizer.
+The primary experimental configuration uses the SVHN dataset with an IID split across workers, training a ResNet-18 model in a synchronous federated learning (FL) setup with the SGD optimizer.
 
-The grads are accumulated per batch in each workers memory and at the end it will be sent to the server using one of the developed compression protocols. this protocol will be responsible for pre-processing the grads, compressing them and sending them to the server, and later it will be used by the server to decompress and post-process the reconstructed gradiants.
-The reconstructed grads will be given to fedSGD to compute an average grad and applying it to the model as part of the aggregation step.
-the resulting model is then sent to workers, potentially using the similar protocols.
+Each worker accumulates per-batch gradients in local memory and, at the end of the round, transmits them to the server via one of the developed compression protocols. Each protocol performs gradient pre-processing, compression, and transmission; on the server, the corresponding decoder handles decompression and post-processing to obtain the reconstructed gradients. FedSGD then averages the reconstructed gradients and applies the resulting update to the global model during aggregation. The updated model is subsequently broadcast to the workers, potentially using the same or analogous protocols.

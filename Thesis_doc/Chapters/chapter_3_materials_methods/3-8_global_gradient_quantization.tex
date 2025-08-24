@@ -1,4 +1,8 @@
 \section{Global Gradient Quantization}
+In this section we explore using the quantizer on the model weights instead of the gradients. While this could be useful for situations we want to use FedAVG, we instead use it as a way to reduce the communication cost of sending the model to the workers at the start of each round of training.
+For this purpose, we use the same quantizer as before, and use a similar protocol to the \'Worker-side\' protocol. this is because we can only use temporal correlation of the model weights, and not much more. if the protocol for sending the gradients was also \'worker-side\', both sides would have the same side info about the gradients, so one could also use the shared side-information from the gradient compression, but we believe thats too unrelated, espcially with higher number of workers involved.
+The train quantizer also starts with 21 bins per stage (excluding the warmup), and then reduces the number of bins to 6 with 2 stages.
 
-% • Baseline shared quantizer over the concatenated gradient
-% • Comparison to worker‑only and DSC variants
+Initially we just used the same protocol without any modifications, and found that the distortions caused in the model weights tend to cause slower convergence. so we decided to add a secondry step. We trained a non-DSC quantizer with only one stage and 4 bins to fix the coarse quantization errors. The reason we used a non-DSC quantizer is that the errors are not correlated with any accessible side-information.
+
+The figure \ref{fig:model_quantization} shows the effect of different bit rates for sending.
