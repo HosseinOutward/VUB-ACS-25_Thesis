@@ -74,10 +74,157 @@ Mutual information has numerous applications, such as feature selection in machi
 
 % *******************************************************
 
-\subsubsection{Distributed Source coding}
+\subsection{Distributed Source coding}
+Distributed source coding (DSC) addresses the problem of compressing correlated data sources that are physically separated and cannot communicate during encoding, yet require joint decoding to exploit their correlations. This is particularly relevant in applications like sensor networks, distributed learning, and multimedia streaming, where data is generated at multiple nodes and must be efficiently transmitted to a central decoder. This primer provides a detailed overview of DSC, focusing on its theoretical foundations, key theorems (Slepian-Wolf and Wyner-Ziv), practical implementations, and the role of learned methods in modern DSC, especially in the context of distributed learning.
+
+\subsubsection{Foundations of Distributed Source Coding}
+
+DSC arises when multiple correlated sources, say $X$ and $Y$, are encoded independently but decoded jointly. Unlike traditional source coding, where a single encoder has access to all data, DSC assumes that each source is compressed at a separate encoder without knowledge of the other sources' data. The challenge is to achieve compression rates close to the joint entropy of the sources, leveraging their statistical dependencies at the decoder.
+
+Formally, consider two correlated discrete random variables $X$ and $Y$ with joint probability mass function $p(x,y)$. In traditional joint encoding, the minimum rate to compress both sources losslessly is the joint entropy $H(X,Y)$.
+DSC seeks to approach this rate despite separate encoding. The key insight is that correlation between sources can be exploited at the decoder, allowing compression rates below the individual entropies $H(X)$ and $H(Y)$ when $X$ and $Y$ are dependent.
+
+For lossy compression, the goal is to minimize the rate while allowing a certain distortion $D$ in reconstructing the sources, measured by a distortion function $d(x,\hat{x})$ (e.g., mean squared error for continuous sources). DSC theorems provide the theoretical limits for both lossless and lossy cases, as discussed below.
+
+\subsubsection{Slepian-Wolf Theorem}
+
+The Slepian-Wolf theorem, established by David Slepian and Jack Wolf in 1973 \cite{SlepianWolf1973}, addresses lossless compression of two or more correlated discrete sources. For two sources $X$ and $Y$, the theorem defines the achievable rate region for separate encoding with joint decoding, ensuring perfect reconstruction. The rate region is:
+\begin{equation}
+    R_X \geq H(X|Y), \quad R_Y \geq H(Y|X), \quad R_X + R_Y \geq H(X,Y),
+\end{equation}
+This region forms a polyhedron in the rate plane, with the sum rate $R_X + R_Y \geq H(X,Y)$ matching the rate required for joint encoding.
+
+The theorem's significance lies in its counterintuitive result: separate encoding can achieve the same total rate as joint encoding, provided the decoder exploits the correlation. For example, if $X$ and $Y$ are highly correlated (low $H(X|Y)$), $X$ can be compressed at a rate much lower than $H(X)$, with $Y$ serving as side information at the decoder.
+
+Practical implementations of Slepian-Wolf coding often borrow from channel coding techniques. One common approach is \emph{syndrome-based coding}, where the encoder for $X$ sends a syndrome (parity bits) derived from a linear code, such as a low-density parity-check code or turbo code. The decoder uses $Y$ as side information to disambiguate the compressed representation of $X$. For example, if $X$ and $Y$ are binary sources with a small Hamming distance, the encoder for $X$ can send only the parity bits needed to correct errors relative to $Y$, achieving a rate close to $H(X|Y)$.
+
+\subsubsection{Wyner-Ziv Theorem}
+
+The Wyner-Ziv theorem, introduced by Aaron Wyner and Jacob Ziv in 1976 \cite{1055508}, extends DSC to the lossy case, where the goal is to compress a source $X$ with side information $Y$ available only at the decoder, subject to a distortion constraint $D$. The rate-distortion function for Wyner-Ziv coding is:
+\begin{equation}
+    R_{WZ}(D) = \min_{p(u|x), f(\cdot)} I(X;U|Y),
+\end{equation}
+where $U$ is an auxiliary random variable satisfying the Markov chain $Y - X - U$, and the minimization is over conditional distributions $p(u|x)$ and reconstruction functions $f(U,Y)$ such that the expected distortion $\mathbb{E}[d(X, f(U,Y))] \leq D$.
+
+In the special case of Gaussian sources and mean-squared error distortion, Wyner-Ziv coding incurs no rate loss compared to the case where $Y$ is available at both encoder and decoder. This is known as the \emph{no-rate-loss property}. For example, if $X = Y + Z$, where $Y$ is Gaussian and $Z$ is independent Gaussian noise, the Wyner-Ziv rate is:
+\begin{equation}
+    R_{WZ}(D) = \frac{1}{2} \log_2 \left( \frac{\sigma_X^2}{\sigma_Z^2 + D} \right),
+\end{equation}
+matching the rate for joint encoding with $Y$ available at the encoder.
+
+Practical Wyner-Ziv coders typically combine quantization with Slepian-Wolf coding. The encoder quantizes $X$ to a discrete representation $U$ and applies Slepian-Wolf coding to compress $U$ using $H(U|Y)$ as the target rate. The decoder uses $Y$ to reconstruct $\hat{X} = f(U,Y)$. Techniques like nested lattices, trellis-coded quantization, or scalar quantization with channel codes are used to approach the Wyner-Ziv bound.
+
+\subsubsection{Practical Considerations and Challenges}
+
+Implementing DSC involves several challenges:
+
+\begin{itemize}
+    \item \textbf{Correlation Modeling}: Both Slepian-Wolf and Wyner-Ziv coding require knowledge of the joint distribution $p(X,Y)$ or conditional distributions like $p(X|Y)$. In practice, these are often estimated or assumed (e.g., Gaussian or Laplacian models), which may lead to suboptimal performance if the model is inaccurate.
+    \item \textbf{Decoder Complexity}: Joint decoding can be computationally intensive, especially for high-dimensional data or complex correlations. Iterative decoding algorithms, such as belief propagation for LDPC codes, are often employed to manage complexity.
+    \item \textbf{Asymmetry in Rates}: The Slepian-Wolf rate region allows flexibility in allocating rates between encoders (e.g., high $R_X$ and low $R_Y$ or vice versa), which is useful in applications with heterogeneous bandwidth constraints.
+    \item \textbf{Robustness}: Real-world sources may have time-varying correlations or noise, requiring adaptive coding schemes.
+\end{itemize}
+
+Applications of DSC include wireless sensor networks, where sensors compress correlated measurements; video coding, where frames are treated as correlated sources; and distributed learning, where model updates from multiple nodes are compressed to reduce communication costs.
+
+DSC is highly relevant to distributed learning, where multiple nodes (e.g., edge devices) train a shared model on local data and communicate updates to a central server. The correlation between local datasets or model updates can be exploited using DSC principles. For instance, Wyner-Ziv-inspired learned quantizers can compress gradient updates, treating other nodes' updates as side information at the server. This reduces communication overhead, a critical bottleneck in federated learning, while preserving model performance.
+
+% \subsubsection{Conventional vs. Learned DSC Methods}
+
+% \emph{Conventional DSC methods} rely on analytical models and structured codes:
+
+% \begin{itemize}
+%     \item \textbf{Pros}: Well-understood theoretically; provide provable performance bounds; efficient for simple, well-modeled sources (e.g., Gaussian or binary).
+%     \item \textbf{Cons}: Struggle with complex, high-dimensional, or non-stationary data; require accurate correlation models; design of optimal codes (e.g., nested lattices) is computationally expensive.
+% \end{itemize}
+
+% \emph{Learned DSC methods}, enabled by advances in machine learning, offer a data-driven alternative. These methods use neural networks to learn both the source model and the coding scheme end-to-end, often outperforming conventional methods on real-world data:
+
+% \begin{itemize}
+%     \item \textbf{Slepian-Wolf Coding}: Neural networks can learn to generate compact representations (e.g., hashes or parity bits) that exploit correlations at the decoder. For example, a neural encoder for $X$ might produce a latent code optimized for reconstruction given $Y$, using techniques like variational autoencoders (VAEs) or normalizing flows.
+%     \item \textbf{Wyner-Ziv Coding}: Learned quantizers, such as vector quantizers trained with a rate-distortion loss, replace traditional quantization. The encoder maps $X$ to a latent space, quantizes it, and applies entropy coding conditioned on a predicted $Y$. The decoder uses the actual $Y$ to reconstruct $\hat{X}$. Generative models, like GANs or diffusion models, can learn complex $p(X|Y)$ distributions, improving reconstruction quality.
+%     \item \textbf{Pros}: Adapt to complex, real-world data distributions; end-to-end trainable; excel in high-dimensional settings like images, audio, or model parameters in distributed learning.
+%     \item \textbf{Cons}: Lack theoretical guarantees; require large training datasets; risk overfitting; higher computational cost during inference.
+% \end{itemize}
+
+% In distributed learning, learned Wyner-Ziv quantizers are particularly promising. They can compress model updates or gradients from multiple nodes, leveraging correlations between updates (e.g., due to shared data distributions) to minimize communication while maintaining model accuracy. Techniques like federated learning benefit from such approaches, as they reduce bandwidth usage and enhance privacy by transmitting only compressed representations.
+
+
 
 % *******************************************************
-\subsubsection{Federated Learning}
 
+\subsection{Federated Learning}
+Federated learning (FL) is a distributed machine learning paradigm where a central server will send the model to nodes that have local data, and then aggregates (federate) the gradients which should be sent by said nodes.
+This enables multiple devices or nodes, such as smartphones, IoT devices, or edge servers, to train a shared model while keeping data localized collaboratively. This paradigm addresses privacy, bandwidth, and scalability challenges, compared to traditional centralized machine learning, where data is aggregated at a central server. FL is particularly relevant to applications like mobile keyboard prediction, personalized healthcare, and distributed sensor networks. This primer introduces the core concepts of FL and Cenetalized Learning, its mathematical formulation, challenges, and its connection to DSC, particularly in the context of learned Wyner-Ziv quantizers.
 
+\subsubsection{Foundations of Federated Learning}
 
+In traditional machine learning, a model is trained on a centralized dataset $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i=1}^N$, where $\mathbf{x}_i$ are input features and $y_i$ are labels. The goal is to minimize a loss function $L(\theta; \mathcal{D})$, where $\theta$ represents the model parameters. For example, in supervised learning, this might be:
+\begin{equation}
+    L(\theta; \mathcal{D}) = \frac{1}{N} \sum_{i=1}^N \ell(f(\mathbf{x}_i; \theta), y_i),
+\end{equation}
+where $\ell$ is a per-sample loss (e.g., cross-entropy for classification) and $f(\cdot; \theta)$ is the model.
+
+In FL, the data is distributed across $K$ clients (e.g., devices), each with a local dataset $\mathcal{D}_k = \{(\mathbf{x}_{k,i}, y_{k,i})\}_{i=1}^{N_k}$, where $N_k$ is the number of samples on client $k$. The global objective is to minimize the weighted average of local losses:
+\begin{equation}
+    L(\theta) = \sum_{k=1}^K \frac{N_k}{N} L_k(\theta), \quad L_k(\theta) = \frac{1}{N_k} \sum_{i=1}^{N_k} \ell(f(\mathbf{x}_{k,i}; \theta), y_{k,i}),
+\end{equation}
+where $N = \sum_{k=1}^K N_k$ is the total number of samples. The key constraint is that local datasets $\mathcal{D}_k$ remain on their respective clients, and only model updates (e.g., gradients or parameters) are communicated to a central server for aggregation.
+
+The canonical FL algorithm, \emph{Federated Averaging (FedAvg)}, operates as follows:
+\begin{enumerate}
+    \item The server initializes a global model $\theta^0$.
+    \item At each round $t$:
+        \begin{itemize}
+            \item A subset of clients is selected (randomly or based on availability).
+            \item Each selected client $k$ performs local training (e.g., $E$ epochs of stochastic gradient descent) on $\mathcal{D}_k$ to update its local model $\theta_k^t$.
+            \item Clients send updates (e.g., $\Delta_k^t = \theta_k^t - \theta^{t-1}$ or gradients $\nabla L_k(\theta^{t-1})$) to the server.
+            \item The server aggregates updates, typically via weighted averaging:
+            \[
+            \theta^t = \theta^{t-1} + \sum_{k \in S_t} \frac{N_k}{\sum_{k \in S_t} N_k} \Delta_k^t,
+            \]
+            where $S_t$ is the set of selected clients.
+        \end{itemize}
+    \item The updated global model $\theta^t$ is broadcast to clients for the next round.
+\end{enumerate}
+
+This process iterates until convergence or a predefined number of rounds.
+
+\subsubsection{Challenges in Federated Learning}
+
+FL when used on public nodes introduces several challenges compared to centralized learning:
+
+\begin{itemize}
+    \item \textbf{Non-IID Data}: Local datasets $\mathcal{D}_k$ are often non-independent and identically distributed (non-IID), as data reflects user-specific behaviors (e.g., different typing patterns on smartphones). This leads to local models drifting apart, complicating aggregation and potentially degrading global model performance.
+    \item \textbf{Communication Overhead}: Transmitting model updates (e.g., millions of parameters for deep neural networks) across many clients is bandwidth-intensive, especially for resource-constrained devices or low-bandwidth networks.
+    \item \textbf{Privacy and Security}: While keeping data local enhances privacy, model updates may leak sensitive information (e.g., via gradient inversion attacks). Secure aggregation and differential privacy mechanisms are often employed to mitigate this.
+    \item \textbf{Client Heterogeneity}: Clients vary in computational power, storage, and network reliability. Some may drop out mid-training, requiring robust aggregation methods.
+    \item \textbf{Scalability}: Coordinating thousands or millions of clients while minimizing communication and computation costs is a significant engineering challenge.
+\end{itemize}
+
+\subsubsection{Connection to Distributed Source Coding}
+
+Federated learning intersects with DSC in addressing the communication bottleneck. In FL, model updates (e.g., gradients $\nabla L_k(\theta)$ or parameter differences $\Delta_k^t$) from different clients are often correlated due to similarities in local data distributions or shared model structures. DSC techniques, particularly Slepian-Wolf and Wyner-Ziv coding, can exploit these correlations to compress updates, reducing communication costs.
+
+\textbf{Slepian-Wolf in FL}: For lossless compression of discrete updates (e.g., quantized gradients), Slepian-Wolf coding can compress updates from client $k$ at a rate approaching $H(\Delta_k|\Delta_{-k})$, where $\Delta_{-k}$ represents updates from other clients, treated as side information at the server. This requires modeling correlations between client updates, which may arise from overlapping data features or similar optimization trajectories.
+
+\textbf{Wyner-Ziv in FL}: For lossy compression, Wyner-Ziv coding is particularly relevant. Client $k$ compresses its update $\Delta_k$ to a rate $R_k \geq I(\Delta_k; U_k|\Delta_{-k})$, where $U_k$ is a quantized representation of $\Delta_k$, and the server uses other clients’ updates $\Delta_{-k}$ as side information to reconstruct $\hat{\Delta}_k$ within a distortion $D$ (e.g., measured by the impact on model accuracy). The Wyner-Ziv framework allows efficient compression by leveraging correlations at the decoder (server), even when clients encode independently.
+
+\subsubsection{Learned Wyner-Ziv Quantizers in Federated Learning}
+
+Traditional Wyner-Ziv coders rely on explicit quantization and channel coding, assuming known correlation models (e.g., Gaussian). However, in FL, correlations between client updates are complex and data-dependent, making conventional methods suboptimal. \emph{Learned Wyner-Ziv quantizers}, powered by neural networks, address this by learning both the quantization scheme and the correlation model end-to-end from data.
+
+In this approach:
+\begin{itemize}
+    \item \textbf{Encoder}: A neural network maps the update $\Delta_k$ to a latent representation, which is quantized (e.g., using a learned vector quantizer). The quantization is optimized to minimize rate $I(\Delta_k; U_k|\hat{\Delta}_{-k})$, where $\hat{\Delta}_{-k}$ is a predicted estimate of other clients’ updates, often generated by a neural model trained on prior rounds.
+    \item \textbf{Entropy Coding}: The quantized representation is entropy-coded, conditioned on $\hat{\Delta}_{-k}$, using techniques like arithmetic coding or neural entropy models.
+    \item \textbf{Decoder}: The server uses the actual $\Delta_{-k}$ as side information to reconstruct $\hat{\Delta}_k$, leveraging a neural decoder (e.g., a generative model like a variational autoencoder or diffusion model) to model $p(\Delta_k|\Delta_{-k})$.
+\end{itemize}
+
+The rate-distortion objective for training such a quantizer is:
+\begin{equation}
+    R + \lambda \mathbb{E}[d(\Delta_k, \hat{\Delta}_k)],
+\end{equation}
+where $R$ is the rate (approximated by $I(\Delta_k; U_k|\hat{\Delta}_{-k})$), $d$ is the distortion (e.g., mean squared error or a task-specific loss like model accuracy degradation), and $\lambda$ balances rate and distortion.
+
+In the context of distributed learning, FL is a practical framework where learned Wyner-Ziv quantizers can significantly enhance efficiency. By compressing model updates while exploiting correlations between clients, these quantizers reduce communication overhead, a critical bottleneck in large-scale FL systems. Moreover, they align with privacy goals by minimizing the information transmitted. This section sets the stage for exploring how learned Wyner-Ziv quantizers can be designed and optimized for FL, leveraging advances in both information theory and deep learning to achieve efficient, scalable, and private distributed learning systems.

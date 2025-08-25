@@ -1,51 +1,48 @@
-\section{WZ Binning Behavior on Distributions and their compression gains}
+\section{WZ Binning Behavior on Distributions and Their Compression Gains}
 
-Here we will explore the behavior of the learned layerd WZ quantifier regarding binning of values on various distributions and side information combo.
+We examine the behavior of the learned \emph{layered} Wyner–Ziv (WZ) quantizer with respect to bin assignments under various source distributions and side-information configurations, and discuss the resulting compression gains.
 
-First we will look at one of the most basic configurations, a gaussian source with no side information. In this case, the WZ quantizer should behave like a standard learned quantizer. We can see in Figure \ref{fig:wz_binning_gaussian_no_side_info} that the learned WZ quantizer does indeed behave like a standard quantizer, with bins spacing dependent on the local distribution of values. The quantizer in question has 3 layers, with 16 bins per layer, but only uses a total of 20 combonations of bins. increasing the number of utilized bins tends to be a bit of an issue when working with this model, and a fix was introduced in the next section. The bins cleanly seperated based on the input x, and the reconstruction error increases as you move away from the mean, not median part of the subregions defined by the bins.
-This model is the same that will be used for the initial warmup of our protocols which will be discussed later.
+\paragraph{Gaussian source without side information.}
+As a baseline, consider a Gaussian source with no side information. In this setting, the WZ quantizer should reduce to a standard learned quantizer. Figure~\ref{fig:wz_binning_gaussian_no_side_info} confirms this: bin spacings adapt to the local density of the source. The quantizer has three layers with 16 bins per layer but, in practice, utilizes only 20 \emph{combinations} of bins. Increasing the number of \emph{utilized} combinations is a recurring challenge for this model; a mitigation is introduced in the next section. Bins separate cleanly as a function of the input $x$, and the reconstruction error increases as $x$ moves away from the mean (not the median) of the bin-defined subregions. This same model is used for the initial warm-up phase of our protocols (discussed later).
+
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/binning beh - basic marginal}
-    \caption{quantizer with 3 layers with 16 bins each, trained on gaussian distribution without side information.
-    The top plot shows the bins regions, alongside with the reconstruction error based on the input x. the 3 orange lines show the bin values for each layer.
-    The bottom plot shows the reconstructed value for an assigned bin, if given the side information that would usually be given for a particualr x value.}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/binning beh - basic marginal}
+    \caption{Quantizer with three layers and 16 bins per layer, trained on a Gaussian distribution without side information.
+    \emph{Top}: bin regions and reconstruction error as a function of input $x$; the three orange lines indicate the per-layer bin reconstruction levels.
+    \emph{Bottom}: reconstructed values for assigned bins when conditioned on the side information typically associated with that $x$ (absent in this case).}
     \label{fig:wz_binning_gaussian_no_side_info}
 \end{figure}
 
-
-Next we will look at a gaussian source with side information. The side information is discribed by the below equation:
+\paragraph{Gaussian source with side information.}
+Now consider a Gaussian source with side information
 \begin{equation}
-    Y = X + N
+    Y = X + N,
 \end{equation}
-Where N is a gaussian noise with variance 0.01. In this case, we expect the bins to enlarge, or be reused in more than one region of the input space, as the side information should help disambiguate the reconstruction. We can see in Figure \ref{fig:wz_binning_gaussian_with_side_info} that the bins do indeed enlarge, and are reused in more than one region of the input space.
+where $N \sim \mathcal{N}(0,\,0.01)$. With informative side information, we expect bins to \emph{enlarge} and be \emph{reused} across multiple input regions, since the decoder can disambiguate reconstructions using $Y$. Figure~\ref{fig:wz_binning_gaussian_with_side_info} shows that bins do indeed expand and are reused across disjoint portions of the input domain.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/}
-    \caption{quantizer with 3 layers with 16 bins each, trained on gaussian distribution with side information.
-    The top plot shows the bins regions, alongside with the reconstruction error based on the input x. the 3 orange lines show the bin values for each layer.
-    The bottom plot shows the reconstructed value for an assigned bin, if given the side information that would usually be given for a particualr x value.}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/binning beh - gaussian}
+    \caption{Quantizer with 2 layers and 4 bins per layer, trained on a Gaussian distribution with side information $Y=X+N$, $N\sim\mathcal{N}(0,0.01)$.}
     \label{fig:wz_binning_gaussian_with_side_info}
 \end{figure}
 
-Due to the multi-stage nature of the quantizer, the effects are not easily visible. so we use a rate-distortion plot to show the gains of using side information. The rate-distortion plot in Figure \ref{fig:rate_dist_gaussian_with_side_info} shows the rate of the prior, which is the same as the plot given by \cite{JoukovskyLayeredWZ}.
+Given the multi-stage nature of the quantizer, these effects are more clearly reflected in rate–distortion behavior. Figure~\ref{fig:rate_dist_gaussian_with_side_info} reports the rate–distortion curves with and without side information, where the rate is computed from the learned prior (matching the plot reported by \cite{JoukovskyLayeredWZ}).
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/rd_gaussian}
-    \caption{Rate-distortion plot for gaussian source with and without side information. The rate is calculated using the prior, which is the same as the plot given by \cite{JoukovskyLayeredWZ}.}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/rate - gaussian}
+    \caption{Rate–distortion for a Gaussian source with and without side information. each dot is an independently trained model. Rate is entropy of the prior (more info in section 3.6), reproducing the behavior in \cite{JoukovskyLayeredWZ}.}
     \label{fig:rate_dist_gaussian_with_side_info}
 \end{figure}
 
-lastly, we will show a case where the model seems to fail. in figure \ref{fig:uniform_dis_binning}, we have a uniform source with a side information that similar to above is a noisier version. The noise is a uniform distribituon of size 0.25. Our quantizer is 1 layer, with only 2 bins. we would expect the bins to be equally spaced (except for the ends) and alternate between 1 and 0, but this is not what we see. the reason for this is unclear, but our guess is that the softmax gumble is not enough for the model to explore the sapce of possible bin configurations. another issue might be the fact taht the prior is supposed to guide the model towards a smaller rate, but might not get there in time when the gumble tempreture is higher. This is a problem which we tried to fix, but had limited success with.
+\paragraph{Uniform source with side information: a failure case.}
+Finally, Figure~\ref{fig:uniform_dis_binning} illustrates a case in which the model underperforms. The source is uniform, and the side information is a noisier version of the source (uniform noise with range $0.25$). The quantizer has one layer with only two bins. One would expect near-equal bin spacing (aside from edge effects) with an alternating assignment pattern, but this behavior does not emerge. A plausible explanation is that the Gumbel–Softmax exploration is insufficient to traverse the space of bin configurations; additionally, while the prior term should guide the model toward lower rate, it may not do so quickly when the Gumbel temperature is high. We attempted several remedies, with limited success.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_3_materials_methods/figures/binning beh - uniform with side info}
-    \caption{quantizer with 1 layer with 2 bins, trained on uniform distribution with side information.
-    The top plot shows the bins regions, alongside with the reconstruction error based on the input x. the orange line shows the bin value for the layer.
-    The bottom plot shows the reconstructed value for an assigned bin, if given the side information that would usually be given for a particualr x value.}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/binning beh - uniform}
+    \caption{Quantizer with one layer and two bins, trained on a uniform source with uniform side-information noise (range $0.25$).}
     \label{fig:uniform_dis_binning}
 \end{figure}
-

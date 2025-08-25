@@ -1,6 +1,0 @@
-% Chapter 2: Related Works
-\section{Learned Gradient Compression (LGC) \cite{Abrahamyan2022LGC}}
-Learned Gradient Compression (LGC) \cite{Abrahamyan2022LGC} exploits gradient correlation between workers to cut communication cost. It uses a tiny 1D-conv autoencoder on selected the top-$k$ magnitudes (typically $\sim0.1\%$) gradients, accumulating the rest for error-feedback. They entropy-code the shared indices (e.g., DEFLATE), and run one of two backends:
-in a parameter-server setup a shared “common” code plus an ultra-sparse per-worker “innovation” lets the server reconstruct and average each worker’s gradient
-in ring-allreduce, nodes encode, average in the latent space, then decode once locally. The autoencoder (five 1D conv/deconv layers with leaky-ReLU) is trained after a brief warm-up ($\sim$200–300 iterations) and then applied online
-common practice is to keep the first layer uncompressed and use top-$k$ only on the last layer. This yields large rate reductions at near-baseline accuracy on standard CNN workloads. From a privacy angle, a closely related learned \emph{parameter} compression shows that lossy reconstructions can both reduce communication and substantially weaken gradient-inversion attacks \cite{Chen2024ParamCompression}, suggesting LGC-style schemes may offer communication–privacy benefits in FL.

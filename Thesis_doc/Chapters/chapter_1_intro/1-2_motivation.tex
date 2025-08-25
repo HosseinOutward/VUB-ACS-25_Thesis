@@ -18,25 +18,25 @@ Below we see empirical evidence gathered by other works, showing the link betwee
 
 The figure \ref{fig:correlation - LGCD-DL - MI per layer}, shows the difference between marginal entropy and MI between 2 worker gradients. this discrepancy is the information unique to each worker, which is the part that cannot be compressed using DSC. We can see that this difference is relatively small, indicating a high potential for compression using DSC. it also indicates that the unique component is larger in the first and last layers, which is expected since the first and last layers are more effected by the data batch due to proximity to input and output layers.
 
-\begin{figure}[V]
+\begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_1_intro/figures/correlation 2 - LGCD-DL}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_1_intro/figures/correlation 2 - LGCD-DL}
     \caption{Meanmarginal entropyand the mean MI per layer, averaged over the iterations, for (a) Resnet50 trained on Cifar10 and (b) PSPNet trained on CamVid. (Source: \cite{Abrahamyan2022LGC})}
     \label{fig:correlation - LGCD-DL - MI per layer}
 \end{figure}
 
 The figure \ref{fig:correlation - LGCD-DL - MI through iterations}, shows similar information but through training iterations. We can see that the discrepancy between marginal entropy and MI is relatively small throughout the training, indicating a high potential for compression using DSC for the entire training process. Though this is if we consider MI vs Entropy which is just on way of measuring correlation. If we consider Pearson correlation, we can see in figure \ref{fig:correlation - a low complexity} that the correlation is high at the beginning of training, then decreases as the model gradients start to diverge more due to the local model gradients become more about the local data, which would be interpreted as overfitting to a part of the data.
 
-\begin{figure}[V]
+\begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_1_intro/figures/correlation - LGCD-DL}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_1_intro/figures/correlation - LGCD-DL}
     \caption{MI (solid lines) and themarginal entropy (dotted lines) between gradient tensors of the same layer on the different nodes, through the training iterations, for distributed training of (a) Resnet50 and (b) PSPNet models. (Source: \cite{Abrahamyan2022LGC})}
     \label{fig:correlation - LGCD-DL - MI through iterations}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.7\textwidth]{Chapters/chapter_1_intro/figures/correlation - a low complexity}
+    \includegraphics[width=1\textwidth]{Chapters/chapter_1_intro/figures/correlation - a low complexity}
     \caption{Experimental results of Pearson correlation coefficient of two local gradients over iterations for three datasets where the number of worker nodes is 10 and the local mini-batch size is 20. (Source: \cite{ZhangTao2022})}
     \label{fig:correlation - a low complexity}
 \end{figure}
