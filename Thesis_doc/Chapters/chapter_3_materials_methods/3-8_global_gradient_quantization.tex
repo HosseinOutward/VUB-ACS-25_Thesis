@@ -2,7 +2,14 @@
 In this section we explore using the quantizer on the model weights instead of the gradients. While this could be useful for situations we want to use FedAVG, we instead use it as a way to reduce the communication cost of sending the model to the workers at the start of each round of training.
 For this purpose, we use the same quantizer as before, and use a similar protocol to the \'Worker-side\' protocol. this is because we can only use temporal correlation of the model weights, and not much more. if the protocol for sending the gradients was also \'worker-side\', both sides would have the same side info about the gradients, so one could also use the shared side-information from the gradient compression, but we believe thats too unrelated, espcially with higher number of workers involved.
 The train quantizer also starts with 21 bins per stage (excluding the warmup), and then reduces the number of bins to 6 with 2 stages.
-
 Initially we just used the same protocol without any modifications, and found that the distortions caused in the model weights tend to cause slower convergence. so we decided to add a secondry step. We trained a non-DSC quantizer with only one stage and 4 bins to fix the coarse quantization errors. The reason we used a non-DSC quantizer is that the errors are not correlated with any accessible side-information.
+The resulting model will still be slightly distorted, so we apply those distortions to the model at the server too so that the workers and server have the same model.
+The figure~\ref{fig:model_quantization} shows the effect of different bit rates for sending; While reducing the global model transmission BPP significantly, it seems to cause a huge drop in model convergence. However, if you look closely, you notice that this drop is mostly in the early stages of training, and the model starts to catch up later.
+It's important to consider how badly the model is affected by this quantization and why even with all the precautions, it still has a significant impact.
 
-The figure \ref{fig:model_quantization} shows the effect of different bit rates for sending.
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/global quantization effects}
+    \caption{Effects of quantizing the global model sent by the server to the workers and the BPP used for the said transmission.}
+    \label{fig:model_quantization}
+\end{figure}

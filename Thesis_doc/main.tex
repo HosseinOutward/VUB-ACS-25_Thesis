@@ -19,13 +19,15 @@
 % Ensure sane PDF bookmarks: open chapters/sections directly (no implicit parts)
 \usepackage[hidelinks,bookmarksopen=true,bookmarksopenlevel=2,bookmarksnumbered=true]{hyperref}
 \usepackage{bookmark}
+\usepackage{amsmath}
+\usepackage{amsfonts}
 
 \title{Learned Layered distributed compression of gradients in federated learning}
 % \pretitle{\flushleft{Graduation thesis submitted in partial fulfilment of the requirements for the degree of de Ingenieurswetenschappen: Computerwetenschappen}}
-% \subtitle{}
+\subtitle{An investigation into the practicality of learned Layered Wyner-Ziv quantizer (per-parameter) for gradient compression in federated learning}
 \author{(Seyed) Hossein Mohammadi}
 \date{August 2025}
-\promotors{Promotors: prof.\ dr.\ Nikos Deligiannis \and dr.\ Pourya Behmandpoor \and ir. Brent De Weerdt}
+\promotors{Promotors: Prof.\ Dr.\ Nikos Deligiannis \and Dr.\ Pourya Behmandpoor \and IR. Brent De Weerdt}
 \faculty{Engineering - ETROVUB} % Note: without the word "Faculty"!
 
 \begin{document}
@@ -35,7 +37,7 @@
 % Oftentimes, you need add a second language title.
 \title{Leergebaseerde laaggewijze en gedistribueerde gradiëntcompressie in federated learning}
 % \pretitle{\flushleft{Proefschrift ingediend met het oog op het behalen van de graad van Master of Science in de Ingenieurswetenschappen: Computerwetenschappen}}%
-% \subtitle{mijn ondertitel}
+ \subtitle{Een onderzoek naar de praktische inzetbaarheid van een leergebaseerde, laaggewijze Wyner–Ziv-kwantiseerder die per parameter werkt (per coördinaat) voor gradiëntcompressie in federated learning}
 \date{Augustus 2025}%
 \faculty{Ingenieurswetenschappen}%
 \maketitle%
@@ -61,11 +63,10 @@
 
 % Chapter 2: Related Works
 \chapter{Related Works}
-\input{Chapters/chapter_2_related_works/2-1_basic_knowladge}
-\input{Chapters/chapter_2_related_works/2-2_slepian_wolf_coding}
-\input{Chapters/chapter_2_related_works/2-3_autoencoder_gradient_compression}
-\input{Chapters/chapter_2_related_works/2-4_wyner_ziv_quantizers_gradients}
-\input{Chapters/chapter_2_related_works/2-5_quantization_gradient_compression}
+\input{Chapters/chapter_2_related_works/2-1_sw_a_low_complexity}
+\input{Chapters/chapter_2_related_works/2-2_autoencoder_gradient_compression}
+\input{Chapters/chapter_2_related_works/2-3_wyner_ziv_quantizers_gradients}
+\input{Chapters/chapter_2_related_works/2-4_quantization_gradient_compression}
 
 % Chapter 3: Materials and Methods
 \chapter{Materials and Methods}
@@ -81,8 +82,7 @@
 % Chapter 4: Results and Discussion
 \chapter{Results and Discussion}
 \input{Chapters/chapter_4_results_discussion/4-1_gains_over_baselines}
-\input{Chapters/chapter_4_results_discussion/4-2_all_out_dsc_settings}
-\input{Chapters/chapter_4_results_discussion/4-3_comparison_other_methods}
+\input{Chapters/chapter_4_results_discussion/4-2_comparison_other_methods}
 
 % Chapter 5: Conclusion and Future Work
 \chapter{Conclusion and Future Work}
