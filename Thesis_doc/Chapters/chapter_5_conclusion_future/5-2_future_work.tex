@@ -2,7 +2,18 @@
 \section{Future Work}
 
 \subsection{Improving Learned Quantization Robustness}
-% stabilization, outlier handling, adaptive priors
+As seen in section 3.3, the learned layered quantizer would fail on some of the most simplest distributions, such as a uniform distribution, while quantizing a more complicated gaussian distribution to near the WZ bound. This is an issue that might be a sign of a larger problem and could effect the prior rate, limiting the performance of the entire system. Future work could focus on improving the robustness of the learned quantizer, either by changing the architecture, or by introducing new training methods.
 
-\subsection{Applying WZ to Bit‑Planes of the Entire Model}
-% SW/WZ on quantized bit‑planes across parameters
+\subsection{Applying WZ to the Entire Model}
+In this thesis, we applied the WZ coding per coordinate of the gradient, which is a common approach in gradient compression. However, this method does not take into account the correlations between different coordinates of the gradient. Future work could explore applying WZ coding to the bit-planes resulting from quantization.
+
+\subsubsection{Strong spacial correlation}
+While exploring the use of WZ coding on the entire model, we found out that gradients of weights which are incoming to the same neuron have a strong correlation. This could be used for not only compression of the entire model, but better compression of the per-coordinate gradients by using the same WZ coder plus spacial side information from the other weights, possibly reducing the conditional prior rate.
+
+the figure \ref{fig:weight_correlation} shows the correlation matrix of the weights for 2 layers of a small CNN. The big blue squares are actually many smaller squares, each representing the correlation between their respective weights.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{Chapters/chapter_5_conclusion_future/figure/weight_corr}
+    \caption{Correlation matrix of weights from 2 layers of a small CNN. each pixel is the average of a 10*10 block of weight correlations. The second layer start at around index 6.6k.}
+    \label{fig:weight_correlation}
+\end{figure}

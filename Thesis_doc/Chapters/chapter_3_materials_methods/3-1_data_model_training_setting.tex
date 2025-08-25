@@ -2,4 +2,8 @@
 
 The primary experimental configuration uses the SVHN dataset with an IID split across workers, training a ResNet-18 model in a synchronous federated learning (FL) setup with the SGD optimizer.
 
-Each worker accumulates per-batch gradients in local memory and, at the end of the round, transmits them to the server via one of the developed compression protocols. Each protocol performs gradient pre-processing, compression, and transmission; on the server, the corresponding decoder handles decompression and post-processing to obtain the reconstructed gradients. FedSGD then averages the reconstructed gradients and applies the resulting update to the global model during aggregation. The updated model is subsequently broadcast to the workers, potentially using the same or analogous protocols.
+Each worker accumulates per-batch gradients in local memory and, at the end of each round, transmits them to the server via one of the developed compression protocols. Each protocol performs gradient preprocessing, compression, and transmission; on the server, the corresponding decoder handles decompression and postprocessing to obtain the reconstructed gradients. The server then averages the reconstructed gradients and applies the resulting update to the global model during aggregation. The updated model is subsequently broadcast to the workers, potentially using the same or analogous protocols.
+
+We also start the training with a pre-trained model which has had 2 epochs worth of exposure to the training data. This is done to skip the initial phase of chaotic weight updates which are only true for a tiny fraction of the training process.
+
+Any where mentioning BPP, we refer to bits per parameter \emph{per round}, which is calculated as the total number of bits transmitted divided by the number of model parameters and the number of communication rounds, per worker.
