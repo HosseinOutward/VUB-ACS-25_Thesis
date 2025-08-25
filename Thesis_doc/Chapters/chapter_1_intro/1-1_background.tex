@@ -1,6 +1,6 @@
-\section{Priemer and Background}
+\section{Primer and Background}
 
-We aim at making a per-coordinate (scalar) distributed source coding (DSC) for distributed compression of the gradients used in federated learning (FL). This section provides a brief primer on the relevant information theory concepts, focusing on entropy, mutual information, and distributed source coding theorems. We then overview federated learning, highlighting its communication challenges that motivate our work.
+We aim at developing a per-coordinate (scalar) distributed source coding (DSC) approach for distributed compression of gradients used in federated learning (FL). This section provides a brief primer on the relevant information theory concepts, focusing on entropy, mutual information, and distributed source coding theorems. We then overview federated learning, highlighting its communication challenges that motivate our work.
 
 \subsection{Information Theory Primer}
 % • Entropy coding and basic formulations
@@ -23,11 +23,11 @@ where the logarithm is base-2, yielding entropy in units of bits per symbol. Ent
 \begin{equation}
     h(X) = -\int_{-\infty}^{\infty} f(x) \log_2 f(x) \, dx,
 \end{equation}
-where $f(x)$ is the probability density function. However, because of the continuous nature of the variable, differential entropy can be negative and is not directly comparable to discrete entropy. Furthermore, for two random variables $X$ and $Y$, the \emph{join entropy} $H(X,Y)$ is defined as:
+where $f(x)$ is the probability density function. However, because of the continuous nature of the variable, differential entropy can be negative and is not directly comparable to discrete entropy. Furthermore, for two random variables $X$ and $Y$, the \emph{joint entropy} $H(X,Y)$ is defined as:
 \begin{equation}
     H(X,Y) = -\sum_{x,y} p(x,y) \log_2 p(x,y),
 \end{equation}
-which quantifies the total uncertainty in the pair $(X,Y)$. It satisfies the logical condition $H(X,Y) \geq \max(H(X), H(Y))$, with equality if one variable is a deterministic function of the other. Similarly, \emph{Conditional entropy} $H(X|Y)$ measures the remaining uncertainty in $X$ given knowledge of $Y$:
+which quantifies the total uncertainty in the pair $(X,Y)$. It satisfies the condition $H(X,Y) \leq H(X) + H(Y)$, with equality if $X$ and $Y$ are independent. Similarly, \emph{conditional entropy} $H(X|Y)$ measures the remaining uncertainty in $X$ given knowledge of $Y$:
 \begin{equation}
     H(X|Y) = H(X,Y) - H(Y) = -\sum_{x,y} p(x,y) \log_2 p(x|y) = \sum_y p(y) H(X|Y=y).
 \end{equation}
@@ -49,11 +49,11 @@ For continuous variables, \emph{conditional differential entropy} $h(X|Y)$ is de
     \label{eq:mutualinfo}
 \end{equation}
 
-Equation \ref{eq:mutualinfo} is symmetric ($I(X;Y) = I(Y;X)$) and non-negative ($I(X;Y) \geq 0$), with $I(X;Y) = 0$ if and only if $X$ and $Y$ are independent. The maximum value occurs when one variable is a deterministic function of the other, in which case $I(X;Y) = H(X) = H(Y)$ if they have the same entropy. Mutual information can also be expressed in terms of Kullback-Leibler (KL) divergence, a measure of how one probability distribution differs from another:
+Equation \ref{eq:mutualinfo} is symmetric ($I(X;Y) = I(Y;X)$) and non-negative ($I(X;Y) \geq 0$), with $I(X;Y) = 0$ if and only if $X$ and $Y$ are independent. The maximum value occurs when one variable is a deterministic function of the other, in which case $I(X;Y) = \min(H(X), H(Y))$. Mutual information can also be expressed in terms of Kullback-Leibler (KL) divergence, a measure of how one probability distribution differs from another:
 \begin{equation}
-    I(X;Y) = D_{KL}(p(x,y) || p(x)p(y)),
+    I(X;Y) = D_{KL}(p(x,y) \| p(x)p(y)),
 \end{equation}
-where $D_{KL}(p||q) = \sum p(x) \log_2 (p(x)/q(x))$ for discrete distributions (or integral for continuous). This interpretation views mutual information as the divergence between the joint distribution and the product of marginals, quantifying dependence. For multiple variables, \emph{conditional mutual information} $I(X;Z|Y)$ is defined as:
+where $D_{KL}(p\|q) = \sum_x p(x) \log_2 \frac{p(x)}{q(x)}$ for discrete distributions (or integral for continuous). This interpretation views mutual information as the divergence between the joint distribution and the product of marginals, quantifying dependence. For multiple variables, \emph{conditional mutual information} $I(X;Z|Y)$ is defined as:
 \begin{equation}
     I(X;Z|Y) = H(X|Y) - H(X|Y,Z) = H(X,Y) + H(Y,Z) - H(X,Y,Z) - H(Y),
 \end{equation}
@@ -104,7 +104,7 @@ The Wyner-Ziv theorem, introduced by Aaron Wyner and Jacob Ziv in 1976 \cite{105
 \begin{equation}
     R_{WZ}(D) = \min_{p(u|x), f(\cdot)} I(X;U|Y),
 \end{equation}
-where $U$ is an auxiliary random variable satisfying the Markov chain $Y - X - U$, and the minimization is over conditional distributions $p(u|x)$ and reconstruction functions $f(U,Y)$ such that the expected distortion $\mathbb{E}[d(X, f(U,Y))] \leq D$.
+where $U$ is an auxiliary random variable satisfying the Markov chain $X - U - Y$, and the minimization is over conditional distributions $p(u|x)$ and reconstruction functions $f(U,Y)$ such that the expected distortion $\mathbb{E}[d(X, f(U,Y))] \leq D$.
 
 In the special case of Gaussian sources and mean-squared error distortion, Wyner-Ziv coding incurs no rate loss compared to the case where $Y$ is available at both encoder and decoder. This is known as the \emph{no-rate-loss property}. For example, if $X = Y + Z$, where $Y$ is Gaussian and $Z$ is independent Gaussian noise, the Wyner-Ziv rate is:
 \begin{equation}
@@ -129,33 +129,11 @@ Applications of DSC include wireless sensor networks, where sensors compress cor
 
 DSC is highly relevant to distributed learning, where multiple nodes (e.g., edge devices) train a shared model on local data and communicate updates to a central server. The correlation between local datasets or model updates can be exploited using DSC principles. For instance, Wyner-Ziv-inspired learned quantizers can compress gradient updates, treating other nodes' updates as side information at the server. This reduces communication overhead, a critical bottleneck in federated learning, while preserving model performance.
 
-% \subsubsection{Conventional vs. Learned DSC Methods}
-
-% \emph{Conventional DSC methods} rely on analytical models and structured codes:
-
-% \begin{itemize}
-%     \item \textbf{Pros}: Well-understood theoretically; provide provable performance bounds; efficient for simple, well-modeled sources (e.g., Gaussian or binary).
-%     \item \textbf{Cons}: Struggle with complex, high-dimensional, or non-stationary data; require accurate correlation models; design of optimal codes (e.g., nested lattices) is computationally expensive.
-% \end{itemize}
-
-% \emph{Learned DSC methods}, enabled by advances in machine learning, offer a data-driven alternative. These methods use neural networks to learn both the source model and the coding scheme end-to-end, often outperforming conventional methods on real-world data:
-
-% \begin{itemize}
-%     \item \textbf{Slepian-Wolf Coding}: Neural networks can learn to generate compact representations (e.g., hashes or parity bits) that exploit correlations at the decoder. For example, a neural encoder for $X$ might produce a latent code optimized for reconstruction given $Y$, using techniques like variational autoencoders (VAEs) or normalizing flows.
-%     \item \textbf{Wyner-Ziv Coding}: Learned quantizers, such as vector quantizers trained with a rate-distortion loss, replace traditional quantization. The encoder maps $X$ to a latent space, quantizes it, and applies entropy coding conditioned on a predicted $Y$. The decoder uses the actual $Y$ to reconstruct $\hat{X}$. Generative models, like GANs or diffusion models, can learn complex $p(X|Y)$ distributions, improving reconstruction quality.
-%     \item \textbf{Pros}: Adapt to complex, real-world data distributions; end-to-end trainable; excel in high-dimensional settings like images, audio, or model parameters in distributed learning.
-%     \item \textbf{Cons}: Lack theoretical guarantees; require large training datasets; risk overfitting; higher computational cost during inference.
-% \end{itemize}
-
-% In distributed learning, learned Wyner-Ziv quantizers are particularly promising. They can compress model updates or gradients from multiple nodes, leveraging correlations between updates (e.g., due to shared data distributions) to minimize communication while maintaining model accuracy. Techniques like federated learning benefit from such approaches, as they reduce bandwidth usage and enhance privacy by transmitting only compressed representations.
-
-
-
 % *******************************************************
 
 \subsection{Federated Learning}
-Federated learning (FL) is a distributed machine learning paradigm where a central server will send the model to nodes that have local data, and then aggregates (federate) the gradients which should be sent by said nodes.
-This enables multiple devices or nodes, such as smartphones, IoT devices, or edge servers, to train a shared model while keeping data localized collaboratively. This paradigm addresses privacy, bandwidth, and scalability challenges, compared to traditional centralized machine learning, where data is aggregated at a central server. FL is particularly relevant to applications like mobile keyboard prediction, personalized healthcare, and distributed sensor networks. This primer introduces the core concepts of FL and Cenetalized Learning, its mathematical formulation, challenges, and its connection to DSC, particularly in the context of learned Wyner-Ziv quantizers.
+Federated learning (FL) is a distributed machine learning paradigm where a central server sends the model to nodes that have local data, and then aggregates (federates) the gradients or model updates sent by those nodes.
+This enables multiple devices or nodes, such as smartphones, IoT devices, or edge servers, to collaboratively train a shared model while keeping data localized. This paradigm addresses privacy, bandwidth, and scalability challenges compared to traditional centralized machine learning, where data is aggregated at a central server. FL is particularly relevant to applications like mobile keyboard prediction, personalized healthcare, and distributed sensor networks. This primer introduces the core concepts of FL and centralized learning, its mathematical formulation, challenges, and its connection to DSC, particularly in the context of learned Wyner-Ziv quantizers.
 
 \subsubsection{Foundations of Federated Learning}
 
@@ -192,12 +170,12 @@ This process iterates until convergence or a predefined number of rounds.
 
 \subsubsection{Challenges in Federated Learning}
 
-FL when used on public nodes introduces several challenges compared to centralized learning:
+FL when used on public nodes introduces several challenges compared to centralized learning \cite{McMahan2017FedAvg}:
 
 \begin{itemize}
     \item \textbf{Non-IID Data}: Local datasets $\mathcal{D}_k$ are often non-independent and identically distributed (non-IID), as data reflects user-specific behaviors (e.g., different typing patterns on smartphones). This leads to local models drifting apart, complicating aggregation and potentially degrading global model performance.
-    \item \textbf{Communication Overhead}: Transmitting model updates (e.g., millions of parameters for deep neural networks) across many clients is bandwidth-intensive, especially for resource-constrained devices or low-bandwidth networks.
-    \item \textbf{Privacy and Security}: While keeping data local enhances privacy, model updates may leak sensitive information (e.g., via gradient inversion attacks). Secure aggregation and differential privacy mechanisms are often employed to mitigate this.
+    \item \textbf{Communication Overhead}: Transmitting model updates (e.g., millions of parameters for deep neural networks) across many clients is bandwidth-intensive, especially for resource-constrained devices or low-bandwidth networks. Various gradient compression techniques, including error feedback, quantization, and sparsification methods, have been developed to address this challenge \cite{Jiang2018LinearSpeedup}.
+    \item \textbf{Privacy and Security}: While keeping data local enhances privacy, model updates may leak sensitive information (e.g., via gradient inversion attacks \cite{Zhu2019DeepLeakage}). Secure aggregation and differential privacy mechanisms are often employed to mitigate this.
     \item \textbf{Client Heterogeneity}: Clients vary in computational power, storage, and network reliability. Some may drop out mid-training, requiring robust aggregation methods.
     \item \textbf{Scalability}: Coordinating thousands or millions of clients while minimizing communication and computation costs is a significant engineering challenge.
 \end{itemize}

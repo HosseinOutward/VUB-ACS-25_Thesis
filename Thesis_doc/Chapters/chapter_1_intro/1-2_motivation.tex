@@ -12,25 +12,25 @@ Communication is the dominant bottleneck in federated learning. The data exchang
 It has been repeatedly demonstrated in the literature that gradients communicated by different nodes are strongly correlated.
 This is expected, since these gradients collectively contribute to forming a global model with improved generalization capabilities, so we can assume that they are all generally trending towards the same optimal point.
 Given this correlation, the advantages of applying Distributed Source Coding (DSC) to compress gradients become evident; DSC is specifically designed to exploit dependencies among correlated sources, making it a natural fit for distributed learning scenarios.
-It's important to note that depending on how you group gradients, the correlation could be different which could be exploited in different ways; in our work, we focus on individual parameters, which is why it's called Wyner-Ziv Qauntizer.
+It's important to note that depending on how you group gradients, the correlation structure could be different, which could be exploited in different ways; in our work, we focus on individual parameters, which is why it's called a Wyner-Ziv Quantizer.
 
-Below we see empirical evidence gathered by other works, showing the link between gradients from different workers, and group either by layer or not group (using the entire gradient vector).
+Below we see empirical evidence gathered by other works, showing the correlation between gradients from different workers, grouped either by layer or not grouped (using the entire gradient vector).
 
-The figure \ref{fig:correlation - LGCD-DL - MI per layer}, shows the difference between marginal entropy and MI between 2 worker gradients. this discrepancy is the information unique to each worker, which is the part that cannot be compressed using DSC. We can see that this difference is relatively small, indicating a high potential for compression using DSC. it also indicates that the unique component is larger in the first and last layers, which is expected since the first and last layers are more effected by the data batch due to proximity to input and output layers.
+Figure \ref{fig:correlation - LGCD-DL - MI per layer} shows the difference between marginal entropy and mutual information (MI) between gradients from 2 workers. This discrepancy (marginal entropy minus MI) represents the information unique to each worker, which is the part that cannot be compressed using DSC. We can see that this difference is relatively small, indicating high potential for compression using DSC. The figure also shows that the unique component is larger in the first and last layers, which is expected since these layers are more sensitive to the specific data batch due to their proximity to the input and output.
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_1_intro/figures/correlation 2 - LGCD-DL}
-    \caption{Meanmarginal entropyand the mean MI per layer, averaged over the iterations, for (a) Resnet50 trained on Cifar10 and (b) PSPNet trained on CamVid. (Source: \cite{Abrahamyan2022LGC})}
+    \caption{Mean marginal entropy and the mean MI per layer, averaged over the iterations, for (a) ResNet50 trained on CIFAR-10 and (b) PSPNet trained on CamVid. (Source: \cite{Abrahamyan2022LGC})}
     \label{fig:correlation - LGCD-DL - MI per layer}
 \end{figure}
 
-The figure \ref{fig:correlation - LGCD-DL - MI through iterations}, shows similar information but through training iterations. We can see that the discrepancy between marginal entropy and MI is relatively small throughout the training, indicating a high potential for compression using DSC for the entire training process. Though this is if we consider MI vs Entropy which is just on way of measuring correlation. If we consider Pearson correlation, we can see in figure \ref{fig:correlation - a low complexity} that the correlation is high at the beginning of training, then decreases as the model gradients start to diverge more due to the local model gradients become more about the local data, which would be interpreted as overfitting to a part of the data.
+Figure \ref{fig:correlation - LGCD-DL - MI through iterations} shows similar information but across training iterations. We can see that the discrepancy between marginal entropy and MI remains relatively small throughout training, indicating sustained potential for DSC compression across the entire training process. However, this analysis uses information-theoretic measures (MI vs. entropy). When we examine a different correlation measure, Pearson correlation, we observe a different pattern in Figure \ref{fig:correlation - a low complexity}: the correlation starts high at the beginning of training, then decreases as training progresses. This decline occurs because local gradients become increasingly specialized to their local data distributions, representing a form of client drift that reduces the effectiveness of DSC compression.
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_1_intro/figures/correlation - LGCD-DL}
-    \caption{MI (solid lines) and themarginal entropy (dotted lines) between gradient tensors of the same layer on the different nodes, through the training iterations, for distributed training of (a) Resnet50 and (b) PSPNet models. (Source: \cite{Abrahamyan2022LGC})}
+    \caption{MI (solid lines) and the marginal entropy (dotted lines) between gradient tensors of the same layer on different nodes, across training iterations, for distributed training of (a) ResNet50 and (b) PSPNet models. (Source: \cite{Abrahamyan2022LGC})}
     \label{fig:correlation - LGCD-DL - MI through iterations}
 \end{figure}
 
@@ -43,6 +43,7 @@ The figure \ref{fig:correlation - LGCD-DL - MI through iterations}, shows simila
 
 % *******************************************************
 \subsection{Learned Wyner-Ziv Quantizer in Federated Learning}
-\subsubsection{Differences with past DSC implementations in Federated Learning}
-The existing approaches to gradient compression vary in foucs, from compressing the entire model vector (e.g., low‑precision or entropy coding of the concatenated gradient) to per‑parameter compression, i.e, quantization, ranging from binary/ternary schemes to learned quantizers, with occasional DSC‑like ideas layered in.
-Among the works on quantization leveraging DSC, there as been more foucs on classical DSC constructions, which are complex and resource‑intensive. Our approach differs by using a learned layerd (sucsessive) WZ quantizer trained on‑the‑fly. This offers two practical advantages: it is computationally lighter than conventional code‑design pipelines, and it is flexible, adapting to the statistics encountered during training.
+\subsubsection{Differences with Past DSC Implementations in Federated Learning}
+Existing approaches to gradient compression vary in focus, ranging from compressing the entire model vector (e.g., low-precision quantization or entropy coding of the concatenated gradient) to per-parameter compression through quantization schemes, including binary/ternary quantizers and learned quantizers, with some incorporating DSC-like concepts.
+
+Among works that leverage DSC for quantization, most have focused on classical DSC constructions, which are computationally complex and resource-intensive to design and implement. Our approach differs fundamentally by employing a learned successive Wyner-Ziv quantizer that is trained on-the-fly during the federated learning process. This design choice provides two key practical advantages: (1) it is computationally more efficient than conventional DSC code-design pipelines, eliminating the need for complex syndrome calculations and channel coding, and (2) it adaptively learns the correlation structure from the actual gradient statistics encountered during training, rather than relying on pre-assumed statistical models.

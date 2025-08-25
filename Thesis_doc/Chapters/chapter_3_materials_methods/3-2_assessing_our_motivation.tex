@@ -1,30 +1,30 @@
 \section{Assessing the Motivations Relating to Correlation Between Workers}
 
 \subsection{Correlation Between Workers}
-Prior analyses (Section~1.3) establish that gradients from different workers exhibit substantial correlation, but those results focused on layer-wise or whole-model relationships rather than on per-parameter behavior. Because we employ a DSC quantizer, we must verify that gradients of individual parameters are sufficiently correlated across workers.
+Prior analyses (Section~1.3) establish that gradients from different workers exhibit substantial correlation, but those results focused on layer-wise or whole-model relationships rather than per-parameter behavior. Because we employ a DSC quantizer, we must verify that gradients of individual parameters are sufficiently correlated across workers.
 
-Estimating this correlation is non-trivial over short training horizons due to limited pairwise samples, and using the wrong temporal granularity can be misleading: comparing single per-batch gradients across workers often yields weak correlation (each step reflects a small, noisy update), whereas comparing only one accumulated gradient per round provides too few pairs and mixes signals that are many epochs apart, which is uninformative for our reconstruction objective. Since our model uses the immediate previous rounds to reconstruct the next, we evaluate accumulated gradients within a sliding window equal to one round, swept over all steps. This yields many pairs at meaningful temporal distances. Empirically, we observe consistent cross-worker similarity at the scale relevant to reconstruction.
+Estimating this correlation is non-trivial over short training horizons due to limited pairwise samples, and using the wrong temporal granularity can be misleading: comparing single per-batch gradients across workers often yields weak correlation (each step reflects a small, noisy update), whereas comparing only one accumulated gradient per round provides too few pairs and mixes signals that are many epochs apart, which is uninformative for our reconstruction objective. Since our model uses the immediately previous rounds to reconstruct the next, we evaluate accumulated gradients within a sliding window equal to one round, swept over all steps. This yields many pairs at meaningful temporal distances. Empirically, we observe consistent cross-worker similarity at the scale relevant to reconstruction.
 
-\figure[htbp]
+\begin{figure}[htbp]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/calc correlationpng}
     \caption{Correlation between workers' gradients over time, computed with a one-round sliding window to capture meaningful temporal relationships at the reconstruction scale.}
-    \label{fig:calc correlation}
-\endfigure
+    \label{fig:calc_correlation}
+\end{figure}
 
 \subsection{Distribution Shift}
-An important consideration is the potential shift of gradient distributions over time, because the quantizer is sensitive to distributional shape, as it will be shown in the next section. To assess stability, we track the evolution of gradient distributions using metrics such as KL divergence (Figure~\ref{fig:distribution shift kl div}) and by visual inspection of the distributions themselves (Figure~\ref{fig:distribution shift}). Overall, the distributional shape remains stable.
+An important consideration is the potential shift of gradient distributions over time, because the quantizer is sensitive to distributional shape, as will be shown in the next section. To assess stability, we track the evolution of gradient distributions using metrics such as KL divergence (Figure~\ref{fig:distribution_shift_kl_div}) and by visual inspection of the distributions themselves (Figure~\ref{fig:distribution_shift}). Overall, the distributional shape remains stable.
 
-\figure[htbp]
+\begin{figure}[htbp]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution change - kl div}
     \caption{Temporal evolution of gradient distributions measured via KL divergence, indicating very small shifts over training.}
-    \label{fig:distribution shift kl div}
-\endfigure
+    \label{fig:distribution_shift_kl_div}
+\end{figure}
 
-\figure[htbp]
+\begin{figure}[htbp]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/distribution change}
     \caption{Representative gradient distributions at multiple times, showing stable shape with minor early-training shifts.}
-    \label{fig:distribution shift}
-\endfigure
+    \label{fig:distribution_shift}
+\end{figure}

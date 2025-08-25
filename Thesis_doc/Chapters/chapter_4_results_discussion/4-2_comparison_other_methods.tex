@@ -1,6 +1,11 @@
 % Chapter 4: Results and Discussion
 
 \section{Comparison with Other Methods}
+It is somewhat difficult to compare our method with other methods in the literature, as we only have results for a specific model and dataset, while other methods might have been tested on different models and datasets with different starting conditions. However, we can still make some general observations.
 
-% • QSGD, TernGrad, signSGD+EF, DIANA, etc.
-% • Accuracy vs bits/parameter
+The process proposed by \cite{ZhangTao2022} shows that their closest comparable model, the ResNet-20 trained on SVHN, takes 20 epochs to improve from 61\% to 83\% accuracy and claims to save 47\% in communication costs compared to a non-DSC signSGD method, which appears to use $1.8 \times 10^6$ bits. Considering a parameter count of 270k and 30 rounds and 10 worker, the bits per parameter (BPP) per round would be approximately 0.35 (non-DSC sits at 0.66).
+
+For our configuration, which is similar only with regard to the dataset used, the BPP is 0.9 and we achieve higher accuracy of 91\% in 20 epochs, starting from 60\% accuracy. This is expected as we have a much higher percision (1 sign bit vs n smartly positioned bins).
+If their gradients are anything similar to ours, their MAPE distortion only for the signSGD method would be around 1200\%, much higher than our ~20\% MAPE distortion.
+
+We could not find any other work that uses the SVHN dataset with ResNet-18 and reports on DSC compression rates for direct comparison.

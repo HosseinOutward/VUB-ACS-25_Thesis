@@ -1,10 +1,27 @@
-% Chapter 4: Results and Discussion
-
 \section{Gains over Baselines}
+The table below shows information about the different protocols used in our experiments, including the bit rate, accuracy, convergence speed, and reconstruction error. The hybrid and worker-side protocols achieve the best compression rates while maintaining high accuracy and convergence speed. The all-out protocol achieves a respectable rate distortion, but its not the best. the \ref{tab:protocol_comparison} summarizes the performance of various protocols used in our experiments.
 
-\subsection{Worker‑Side Training ("DSC‑like")}
-% comparison against worker‑only WZ regime
-
-\subsection{Global Quantization}
-Here we will compress the global model sent by the server using similar quantization methods. This step is not the same kind of DSC, as it relies more on temporal redundancy, compared to how for gradients we relied on other workers gradients as side information. However, it is still a form of distributed source coding, and is worth exploring. Especially considering that it might show us how well the quantizer performs for parameters compression, which could be used for fedAVG, as opposed to gradients compression.
-
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|c|c|c|c|}
+        \hline
+        Protocol & Bit Rate (BPP) & AUC (\%) at Round 20 & AUC (\%) at Round 40 & Reconstruction MAPE (\%) \\
+        \hline
+        Basic Entropy & 6.1 & 91.5 & 96 & 0 \\
+        \hline
+        Simple & 3.6 & 91 & 96 & 14 \\
+        \hline
+        All-Out & 1.6 & 89.5 & 95 & 33 \\
+        \hline
+        All-Out without pre/post-proc. & N/A & 88 & 94 & N/A \\
+        \hline
+        All-Out + global model & 2.1 (model BPP) & 86.5 & 92 & N/A \\
+        \hline
+        Worker-Side & 0.9 & 91 & 96 & 22.5 \\
+        \hline
+        Hybrid & 0.9 & 88 & N/A & 25 \\
+        \hline
+    \end{tabular}
+    \caption{Comparison of different protocols on ResNet-18 trained on the SVHN dataset. The bit rate is calculated as the total number of bits sent divided by the total number of parameters sent. The accuracy is the final accuracy achieved after training for a fixed number of rounds. MAPE represents the Mean Absolute Percentage Error of gradient reconstruction.}
+    \label{tab:protocol_comparison}
+\end{table}

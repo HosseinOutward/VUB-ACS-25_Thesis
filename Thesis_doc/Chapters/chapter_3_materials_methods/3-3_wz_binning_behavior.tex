@@ -33,12 +33,12 @@ Given the multi-stage nature of the quantizer, these effects are more clearly re
 \begin{figure}[H]
     \centering
     \includegraphics[width=1\textwidth]{Chapters/chapter_3_materials_methods/figures/rate - gaussian}
-    \caption{Rate–distortion for a Gaussian source with and without side information. each dot is an independently trained model. Rate is entropy of the prior (more info in section 3.6), reproducing the behavior in \cite{JoukovskyLayeredWZ}.}
+    \caption{Rate–distortion for a Gaussian source with and without side information. Each dot is an independently trained model. Rate is entropy of the prior (more info in Section~3.6), reproducing the behavior in \cite{JoukovskyLayeredWZ}.}
     \label{fig:rate_dist_gaussian_with_side_info}
 \end{figure}
 
 \paragraph{Uniform source with side information: a failure case.}
-Finally, Figure~\ref{fig:uniform_dis_binning} illustrates a case in which the model underperforms. The source is uniform, and the side information is a noisier version of the source (uniform noise with range $0.25$). The quantizer has one layer with only two bins. One would expect near-equal bin spacing (aside from edge effects) with an alternating assignment pattern, but this behavior does not emerge. A plausible explanation is that the Gumbel–Softmax exploration is insufficient to traverse the space of bin configurations; additionally, while the prior term should guide the model toward lower rate, it may not do so quickly when the Gumbel temperature is high. We attempted several remedies, with limited success.
+Finally, Figure~\ref{fig:uniform_dis_binning} illustrates a case in which the model underperforms. The source is uniform, and the side information is a noisier version of the source (uniform noise with range $0.25$). The quantizer has one layer with only two bins. One would expect near-equal bin spacing (aside from edge effects) with an alternating assignment pattern, but this behavior does not emerge. A plausible explanation is that the Gumbel–Softmax exploration is insufficient to traverse the space of bin configurations; additionally, while the prior term should guide the model toward a lower rate, it may not do so quickly when the Gumbel temperature is high. We attempted several remedies, with limited success.
 
 \begin{figure}[H]
     \centering
