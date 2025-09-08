@@ -1,11 +1,11 @@
 \section{Gains over Baselines}
-The table below shows information about the different protocols used in our experiments, including the bit rate, accuracy, convergence speed, and reconstruction error. The hybrid and worker-side protocols achieve the best compression rates while maintaining high accuracy and convergence speed. The all-out protocol achieves a respectable rate distortion, but its not the best. the \ref{tab:protocol_comparison} summarizes the performance of various protocols used in our experiments.
+The table below shows information about the different protocols used in our experiments, including the bit rate, accuracy, convergence speed, and reconstruction error. The hybrid and worker-side protocols achieve the best compression rates while maintaining high accuracy and convergence speed. The all-out protocol achieves a respectable rate distortion, but its not the best. the \ref{tab:protocol_comparison} summarizes the performance of various protocols used in our experiments. Hybrid 1bit is a variant of the Hybrid protocol that uses 1-stage 1-bit quantizer.
 
 \begin{table}[H]
     \centering
-    \begin{tabular}{|c|c|c|c|}
+    \begin{tabular}{|c|c|c|c|c|c|}
         \hline
-        Protocol & Bit Rate (BPP) & AUC (\%) at Round 20 & AUC (\%) at Round 40 & Reconstruction MAPE (\%) \\
+        Protocol & Bit Rate (BPP) & AUC (\%) at R. 20 & AUC (\%) at R. 40 & avg MAPE (\%) \\
         \hline
         Basic Entropy & 6.1 & 91.5 & 96 & 0 \\
         \hline
@@ -13,13 +13,15 @@ The table below shows information about the different protocols used in our expe
         \hline
         All-Out & 1.6 & 89.5 & 95 & 33 \\
         \hline
-        All-Out without pre/post-proc. & N/A & 88 & 94 & N/A \\
+        All-Out wo pre-proc. & N/A & 88 & 94 & N/A \\
         \hline
         All-Out + global model & 2.1 (model BPP) & 86.5 & 92 & N/A \\
         \hline
         Worker-Side & 0.9 & 91 & 96 & 22.5 \\
         \hline
-        Hybrid & 0.9 & 88 & N/A & 25 \\
+        Hybrid & 0.9 & 88 & 96 & 25 \\
+        \hline
+        Hybrid 1bit & 0.67 & 88 & 96 & 40 \\
         \hline
     \end{tabular}
     \caption{Comparison of different protocols on ResNet-18 trained on the SVHN dataset. The bit rate is calculated as the total number of bits sent divided by the total number of parameters sent. The accuracy is the final accuracy achieved after training for a fixed number of rounds. MAPE represents the Mean Absolute Percentage Error of gradient reconstruction.}
