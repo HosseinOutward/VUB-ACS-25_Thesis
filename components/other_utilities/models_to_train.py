@@ -3,6 +3,7 @@ import torch.nn as nn
 from torchmetrics.classification import AUROC
 from torchvision import models
 from components.FL_sim import FederatedModelWrapper
+from components.other_utilities.resnet20 import ResNet20
 
 
 class ResNetPLModel(FederatedModelWrapper):
@@ -14,12 +15,17 @@ class ResNetPLModel(FederatedModelWrapper):
         self.num_classes = num_classes
 
         # 1) backbone ----------------------------------------------------------
-        backbone = dict(resnet50=models.resnet50,
-                        resnet18=models.resnet18)[resnet_version](weights=None)
+        if resnet_version == 'resnet20':
+            backbone = ResNet20(num_classes=num_classes)
+        else:
+            backbone = dict(
+                resnet50=models.resnet50,
+                resnet18=models.resnet18,
+            )[resnet_version](weights=None)
 
-        # 2) replace the classification head ----------------------------------
-        in_features = backbone.fc.in_features
-        backbone.fc = nn.Linear(in_features, num_classes)
+            # 2) replace the classification head for torchvision models
+            in_features = backbone.fc.in_features
+            backbone.fc = nn.Linear(in_features, num_classes)
 
         self.model = backbone
 
