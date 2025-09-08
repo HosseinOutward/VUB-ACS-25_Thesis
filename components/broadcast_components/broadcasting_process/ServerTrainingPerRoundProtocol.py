@@ -108,6 +108,12 @@ def shape_dict_to_vect_slices(dict_shapes):
 
 
 # %%
+def fix_zero_probabilities(prior_vect, min_prob=1e-8):
+    prior_vect = prior_vect + min_prob
+    prior_vect = prior_vect / np.sum(prior_vect, axis=-1, keepdims=True)
+    return prior_vect
+
+
 recent_outlier_positions = None
 def fix_outlier_in_prior(prior_vect_, outlier_pos):
     global recent_outlier_positions
@@ -165,11 +171,18 @@ def _compression_protocol(grad_dict, quantizer):
         prior_vect = quantizer.get_set_training_posterior_cdf()
     quantizer.training_posterior_cdf = prior_vect
     prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
+    prior_vect = fix_zero_probabilities(prior_vect)
 
     __debug_rans_check__['given_prob'] = prior_vect
     __debug_rans_check__['given_bins'] = bins_vector.numpy()
 
-    bin_vec_compressed = [rans_batch_encode(bv.numpy(), pp_b) for bv, pp_b in zip(bins_vector, prior_vect)]
+    # Fix: Ensure proper data types for RANS encoding
+    bin_vec_compressed = []
+    for bv, pp_b in zip(bins_vector, prior_vect):
+        # Convert to numpy and ensure correct data types
+        bv_np = bv.numpy().astype(np.uint32)  # RANS expects integer symbols
+        pp_b_np = pp_b.astype(np.float64)    # RANS expects double precision probabilities
+        bin_vec_compressed.append(rans_batch_encode(bv_np, pp_b_np))
 
     # **********
     norm_fact_vec, outlier_max = change_dtype_recursive([norm_fact_vec, outlier_max], torch.float16)
@@ -206,8 +219,14 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     # ******
     prior_vect = quantizer.training_posterior_cdf
     prior_vect = fix_outlier_in_prior(prior_vect, None)
-    bin_data = [rans_batch_decode(bvc, prior_vect[i], model_size+outlier_count)
-                             for i, bvc in enumerate(bin_vec_compressed)]
+    prior_vect = fix_zero_probabilities(prior_vect)
+
+    # Fix: Ensure proper data types for RANS decoding
+    bin_data = []
+    for i, bvc in enumerate(bin_vec_compressed):
+        pp_b_np = prior_vect[i].astype(np.float64)  # Match encoding precision
+        decoded = rans_batch_decode(bvc, pp_b_np, model_size+outlier_count)
+        bin_data.append(decoded.astype(np.uint32))  # Ensure consistent integer type
 
     assert np.all(__debug_rans_check__['given_prob'] == prior_vect)
     assert np.all(__debug_rans_check__['given_bins'] == np.array(bin_data))
@@ -549,4 +568,3 @@ if __name__ == "__main__":
     bp_f = lambda worker_count, base_quantizer: (
         WZServerTrainingPerRoundProtocol(worker_count, base_quantizer, epoch_count=1))
     _test_main(bp_f, worker_count=2, rounds=50)
-

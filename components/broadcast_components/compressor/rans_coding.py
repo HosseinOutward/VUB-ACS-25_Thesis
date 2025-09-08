@@ -52,12 +52,18 @@ def rans_batch_decode(encoded_state, freqs:np.ndarray, length_decoded:int) -> np
     import os
 
     num_batches = len(encoded_state)
-    batch_sizes = [batch_size] * (num_batches - 1)
-    last_batch_size = length_decoded % batch_size
-    if last_batch_size == 0 and length_decoded > 0:
-        last_batch_size = batch_size
-    if num_batches > 0:
-        batch_sizes.append(last_batch_size)
+    # Fix: Calculate batch sizes correctly based on actual data distribution
+    batch_sizes = []
+    remaining = length_decoded
+    for i in range(num_batches):
+        if i == num_batches - 1:
+            # Last batch gets all remaining data
+            batch_sizes.append(remaining)
+        else:
+            # Use standard batch size, but not more than remaining
+            current_batch_size = min(batch_size, remaining)
+            batch_sizes.append(current_batch_size)
+            remaining -= current_batch_size
 
     freqs_batches = [freqs[i:i+batch_size] for i in range(0, len(freqs), batch_size)]
 
