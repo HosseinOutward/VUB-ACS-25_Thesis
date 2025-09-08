@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torchmetrics.classification import Accuracy
 from torchmetrics.classification import AUROC
 from torchvision import models
 from components.FL_sim import FederatedModelWrapper
@@ -32,6 +33,7 @@ class ResNetPLModel(FederatedModelWrapper):
         # 3) loss & metric -----------------------------------------------------
         self.loss_fn = nn.CrossEntropyLoss()
         self.aucroc = AUROC(num_classes=num_classes, average="weighted", task="multiclass")
+        self.accuracy = Accuracy(num_classes=num_classes, task="multiclass")
 
     def forward(self, x):
         return self.model(x)
@@ -41,8 +43,9 @@ class ResNetPLModel(FederatedModelWrapper):
         logits = self(x)
         loss = self.loss_fn(logits, y)
         auc = self.aucroc(torch.softmax(logits.detach(), dim=1), y)
+        acc = self.accuracy(logits.detach(), y)
 
-        etc = (auc,)
+        etc = (auc, acc,)
         return loss, etc
 
     def _log_metrics(self, loss, etc, stage: str):
