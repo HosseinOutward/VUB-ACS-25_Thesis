@@ -317,32 +317,43 @@ class FLSimulator:
 
         self.train_sampler.set_agent_partition(agent_id if agent_id != 'global' else 'ALL')
 
+        # todo make the dictionary corrispond with the input instead of having fix orders for auc and acc
         temp = self._get_model_metrics(model, shared_train_loader)
-        train_metrics = {'loss':temp[0], 'auc':temp[1]}
-        print(f"{train_metrics['loss']:.2f}, auc: {train_metrics['auc']:.2f}    |    ", end='')
+        train_metrics = {'loss':temp[0], 'auc':temp[1], 'acc':temp[2]}
+        print(f"{train_metrics['loss']:.2f}, auc: {train_metrics['auc']:.2f}, "
+              f"acc: {train_metrics['acc']:.2f}    |    ", end='')
 
         temp = self._get_model_metrics(model, shared_test_loader)
-        test_metrics = {'loss':temp[0], 'auc':temp[1]}
-        print(f"test> loss: {test_metrics['loss']:.2f}, auc: {test_metrics['auc']:.2f}")
+        test_metrics = {'loss':temp[0], 'auc':temp[1], 'acc':temp[2]}
+        print(f"test> loss: {test_metrics['loss']:.2f}, auc: {test_metrics['auc']:.2f}, acc: {test_metrics['acc']:.2f}")
 
         if self.user_logger:
             self.user_logger.fl_sim_log(round_s, agent_id, train_metrics, test_metrics)
 
     def _get_model_metrics(self, model:FederatedModelWrapper, dataloader):
-        loss, auc = 0, 0
+        loss, etc = 0, []
         data_count = 0
         model.eval()
         model.cuda()
         with torch.no_grad():
             for batch in dataloader:
                 batch = [b.cuda() for b in batch]
-                b_loss, (b_auc,) = model.get_loss_etc(batch)
+
+                b_loss, b_etc = model.get_loss_etc(batch)
+
                 loss += b_loss.item() * len(batch[0])
-                auc += b_auc * len(batch[0])
+
+                for i in range(len(b_etc)):
+                    if len(etc) <= i:
+                        etc.append(0)
+                    etc[i] += b_etc[i].item() * len(batch[0])
+
                 data_count += len(batch[0])
-                batch = [b.cpu() for b in batch]
+
         model.cpu()
-        return loss/data_count, auc/data_count
+
+        assert len(etc)==2
+        return loss/data_count, etc[0]/data_count, etc[1]/data_count
 
     def run_simulation(self, broadcast_prot=None, ):
         if broadcast_prot is None:
@@ -430,7 +441,7 @@ def _main_test():
 
             auc_calculator = torchmetrics.AUROC(num_classes=1, task='binary')
             auc = float(auc_calculator(logits, y).item())
-            return loss, (auc, )
+            return loss, (auc, auc*2)
         def _log_metrics(self, loss, etc, stage: str):
             self.log(f"{stage}_loss", loss, prog_bar=False)
             self.log(f"{stage}_auc", etc[0], prog_bar=False)

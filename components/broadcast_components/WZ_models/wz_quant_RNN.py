@@ -254,7 +254,7 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         if len(bins.size()) == 1:
             bins = self.deunify_bins(bins)
 
-        assert bins.max() < b_p_p
+        assert bins.float().max() < b_p_p
         codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins]
         reconstruct = self.coding_model.decode(codes, side_info)
         return reconstruct[-1]
