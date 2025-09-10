@@ -49,6 +49,7 @@ class WZQuantizer:
             assert grad_vector is None and side_info_data_list is None
             assert self.training_posterior_cdf is not None
         else:
+            assert grad_vector is not None and side_info_data_list is not None
             self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
 
         return self.training_posterior_cdf

@@ -88,6 +88,12 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
         coming_round = self.curr_round_id + int(next_agent==0)
         coming_is_hybrid = self.is_hybrid_round_f(coming_round)
         if not self.warmup and not coming_is_hybrid:
+            # cheat to make the cancer protocol simpler to implement
+            if hasattr(self, 'cancer_warmup_done') and self.cancer_warmup_done:
+                assert self.curr_round_id>=self.si_window_size
+                return
+
+            # train as usual here
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent, force_is_hybrid_round=coming_is_hybrid)
             assert len(side_info) == min(self.curr_round_id*worker_count+agent_id, self.si_window_size*worker_count-1)
