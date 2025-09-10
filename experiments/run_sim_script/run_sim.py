@@ -1,11 +1,13 @@
-import numpy as np
-
-proto_choices = ['no_proto',  # 0
-                 'all_out', 'balanced_hybrid',  # 1 2
-                 'hybrid', 'no_proto_only_global',  # 3 4
-                 'simple', 'worker-side',  # 5 6
-                 'worker-side-with-error-accum',  # 7
-                 'MarginalOnly']  # 8
+proto_choices = [
+    'no_proto',  # 0
+    'all_out', 'balanced_hybrid',  # 1 2
+    'hybrid', 'no_proto_only_global',  # 3 4
+    'simple', 'worker-side',  # 5 6
+    'worker-side-with-error-accum',  # 7
+    'MarginalOnly',  # 8
+    'cancer',  # 9
+    'cancer-small-update',  # 10
+]
 proto_combo = [str(i) for i in range(0, len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
                 for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
@@ -151,9 +153,12 @@ if __name__ == "__main__":
                 from components.broadcast_components.broadcasting_process.WorkersideTrainingWithAccumError import \
                     WorkersideTrainingWithAccumErrorProtocol
                 broadcast_prot_base = WorkersideTrainingWithAccumErrorProtocol(worker_count, base_quantizer)
-            elif proto_name == 'NoSameWorkerSide':
-                from components.broadcast_components.broadcasting_process.NoSameWorkerSide import NoSameWorkerSide
-                broadcast_prot_base = NoSameWorkerSide(worker_count, base_quantizer)
+            elif proto_name == 'cancer':
+                from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
+                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer)
+            elif proto_name == 'cancer-small-update':
+                from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
+                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer, small_update=True)
             elif proto_name == 'MarginalOnly':
                 from components.broadcast_components.broadcasting_process.MarginalOnly import MarginalOnly
                 broadcast_prot_base = MarginalOnly(worker_count, base_quantizer)

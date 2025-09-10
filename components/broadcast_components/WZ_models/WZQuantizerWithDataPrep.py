@@ -91,7 +91,7 @@ class QuantizerWithDataPrep(WZQuantizer):
 
         # outlier ----------
         if self.no_outlier_normalization:
-            outlier_positions, outlier_max, outlier_sign = ([], None, [])
+            outlier_positions, outlier_max, outlier_sign = (np.array([], dtype=int), None, np.array([]))
             outlier_param = (outlier_positions, outlier_max, outlier_sign)
         elif outlier_param is not None:
             outlier_positions, outlier_max, _ = outlier_param

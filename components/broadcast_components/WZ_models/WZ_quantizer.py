@@ -41,17 +41,11 @@ class WZQuantizer:
         return all_res
 
     def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
-        if self.wz_pl_model.coding_model.marginal:
-            self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
-            return self.training_posterior_cdf
-
-        if grad_vector is None or side_info_data_list is None:
-            assert grad_vector is None and side_info_data_list is None
-            assert self.training_posterior_cdf is not None
-        else:
+        if grad_vector is not None or side_info_data_list is not None:
             assert grad_vector is not None and side_info_data_list is not None
             self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
 
+        assert self.training_posterior_cdf is not None
         return self.training_posterior_cdf
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
