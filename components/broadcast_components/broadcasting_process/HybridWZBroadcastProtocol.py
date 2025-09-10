@@ -33,6 +33,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             if self.wz_basic_quantizer.user_logger:
                 self.wz_basic_quantizer.user_logger.round_id -= 1
 
+            print('--- training worker-side model for hybrid ---')
             quantizer:QuantizerWithDataPrep = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id/2 + 1), 4)),
@@ -97,6 +98,8 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent, force_is_hybrid_round=coming_is_hybrid)
             assert len(side_info) == min(self.curr_round_id*worker_count+agent_id, self.si_window_size*worker_count-1)
+
+            print('--- training all-out model for non-hybrid rounds ---')
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),

@@ -25,7 +25,7 @@ def get_outlier_factor(grad_flat_normal, outlier_threshold=1.5):
     outlier_count = np.sum(outlier_mask)
 
     if outlier_count==0:
-        return [], None, []
+        return np.array([], dtype=int), None, np.array([])
 
     outlier_sign = np.sign(grad_flat_normal[outlier_mask])
     outlier_max = np.percentile(np.abs(grad_flat_normal[outlier_mask])-outlier_threshold, 99) / outlier_threshold

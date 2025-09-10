@@ -230,7 +230,8 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
         decoded = rans_batch_decode(bvc, pp_b_np, model_size+outlier_count)
         bin_data.append(decoded.astype(np.uint32))  # Ensure consistent integer type
 
-    assert np.all(__debug_rans_check__['given_prob'] == prior_vect)
+    temp = __debug_rans_check__['given_prob'] == prior_vect
+    assert np.all(temp) #or np.all([np.isnan(a) for a in prior_vect[~temp]])
     assert np.all(__debug_rans_check__['given_bins'] == np.array(bin_data))
 
     # ******
@@ -372,7 +373,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
 
         # *************
         if not self.warmup:
-            print('        - training quant for global model transfer')
+            print('--- training quant for global model transfer ---')
 
             quantizer = _train_model(
                 model_stat_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
@@ -457,6 +458,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             target_vec = self.past_worker_grad_recons_vec[next_agent][-1]
             side_info = self._get_side_info_for_grad_recons(next_agent)
             assert len(side_info) == min(self.curr_round_id*worker_count+agent_id, self.si_window_size*worker_count-1)
+
+            print('--- training for next agent before it begins ---')
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                 bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
