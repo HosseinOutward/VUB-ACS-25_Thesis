@@ -3,8 +3,8 @@ from components.broadcast_components.broadcasting_process.HybridWZBroadcastProto
 
 
 class WorkersideTrainingProtocol(HybridWZBroadcastProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep):
-        super().__init__(agent_count, wz_base_quantizer, hybrid_round_num=1)
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, **kwargs):
+        super().__init__(agent_count, wz_base_quantizer, hybrid_round_num=1, **kwargs)
 
     def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
         super()._post_reconstruction_processing(agent_id, worker_count, dict_shape, curr_recons_vector)

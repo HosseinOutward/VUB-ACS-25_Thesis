@@ -166,8 +166,10 @@ def _compression_protocol(grad_dict, quantizer):
     # **********
     # compress the bins_vector using RANS
     if quantizer.wz_pl_model.coding_model.marginal:
+        # marginal case, the prior depends on nothing
         prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, [])
     else:
+        # conditional case, the prior has already been set during training (unless is not learned yet)
         prior_vect = quantizer.get_set_training_posterior_cdf()
     quantizer.training_posterior_cdf = prior_vect
     prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
@@ -258,7 +260,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
 
     qz = to_clone_quantizer
     wz_pl_model_class: PL_EncoderDecoder_RNN = qz.wz_pl_model.__class__
-    new_quantizer = QuantizerWithDataPrep(
+    new_quantizer = to_clone_quantizer.__class__(
         user_logger=user_logger,
         vec_slices=vec_slices,
         count_side_info_data=len(side_info),
@@ -463,13 +465,15 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             self.wz_quantizer_list[next_agent] = quantizer
 
 
-def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False):
+def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False,
+               quantizer_class=QuantizerWithDataPrep):
+    import os
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
                                      bins_per_plane=16, lr=1e-3, marginal=True).to(torch.float32)
     path_to_basic = r'D:\App External Data\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
-    base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
+    base_quantizer = quantizer_class(wz_model, train_sample_size=200_000,
                                            count_side_info_data=0, enable_progress_bar=True, vec_slices=None)
 
     broadcast_prot = brod_prot_class(worker_count, base_quantizer)
