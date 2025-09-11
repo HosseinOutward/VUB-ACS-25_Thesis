@@ -7,6 +7,7 @@ proto_choices = [
     'MarginalOnly',  # 8
     'cancer',  # 9
     'cancer-small-update',  # 10
+    *['conventional_'+r+rr for r in ['round', 'sign'] for rr in ['','_dsc']]  # 11
 ]
 proto_combo = [str(i) for i in range(0, len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
@@ -162,6 +163,14 @@ if __name__ == "__main__":
             elif proto_name == 'MarginalOnly':
                 from components.broadcast_components.broadcasting_process.MarginalOnly import MarginalOnly
                 broadcast_prot_base = MarginalOnly(worker_count, base_quantizer)
+            elif 'conventional_' in proto_name:
+                from components.broadcast_components.broadcasting_process.ConventionalQuantizerProtocol import \
+                    RoundDSCProtocol, SignDSCProtocol, RoundBasicProtocol, SignBasicProtocol
+                if 'dsc' in proto_name:
+                    temp = [RoundDSCProtocol, SignDSCProtocol][int('sign' in proto_name)]
+                else:
+                    temp = [RoundBasicProtocol, SignBasicProtocol][int('sign' in proto_name)]
+                broadcast_prot_base = temp(worker_count, base_quantizer)
             else:
                 raise ValueError(f'Unknown protocol: {proto_name}')
 
