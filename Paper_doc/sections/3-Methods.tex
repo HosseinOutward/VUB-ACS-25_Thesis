@@ -1,0 +1,21 @@
+\section{Our Method}
+\label{sec:method}
+Explain the overall approach and the proposed framework.
+
+\subsection{Motivation}
+\label{ssec:motivation}
+Explain the link between the gradient of workers which could be exploited as side information.
+
+\subsection{Simple Framework}
+\label{ssec:simpleframework}
+The simple framework consists of the following components:
+a) preprocessing, b) warmup phase, c) a single main training phase, and d) use frozen model for all downstream rounds
+
+\subsection{Intervaled Framework}
+\label{ssec:intervaledframework}
+Explain that its much similar to the simple framework, but we have a longer warmup phase (with more side info) and we periodically retrain the model with all the data we have seen so far.
+
+\subsubsection{Smaller Updates}
+\label{sssec:smallerupdates}
+A variant of the intervaled framework where we do smaller updates every time we get new data right before sending encoder.
+

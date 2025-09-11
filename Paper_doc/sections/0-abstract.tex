@@ -1,0 +1,11 @@
+\begin{abstract}
+We present a learned \emph{distributed source coding} (DSC) quantization approach to reduce gradient communication cost in synchronous federated learning. At a high level, worker updates are quantized with a layered Wyner–Ziv (WZ) scheme, and the server exploits short-term side information from recent updates to reconstruct them. The goal is to convert cross-worker (and temporal) correlations into bit savings while preserving model accuracy.
+
+The motivation is the escalating communication cost in distributed deep learning—especially in Federated Learning—intensified by the rise of large models (including LLMs) with hundreds of millions to billions of parameters and the need for large-scale training. Information-theoretic results in Slepian–Wolf (lossless) and Wyner–Ziv (lossy) show that correlated sources can be coded near conditional limits, implying substantial potential rate reductions when side information is available \cite{SlepianWolf1973,Yang2008Multiterminal}.
+
+Prior work in model/gradient compression—classical and learned—typically relies on basic quantization and sparsification; parameter-wise WZ quantization has been largely unexplored at scale due to the complexity of classical constructions. We demonstrate feasibility by leveraging learned WZ quantizers with successive refinement \cite{JoukovskyLayeredWZ,OzyilkanRecoverBinning} and evaluate on ResNet-18/SVHN. Empirically, the approach achieves meaningful bit-rate reductions at matched accuracy compared with straightforward entropy coding and DSC-style baselines \cite{ZhangTao2022}. These findings position learned DSC as a scalable, drop-in communication primitive for FL and large-scale distributed training.
+\end{abstract}
+
+\begin{keywords}
+Gradient quantization, learned quantizer, Wyner-Ziv coding, Distributed source coding, Distributed learning, Federated learning, Slepian-Wolf coding, Gradient compression, Learned Distributed Compression
+\end{keywords}
