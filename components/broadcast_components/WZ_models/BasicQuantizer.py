@@ -70,7 +70,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
     def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
         res = self.basic_decoding(quantized_data[0])
         res = self._post_process_grads(res, *encoding_extra_data)
-        return res
+        return res.astype(np.float32)
 
     def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
         res = super().get_set_training_posterior_cdf(grad_vector, side_info_data_list)
@@ -88,7 +88,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         if self.wz_pl_model.coding_model.marginal:
             # -------------- marginal prior
             unique_counts = np.bincount(encoded_bins, minlength=self.bin_count)
-            prior_prob = unique_counts / unique_counts.sum()
+            prior_prob = (unique_counts / unique_counts.sum()).astype(np.float32)
             prior_prob = np.array([prior_prob]*len(grad_vector))
             prior_prob = torch.tensor(prior_prob, dtype=torch.float32)
         else:
@@ -126,7 +126,11 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
 
 # --------------------------
 class RoundDSCQuantizer(_ConventionalQuantizer):
-    is_dsc=True
+    def __init__(self, wz_pl_model, *args, bin_count_conv=None, **kwargs):
+        bin_count = bin_count_conv if bin_count_conv is not None else wz_pl_model.bin_count
+        bin_count = max(2, int(bin_count/4)) # reduce the bin count to 1/4 due to ram issues
+        super().__init__(wz_pl_model, *args, bin_count_conv=bin_count, **kwargs)
+        self.is_dsc = True
 
     def basic_encoding(self, grad_vector):
         max_v, min_v = self.outlier_threshold, -self.outlier_threshold
