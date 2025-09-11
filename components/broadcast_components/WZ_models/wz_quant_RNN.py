@@ -131,11 +131,11 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
         assert abs(tau_rate)>1
         self.tau_rate = tau_rate
 
-        side_info_size = side_info_size if side_info_size != 0 else 1
-        super().__init__(inp_dim, side_info_size, *args, **kwargs)
+        self.side_info_size = side_info_size if side_info_size != 0 else 1
+        super().__init__(inp_dim, self.side_info_size, *args, **kwargs)
 
         self.coding_model = EncoderDecoderLayeredRNN(
-            input_dim=inp_dim, side_info_size=side_info_size,
+            input_dim=inp_dim, side_info_size=self.side_info_size,
             num_planes=num_planes,  bins_per_plane=bins_per_plane,
             layers=3, hidden_dim=100, marginal=marginal)
 

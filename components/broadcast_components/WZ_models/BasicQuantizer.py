@@ -1,4 +1,6 @@
 # This file implements basic quantizers used in conventional protocols
+from collections import OrderedDict
+
 import numpy as np
 import torch
 import types
@@ -28,13 +30,37 @@ class PL_ConditionalPrior(pl.LightningModule):
 
 
 #%%
-class ConventionalQuantizer(QuantizerWithDataPrep):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class _ConventionalQuantizer(QuantizerWithDataPrep):
+    def __init__(self, wz_pl_model, *args, bin_count_conv=None, to_clone_wz_qz=None, **kwargs):
+        # used for protocol initiation
+        if to_clone_wz_qz is not None:
+            kwargs = dict(
+                vec_slices = to_clone_wz_qz.vec_slices,
+                outlier_threshold = to_clone_wz_qz.outlier_threshold,
+                no_outlier_normalization = to_clone_wz_qz.no_outlier_normalization,
+                no_normalization = to_clone_wz_qz.no_normalization,
+                count_side_info_data = to_clone_wz_qz.count_side_info_data,
+                enable_progress_bar = to_clone_wz_qz.enable_progress_bar,
+                train_sample_size = to_clone_wz_qz.train_sample_size,
+                user_logger = to_clone_wz_qz.user_logger,
+            )
+            args = ()
 
-        self.wz_pl_model = types.SimpleNamespace(
-            bins_per_plane=1, bin_count=self.wz_pl_model.bin_count,
-            coding_model=types.SimpleNamespace(marginal=False))
+        # make compatible with learned protocol setup
+        bin_count = bin_count_conv if bin_count_conv is not None else wz_pl_model.bin_count
+        wz_pl_model = wz_pl_model.__class__(
+            bins_per_plane=bin_count,
+            side_info_size=wz_pl_model.side_info_size,
+            marginal=True, inp_dim=1, num_planes=1, lr=1,
+            reconst_ld=1, tau=0.5, tau_rate=2,
+        ).to(torch.float32)
+        del wz_pl_model.coding_model.encoder
+        wz_pl_model.coding_model.encoder = types.SimpleNamespace(
+            state_dict=lambda: OrderedDict(), load_state_dict=lambda x: None)
+
+        super().__init__(wz_pl_model, *args, **kwargs)
+
+        self.is_dsc = None
 
     def encoding_process(self, grad_vector, *args, **kwargs):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
@@ -45,6 +71,14 @@ class ConventionalQuantizer(QuantizerWithDataPrep):
         res = self.basic_decoding(quantized_data[0])
         res = self._post_process_grads(res, *encoding_extra_data)
         return torch.tensor(res)
+
+    def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
+        res = super().get_set_training_posterior_cdf(grad_vector, side_info_data_list)
+
+        if self.is_dsc and self.wz_pl_model.coding_model.marginal:
+            self.wz_pl_model.coding_model.marginal=False
+
+        return res
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
@@ -91,7 +125,9 @@ class ConventionalQuantizer(QuantizerWithDataPrep):
         raise NotImplementedError
 
 # --------------------------
-class RoundDSCQuantizer(ConventionalQuantizer):
+class RoundDSCQuantizer(_ConventionalQuantizer):
+    is_dsc=True
+
     def basic_encoding(self, grad_vector):
         max_v, min_v = self.outlier_threshold, -self.outlier_threshold
         bins = np.linspace(min_v, max_v, self.bin_count + 1)
@@ -107,14 +143,13 @@ class RoundDSCQuantizer(ConventionalQuantizer):
         return res
 
 class RoundBasicQuantizer(RoundDSCQuantizer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.wz_pl_model.coding_model.marginal = True
+    is_dsc=False
 
-class SignDSCQuantizer(RoundDSCQuantizer):
+class SignDSCQuantizer(_ConventionalQuantizer):
+    is_dsc=True
+
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.wz_pl_model.bin_count = 2
+        super().__init__(*args, bin_count_conv=2, **kwargs)
         self.recons_center = None
 
     def basic_encoding(self, grad_vector):
@@ -129,9 +164,7 @@ class SignDSCQuantizer(RoundDSCQuantizer):
         return res
 
 class SignBasicQuantizer(SignDSCQuantizer):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.wz_pl_model.coding_model.marginal = True
+    is_dsc=False
 
 
 if __name__ == "__main__":
@@ -156,7 +189,7 @@ if __name__ == "__main__":
     side_info_data = [temp.copy()]
 
     # %%
-    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=1, bins_per_plane=4, tau=1.5, tau_rate=10,
+    wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2, bins_per_plane=4, tau=1.5, tau_rate=10,
                                      reconst_ld=400, lr=1e-3, marginal=True).to(torch.float32)
     # -----------
     wz_quantizer = RoundBasicQuantizer(wz_model, train_sample_size=200_000, count_side_info_data=1,

@@ -259,6 +259,13 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
 
     reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
 
+    num_planes = 2
+
+    from components.broadcast_components.WZ_models.BasicQuantizer import _ConventionalQuantizer
+    if issubclass(to_clone_quantizer.__class__, _ConventionalQuantizer):
+        bins_per_plane=bins_per_plane**num_planes
+        num_planes = 1
+
     qz = to_clone_quantizer
     wz_pl_model_class: PL_EncoderDecoder_RNN = qz.wz_pl_model.__class__
     new_quantizer = to_clone_quantizer.__class__(
@@ -268,11 +275,11 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
         wz_pl_model=wz_pl_model_class(
             inp_dim=1,
             side_info_size=len(side_info),
-            num_planes=2,
             marginal=marginal,
+            num_planes=num_planes,
+            bins_per_plane=bins_per_plane,
 
             lr=qz.wz_pl_model.lr,
-            bins_per_plane=bins_per_plane,
             reconst_ld=reconst_ld,
             tau=qz.wz_pl_model.tau,
             tau_rate=qz.wz_pl_model.tau_rate,
@@ -554,16 +561,16 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False,
 
             # print the mspe
             grad_avg_v = np.mean(np.concatenate(
-                [grad[k].flatten().cpu() ** 2 for k in grad.keys()]))
-            grad_mspe=[(grad[k].cpu() - v.cpu()).flatten() ** 2/grad_avg_v for k, v in decoded_agent_broadcast.items()]
+                [grad[k].flatten().cpu().abs() for k in grad.keys()]))
+            grad_mspe=[(grad[k].cpu() - v.cpu()).flatten().abs()/grad_avg_v for k, v in decoded_agent_broadcast.items()]
             grad_mspe = np.mean(np.concatenate(grad_mspe))
 
             global_avg_v = np.mean(np.concatenate(
-                [global_dict[0][k].cpu().flatten() ** 2 for k in global_dict[0].keys()]))
+                [global_dict[0][k].cpu().flatten().abs() for k in global_dict[0].keys()]))
             global_mspe=[
-                (global_dict[0][k].cpu() - v.cpu()).flatten() ** 2/global_avg_v for k, v in recon_model_param.items()]
+                (global_dict[0][k].cpu() - v.cpu()).flatten().abs()/global_avg_v for k, v in recon_model_param.items()]
             global_mspe = np.mean(np.concatenate(global_mspe))
-            print(f'     > MSPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
+            print(f'     > MAPE - grad: {grad_mspe*100:.2f}%,   global: {global_mspe*100:.2f}%')
 
     # check output size and correctness
     for i, grad in enumerate(grad_test_data[-1]):
