@@ -6,8 +6,11 @@ from components.broadcast_components.broadcasting_process.ServerTrainingPerRound
 
 
 class SingleTimeTrainingProtocol(WZServerTrainingPerRoundProtocol):
-    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, epoch_count=45):
-        super().__init__(agent_count, wz_base_quantizer, epoch_count, True)
+    def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, global_base_quantizer=None,
+                 no_global_quantization=True, epoch_count=45, **kwargs):
+        assert global_base_quantizer is None and no_global_quantization
+        super().__init__(agent_count, wz_base_quantizer, epoch_count=epoch_count,
+                         no_global_quantization=True, **kwargs)
 
     def _get_side_info_for_grad_recons(self, agent_id):
         if self.warmup:
@@ -48,6 +51,6 @@ if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     bp_f = lambda worker_count, base_quantizer: (
-        SingleTimeTrainingProtocol(worker_count, base_quantizer,))
-    _test_main(bp_f, worker_count=2, rounds=4)
+        SingleTimeTrainingProtocol(worker_count, base_quantizer, epoch_count=5))
+    _test_main(bp_f, worker_count=2, rounds=4, no_global_quant=True)
 
