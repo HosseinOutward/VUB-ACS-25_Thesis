@@ -22,14 +22,14 @@ class CancerProtocol(HybridWZBroadcastProtocol):
         self.update_interval = update_interval
         assert update_interval > 3
         super().__init__(agent_count, wz_base_quantizer, hybrid_round_num=self.update_interval, **kwargs)
-        self.si_window_size = self.update_interval
+        self.si_window_size = self.update_interval-1
         self.cancer_warmup_done = False
         self.frozen_quantizers = None
 
     def _post_reconstruction_processing(self, agent_id, worker_count, dict_shape, curr_recons_vector):
         super()._post_reconstruction_processing(agent_id, worker_count, dict_shape, curr_recons_vector)
 
-        if not self.cancer_warmup_done and (self.curr_round_id==self.update_interval+1 and agent_id==worker_count-1):
+        if not self.cancer_warmup_done and (self.curr_round_id==self.update_interval+1 and agent_id+1==worker_count-1):
             self.cancer_warmup_done=True
             print('--- switching to frozen quantizers for cancer protocol ---')
             self.frozen_quantizers = [a for a in self.wz_quantizer_list]
@@ -58,5 +58,5 @@ if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     bp_f = lambda worker_count, base_quantizer: (
-        CancerProtocol(worker_count, base_quantizer, epoch_count=10, update_interval=5))
+        CancerProtocol(worker_count, base_quantizer, epoch_count=10, update_interval=5, small_update=True))
     _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
