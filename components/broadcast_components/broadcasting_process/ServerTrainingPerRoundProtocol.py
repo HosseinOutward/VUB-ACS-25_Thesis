@@ -225,6 +225,9 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     prior_vect = fix_outlier_in_prior(prior_vect, None)
     prior_vect = fix_zero_probabilities(prior_vect, __debug_rans_check__['given_bins'])
 
+    temp = __debug_rans_check__['given_prob'] == prior_vect
+    assert np.all(temp) #or np.all([np.isnan(a) for a in prior_vect[~temp]])
+
     # Fix: Ensure proper data types for RANS decoding
     bin_data = []
     for i, bvc in enumerate(bin_vec_compressed):
@@ -232,8 +235,6 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
         decoded = rans_batch_decode(bvc, pp_b_np, model_size+outlier_count)
         bin_data.append(decoded.astype(np.uint32))  # Ensure consistent integer type
 
-    temp = __debug_rans_check__['given_prob'] == prior_vect
-    assert np.all(temp) #or np.all([np.isnan(a) for a in prior_vect[~temp]])
     assert np.all(__debug_rans_check__['given_bins'] == np.array(bin_data))
 
     # ******
