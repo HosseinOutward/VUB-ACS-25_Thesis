@@ -70,7 +70,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
     def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
         res = self.basic_decoding(quantized_data[0])
         res = self._post_process_grads(res, *encoding_extra_data)
-        return torch.tensor(res)
+        return res
 
     def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
         res = super().get_set_training_posterior_cdf(grad_vector, side_info_data_list)
