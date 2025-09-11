@@ -108,8 +108,10 @@ def shape_dict_to_vect_slices(dict_shapes):
 
 
 # %%
-def fix_zero_probabilities(prior_vect, min_prob=1e-8):
-    prior_vect = prior_vect + min_prob
+def fix_zero_probabilities(prior_vect, bins_vector, min_prob=1e-5):
+    for i, pp in enumerate(prior_vect):
+        pp[np.arange(len(bins_vector[i])), bins_vector[i]]+=min_prob
+
     prior_vect = prior_vect / np.sum(prior_vect, axis=-1, keepdims=True)
     return prior_vect
 
@@ -173,7 +175,7 @@ def _compression_protocol(grad_dict, quantizer):
         prior_vect = quantizer.get_set_training_posterior_cdf()
     quantizer.training_posterior_cdf = prior_vect
     prior_vect = fix_outlier_in_prior(prior_vect, outlier_positions)
-    prior_vect = fix_zero_probabilities(prior_vect)
+    prior_vect = fix_zero_probabilities(prior_vect, bins_vector)
 
     __debug_rans_check__['given_prob'] = prior_vect
     __debug_rans_check__['given_bins'] = bins_vector.numpy()
@@ -221,7 +223,7 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     # ******
     prior_vect = quantizer.training_posterior_cdf
     prior_vect = fix_outlier_in_prior(prior_vect, None)
-    prior_vect = fix_zero_probabilities(prior_vect)
+    prior_vect = fix_zero_probabilities(prior_vect, __debug_rans_check__['given_bins'])
 
     # Fix: Ensure proper data types for RANS decoding
     bin_data = []
