@@ -255,8 +255,8 @@ def _reconstruction_protocol(compressed_data, side_info, global_model_dims, quan
     return result_dict, res_vector
 
 
-def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
-                 bins_per_plane, vec_slices, user_logger, reconst_ld=None, marginal=False) -> QuantizerWithDataPrep:
+def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count, bins_per_plane,
+                 vec_slices, user_logger, reconst_ld=None, marginal=False, binary_quant=False) -> QuantizerWithDataPrep:
     assert len(side_info) != 0
 
     reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
@@ -267,6 +267,10 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
     if issubclass(to_clone_quantizer.__class__, _ConventionalQuantizer):
         bins_per_plane=bins_per_plane**num_planes
         num_planes = 1
+
+    if binary_quant:
+        num_planes = 1
+        bins_per_plane = 2
 
     qz = to_clone_quantizer
     wz_pl_model_class: PL_EncoderDecoder_RNN = qz.wz_pl_model.__class__
@@ -298,7 +302,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count,
 
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, global_base_quantizer = None,
-                 epoch_count=45, no_global_quantization=False):
+                 epoch_count=45, no_global_quantization=False, binary_quantization=False):
         assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
 
         if global_base_quantizer is None:
@@ -317,6 +321,8 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
         self.agent_list_check = []
         self.last_global_comp = None
         self.warmup = True
+
+        self.binary_quantizer = binary_quantization
 
     def to_server_prep_data_for_transfer(self, agent_id, grad_dict, encoder_data_sent_by_server):
         assert agent_id == self.curr_agent_id
@@ -471,9 +477,13 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             print('--- training for next agent before it begins ---')
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+
                 bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
+
                 vec_slices=_get_vec_slices(dict_shape),
-                user_logger=self.wz_basic_quantizer.user_logger)
+                user_logger=self.wz_basic_quantizer.user_logger,
+            )
             self.wz_quantizer_list[next_agent] = quantizer
 
 

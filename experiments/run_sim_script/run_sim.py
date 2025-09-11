@@ -7,7 +7,9 @@ proto_choices = [
     'MarginalOnly',  # 8
     'cancer',  # 9
     'cancer-small-update',  # 10
-    *['conventional_'+r+rr for r in ['round', 'sign'] for rr in ['','_dsc']]  # 11
+    'cancer_1bit',  # 11
+    'cancer-small-update_1bit',  # 12
+    *['conventional_'+r+rr for r in ['round', 'sign'] for rr in ['','_dsc']],  # 13, 14, 15, 16
 ]
 proto_combo = [str(i) for i in range(0, len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
@@ -154,12 +156,11 @@ if __name__ == "__main__":
                 from components.broadcast_components.broadcasting_process.WorkersideTrainingWithAccumError import \
                     WorkersideTrainingWithAccumErrorProtocol
                 broadcast_prot_base = WorkersideTrainingWithAccumErrorProtocol(worker_count, base_quantizer)
-            elif proto_name == 'cancer':
+            elif 'cancer' in proto_name:
                 from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
-                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer)
-            elif proto_name == 'cancer-small-update':
-                from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
-                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer, small_update=True)
+                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer,
+                                                     binary_quantization=('1bit' in proto_name),
+                                                     small_update=('small-update' in proto_name))
             elif proto_name == 'MarginalOnly':
                 from components.broadcast_components.broadcasting_process.MarginalOnly import MarginalOnly
                 broadcast_prot_base = MarginalOnly(worker_count, base_quantizer)
