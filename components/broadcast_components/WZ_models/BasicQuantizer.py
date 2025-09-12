@@ -15,17 +15,19 @@ class PL_ConditionalPrior(pl.LightningModule):
         self.prior_model = ConditionalPrior(*args, **kwargs)
 
     def forward(self, side_info):
-        return self.prior_model(side_info)
+        return self.prior_model(side_info, tau=0)
 
     def training_step(self, batch, batch_idx):
         bins, side_info = batch
-        prior_probs = self.prior_model(side_info)
-        loss = torch.nn.functional.cross_entropy(prior_probs, bins)
+        logits = self.prior_model.layers(side_info)
+        loss = torch.nn.functional.cross_entropy(logits, bins)
         self.log('train_loss', loss, on_step=True, prog_bar=True)
+        acc = (logits.argmax(dim=1) == bins).float().mean()
+        self.log('train_acc', acc, on_step=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-2)
         return optimizer
 
 
@@ -77,7 +79,6 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
-        side_info_data_list = [self._apply_pre_process(a, normal_param, outlier_param)[0] for a in side_info_data_list]
         encoded_bins = self.basic_encoding(grad_vector)
 
         if not self.is_dsc or self.side_info is None:
@@ -89,6 +90,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         else:
             # -------------- learn conditional prior
             side_info_data_list=self.side_info
+            side_info_data_list = [self._apply_pre_process(a, normal_param, outlier_param)[0] for a in side_info_data_list]
             conditional_prior_model = PL_ConditionalPrior(
                 code_size=self.bin_count, layers=4, hidden_dim=80, input_dim=len(side_info_data_list))
 
@@ -103,11 +105,19 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
             trainer.fit(conditional_prior_model, dataloader)
 
             conditional_prior_model.eval()
-            prior_prob = None
+            prior_prob_list = []
+            side_info_tensor = torch.tensor(np.stack(side_info_data_list, axis=1), dtype=torch.float32)
+
             with torch.no_grad():
-                prior_prob = conditional_prior_model(
-                    torch.tensor(np.stack(side_info_data_list, axis=1), dtype=torch.float32)
-                ).detach()
+                # Process in batches to avoid memory issues
+                for i in range(0, len(side_info_tensor), batch_size):
+                    batch_end = min(i + batch_size, len(side_info_tensor))
+                    batch_side_info = side_info_tensor[i:batch_end]
+                    batch_prior_prob = conditional_prior_model(batch_side_info).detach()
+                    prior_prob_list.append(batch_prior_prob)
+
+                # Concatenate all batch results
+                prior_prob = torch.cat(prior_prob_list, dim=0)
 
         return torch.stack([prior_prob]), encoded_bins
 
