@@ -7,9 +7,11 @@ class _ConventionalProtocols(WorkersideTrainingProtocol):
     def __init__(self, basic_quant_class, worker_count, base_wz_quantizer, *args, **kwargs):
         print('NOTE: this protocol ignores the wz_base_quantizer given and turns off the global quantization')
         assert basic_quant_class in [RoundBasicQuantizer, RoundDSCQuantizer, SignBasicQuantizer, SignDSCQuantizer]
-        qz = basic_quant_class(base_wz_quantizer.wz_pl_model, to_clone_wz_qz=base_wz_quantizer)
+        qz_f = lambda: basic_quant_class(base_wz_quantizer.wz_pl_model, to_clone_wz_qz=base_wz_quantizer)
         kwargs['no_global_quantization'] = True
-        super(_ConventionalProtocols, self).__init__(worker_count, qz, *args, **kwargs)
+        super(_ConventionalProtocols, self).__init__(worker_count, qz_f(), *args, **kwargs)
+
+        self.wz_quantizer_list = [qz_f() for _ in range(worker_count)]
 
 
 class RoundBasicProtocol(_ConventionalProtocols):

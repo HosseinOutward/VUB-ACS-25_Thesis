@@ -108,7 +108,7 @@ def shape_dict_to_vect_slices(dict_shapes):
 
 
 # %%
-def fix_zero_probabilities(prior_vect, bins_vector, min_prob=1e-5):
+def fix_zero_probabilities(prior_vect, bins_vector, min_prob=1e-3):
     for i, pp in enumerate(prior_vect):
         pp[np.arange(len(bins_vector[i])), bins_vector[i]]+=min_prob
 
