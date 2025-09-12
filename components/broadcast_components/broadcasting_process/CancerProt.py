@@ -28,12 +28,12 @@ class CancerProtocol(HybridWZBroadcastProtocol):
         self.frozen_quantizers = None
         self.frozen_si = None
 
-        self.is_freezing_time = lambda round_id: (round_id-1) % self.update_interval == 0
+        self.is_freezing_time = lambda round_id: round_id!=1 and (round_id-1) % self.update_interval == 0
 
     def _get_side_info_for_grad_recons(self, agent_id, **kwargs):
         if self.is_freezing_time(self.curr_round_id):
             assert self.frozen_quantizers is not None
-            assert self.is_hybrid_round_f(self.curr_round_id)
+            assert not self.is_hybrid_round_f(self.curr_round_id)
 
             return self.frozen_si[agent_id]
 
@@ -57,22 +57,26 @@ class CancerProtocol(HybridWZBroadcastProtocol):
             self.frozen_quantizers = []
             self.frozen_si = []
 
-            for i in range(worker_count):
+            # the super has trained the first quantizer before setting the cancer warmup flag
+            side_info = self._get_side_info_for_grad_recons(0, force_is_hybrid_round=False)
+            self.frozen_quantizers.append(self.wz_quantizer_list[0])
+            self.frozen_si.append(side_info)
+
+            for i in range(1, worker_count):
                 target_vec = self.past_worker_grad_recons_vec[i][-1]
                 side_info = self._get_side_info_for_grad_recons(i, force_is_hybrid_round=False)
                 qz_model = _train_model(
-                        target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                        bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
-                        binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
-                        vec_slices=_get_vec_slices(dict_shape),
-                        user_logger=self.wz_basic_quantizer.user_logger
-                    )
+                    target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                    bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                    binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
+                    vec_slices=_get_vec_slices(dict_shape),
+                    user_logger=self.wz_basic_quantizer.user_logger
+                )
 
                 self.frozen_quantizers.append(qz_model)
                 self.frozen_si.append(side_info)
 
-        elif coming_is_freezing:
-            assert next_agent==0
+        elif coming_is_freezing and next_agent==0:
             assert self.frozen_quantizers is not None
             assert len(self.frozen_quantizers) == worker_count
             assert len(self.frozen_si) == worker_count
@@ -82,16 +86,20 @@ class CancerProtocol(HybridWZBroadcastProtocol):
             for i in range(worker_count):
                 target_vec = self.past_worker_grad_recons_vec[i][-1]
                 side_info = self._get_side_info_for_grad_recons(i, force_is_hybrid_round=False)
-                qz_model = self.wz_quantizer_list[agent_id]
+                qz_model = self.frozen_quantizers[agent_id]
                 qz_model = _update_wz_quant_model(qz_model, target_vec, side_info, 30)
 
                 self.frozen_quantizers[i]=qz_model
                 self.frozen_si[i]=side_info
+
+        if coming_is_freezing:
+            self.wz_quantizer_list=[a for a in self.frozen_quantizers]
 
 
 if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     bp_f = lambda worker_count, base_quantizer: (
-        CancerProtocol(worker_count, base_quantizer, epoch_count=10, update_interval=5, small_update=True))
+        CancerProtocol(worker_count, base_quantizer, epoch_count=10,
+                       update_interval=4, small_update=False))
     _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
