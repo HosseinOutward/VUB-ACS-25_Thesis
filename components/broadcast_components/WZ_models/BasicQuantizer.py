@@ -51,7 +51,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         wz_pl_model = wz_pl_model.__class__(
             bins_per_plane=bin_count,
             side_info_size=wz_pl_model.side_info_size,
-            marginal=True, inp_dim=1, num_planes=1, lr=1,
+            marginal=wz_pl_model.coding_model.marginal, inp_dim=1, num_planes=1, lr=1,
             reconst_ld=1, tau=0.5, tau_rate=2,
         ).to(torch.float32)
         del wz_pl_model.coding_model.encoder
@@ -116,7 +116,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         return torch.stack([prior_prob]), encoded_bins
 
     def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
-        return
+        _ = self.get_set_training_posterior_cdf(grad_vector, side_info_data_list)
 
     def basic_encoding(self, grad_vector):
         raise NotImplementedError
