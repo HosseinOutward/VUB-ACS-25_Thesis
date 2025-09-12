@@ -33,6 +33,7 @@ class PL_ConditionalPrior(pl.LightningModule):
 class _ConventionalQuantizer(QuantizerWithDataPrep):
     def __init__(self, wz_pl_model, *args, bin_count_conv=None, to_clone_wz_qz=None, **kwargs):
         # used for protocol initiation
+        self.side_info = None
         if to_clone_wz_qz is not None:
             kwargs = dict(
                 vec_slices = to_clone_wz_qz.vec_slices,
@@ -51,7 +52,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         wz_pl_model = wz_pl_model.__class__(
             bins_per_plane=bin_count,
             side_info_size=wz_pl_model.side_info_size,
-            marginal=wz_pl_model.coding_model.marginal, inp_dim=1, num_planes=1, lr=1,
+            marginal=True, inp_dim=1, num_planes=1, lr=1,
             reconst_ld=1, tau=0.5, tau_rate=2,
         ).to(torch.float32)
         del wz_pl_model.coding_model.encoder
@@ -59,8 +60,6 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
             state_dict=lambda: OrderedDict(), load_state_dict=lambda x: None)
 
         super().__init__(wz_pl_model, *args, **kwargs)
-
-        self.is_dsc = None
 
     def encoding_process(self, grad_vector, *args, **kwargs):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
@@ -74,10 +73,6 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
 
     def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
         res = super().get_set_training_posterior_cdf(grad_vector, side_info_data_list)
-
-        if self.is_dsc and self.wz_pl_model.coding_model.marginal:
-            self.wz_pl_model.coding_model.marginal=False
-
         return res
 
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
@@ -85,7 +80,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         side_info_data_list = [self._apply_pre_process(a, normal_param, outlier_param)[0] for a in side_info_data_list]
         encoded_bins = self.basic_encoding(grad_vector)
 
-        if self.wz_pl_model.coding_model.marginal:
+        if not self.is_dsc or self.side_info is None:
             # -------------- marginal prior
             unique_counts = np.bincount(encoded_bins, minlength=self.bin_count)
             prior_prob = (unique_counts / unique_counts.sum()).astype(np.float32)
@@ -93,10 +88,11 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
             prior_prob = torch.tensor(prior_prob, dtype=torch.float32)
         else:
             # -------------- learn conditional prior
+            side_info_data_list=self.side_info
             conditional_prior_model = PL_ConditionalPrior(
                 code_size=self.bin_count, layers=4, hidden_dim=80, input_dim=len(side_info_data_list))
 
-            trainer = pl.Trainer(max_epochs=10, logger=False, enable_checkpointing=False,
+            trainer = pl.Trainer(max_epochs=30, logger=False, enable_checkpointing=False,
                                  enable_progress_bar=self.enable_progress_bar)
             dataset = torch.utils.data.TensorDataset(
                 torch.tensor(encoded_bins, dtype=torch.long),
@@ -116,7 +112,7 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         return torch.stack([prior_prob]), encoded_bins
 
     def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
-        _ = self.get_set_training_posterior_cdf(grad_vector, side_info_data_list)
+        self.side_info = side_info_data_list
 
     def basic_encoding(self, grad_vector):
         raise NotImplementedError
@@ -147,13 +143,14 @@ class RoundDSCQuantizer(_ConventionalQuantizer):
         return res
 
 class RoundBasicQuantizer(RoundDSCQuantizer):
-    is_dsc=False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_dsc=False
 
 class SignDSCQuantizer(_ConventionalQuantizer):
-    is_dsc=True
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, bin_count_conv=2, **kwargs)
+        self.is_dsc=True
         self.recons_center = None
 
     def basic_encoding(self, grad_vector):
@@ -168,7 +165,9 @@ class SignDSCQuantizer(_ConventionalQuantizer):
         return res
 
 class SignBasicQuantizer(SignDSCQuantizer):
-    is_dsc=False
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_dsc=False
 
 
 if __name__ == "__main__":

@@ -38,17 +38,17 @@ if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
     bp_f = lambda worker_count, base_quantizer: (
-        RoundDSCProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
+        SignBasicProtocol(worker_count, base_quantizer, epoch_count=1))
+    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
 
     bp_f = lambda worker_count, base_quantizer: (
         SignDSCProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
+    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
 
     bp_f = lambda worker_count, base_quantizer: (
         RoundBasicProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
+    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
 
     bp_f = lambda worker_count, base_quantizer: (
-        SignBasicProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=25, no_global_quant=True)
+        RoundDSCProtocol(worker_count, base_quantizer, epoch_count=1))
+    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)

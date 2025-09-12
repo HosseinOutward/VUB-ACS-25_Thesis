@@ -525,7 +525,7 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False,
     # load testing data --------------------------------
     model_shape_dict = {
         f'aaa_{i}': (*np.random.randint(1, 2, size=np.random.randint(2)),
-                     (np.random.randint(1_000, 10_000) * 1000) // 1000)
+                     (np.random.randint(1_000, 10_000) * 2000) // 1000)
         for i in range(4)
     }
 
@@ -571,6 +571,11 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False,
             print('          - reconstructing data received...')
             decoded_agent_broadcast = broadcast_prot.reconstruct_worker_grads(
                 ag_id, encoded_ag_broadcast, worker_count, model_shape_dict)
+
+            # print size
+            from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size
+            enc_size = get_obj_size(encoded_ag_broadcast)
+            print(f'          - Encoding size: {enc_size/1024:.2f} kB')
 
             # print the mspe
             grad_avg_v = np.mean(np.concatenate(
