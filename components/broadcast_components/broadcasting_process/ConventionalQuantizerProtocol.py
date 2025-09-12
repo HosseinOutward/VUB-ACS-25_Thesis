@@ -37,18 +37,22 @@ class SignDSCProtocol(_ConventionalProtocols):
 if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _test_main
 
+    print('- Testing Round DSC Protocol-----------')
     bp_f = lambda worker_count, base_quantizer: (
-        SignBasicProtocol(worker_count, base_quantizer, epoch_count=1))
+        RoundDSCProtocol(worker_count, base_quantizer, epoch_count=1))
     _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
 
-    bp_f = lambda worker_count, base_quantizer: (
-        SignDSCProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
-
+    print('- Testing Round Basic Protocol-----------')
     bp_f = lambda worker_count, base_quantizer: (
         RoundBasicProtocol(worker_count, base_quantizer, epoch_count=1))
     _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
 
+    print('- Testing Sign DSC Protocol-----------')
     bp_f = lambda worker_count, base_quantizer: (
-        RoundDSCProtocol(worker_count, base_quantizer, epoch_count=1))
+        SignDSCProtocol(worker_count, base_quantizer, epoch_count=1))
+    _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
+
+    print('- Testing Sign Basic Protocol-----------')
+    bp_f = lambda worker_count, base_quantizer: (
+        SignBasicProtocol(worker_count, base_quantizer, epoch_count=1))
     _test_main(bp_f, worker_count=2, rounds=5, no_global_quant=True)
