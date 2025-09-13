@@ -3,9 +3,48 @@
 
 \subsection{Simple and Intervaled Results}
 \label{ssec:res_ourmethod}
-Explain the results of the simple and intervaled framework. compare with other baselines.
+Explain the results of the simple and intervaled framework (cancer).
+Compare simple vs intervaled. Get rate-distortion curves.
+compare intervaled vs small update interval.
 
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/results.png}
+    \caption{Simple vs Intervaled Results}
+    \label{fig:simple_vs_intervaled_rate_distortion}
+    The figure shows the rate-distortion curves for the simple and intervaled frameworks.
+\endfigure
+
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/results.png}
+    \caption{Theoretical vs Empirical Results}
+    \label{fig:theoretical_vs_empirical_rate_distortion}
+    The figure shows the rate-distortion curves for the theoretical and empirical results.
+\endfigure
+
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/results.png}
+    \caption{compare with conventional quantizers}
+    \label{fig:intervaled_vs_conventional_auc_rate_vs_rounds}
+    The figure shows the AUC vs rounds and rate vs rounds for the intervaled framework and conventional quantizers.
+\endfigure
 
 \subsection{Performance Comparison}
 \label{ssec:comparison}
-Explain no direct comparison due to no DSC quantizer experiments in literature. But we can compare with the performance of the same model trained in a non-DSC quantizer setting. Another less direct comparison is with the performance of the same model trained in DSC compression (but not quantization) setting.
+Explain why no direct comparison due to no DSC quantizer experiments in literature.
+But we can compare with the performance of the same model trained in a non-DSC quantizer setting.
+
+\table[ht]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|}
+        \hline
+        Method & AUC@R20 & AUC@R50 & Rate (bits) & MAPE \\
+        \hline
+        No Compression & 0.85 & 0.87 & N/A & N/A
+    \end{tabular}
+    \caption{Performance Comparison}
+    \label{tab:performance_comparison}
+    The table shows the performance comparison between our method and the no compression baseline.
+\endtable
