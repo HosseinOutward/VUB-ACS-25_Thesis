@@ -10,6 +10,7 @@ class _ConventionalProtocols(WorkersideTrainingProtocol):
         qz_f = lambda: basic_quant_class(base_wz_quantizer.wz_pl_model, to_clone_wz_qz=base_wz_quantizer)
         kwargs['no_global_quantization'] = True
         super(_ConventionalProtocols, self).__init__(worker_count, qz_f(), *args, **kwargs)
+        self.si_window_size=3
 
         self.wz_quantizer_list = [qz_f() for _ in range(worker_count)]
 
