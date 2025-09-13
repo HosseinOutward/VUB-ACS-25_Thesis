@@ -4,11 +4,18 @@
 \subsection{Gradient Quantization for Communication Reduction}
 \label{ssec:quantcomp}
 Explain quantizer compression and their limitations.
+explain the speedups and flexibility gains from learned quantizers compared to classical quantizers.
+explain possible gains from using side information to reduce the rate of the quantizer.
 
     \subsubsection{Learned Layered Wyner-Ziv Compression}
     \label{sssec:layeredWZ}
-Explain the quantizer method from Joukovsky et al. \cite{JoukovskyLayeredWZ} and Ozyilkan et al. \cite{OzyilkanRecoverBinning}.
+Explain the quantizer method from Joukovsky et al. \cite{JoukovskyLayeredWZ} and Ozyilkan et al. \cite{OzyilkanRecoverBinning} regarding speed and rate-distortion performance.
+Explain the improvments from Ozyilkan et al. \cite{OzyilkanRecoverBinning} to Joukovsky et al. \cite{JoukovskyLayeredWZ}.
 Explain the architecture, the training procedure, and the loss function.
+
+\begin{equation}
+    \mathcal{L} = ...
+\end{equation}
 
 \subsection{Distributed Compression for Federated Learning}
 \label{ssec:distcomp}

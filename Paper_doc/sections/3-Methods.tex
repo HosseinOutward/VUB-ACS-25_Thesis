@@ -5,15 +5,43 @@ Explain the overall approach and the proposed framework.
 \subsection{Motivation}
 \label{ssec:motivation}
 Explain the link between the gradient of workers which could be exploited as side information.
+Explain difficulty making it and why high correlation is enough, but low is not necessarily meaningful.
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/gradient_correlation.png}
+    \caption{Correlation between gradients of different workers.}
+    \label{fig:gradient_correlation}
+    The figure shows the correlation between per-coordinate correlation of gradients different workers. We can see that there is a significant correlation between the gradients of different workers, and it only starts to decrease as the training reaches full AUC.
+\endfigure
 
 \subsection{Simple Framework}
 \label{ssec:simpleframework}
 The simple framework consists of the following components:
 a) preprocessing, b) warmup phase, c) a single main training phase, and d) use frozen model for all downstream rounds
 
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/simple_framework.png}
+    \caption{Simple Framework}
+    \label{fig:simple_framework}
+    The figure shows the simple framework for training the model. The model has 3 phases: a warmup phase and a main training phase and finally a frozen phase. In the warmup phase, we use a pretrained model to get initial side information. In the main training phase, we train the model with the data we have seen so far. Finally, in the frozen phase, we use the trained model for all downstream rounds and only change the side information based on the latest received gradients.
+\endfigure
+
+explain the model used for initial warmup (pretrained on a laplace distribution).
+explain the issues with having a static model and how it either increases rate or distortion (rarely both).
+
 \subsection{Intervaled Framework}
 \label{ssec:intervaledframework}
+explain the need for retraining the model after longer trainings and having longer warmup.
 Explain that its much similar to the simple framework, but we have a longer warmup phase (with more side info) and we periodically retrain the model with all the data we have seen so far.
+
+\figure[ht]
+    \centering
+%    \includegraphics[width=0.5\textwidth]{figures/intervaled_framework.png}
+    \caption{Intervaled Framework}
+    \label{fig:intervaled_framework}
+    The figure shows the intervaled framework for training the model. The model is similar to the simple framework, but we have a longer warmup phase (meaning more side info) and we periodically retrain the model with all the data we have seen so far.
+\endfigure
 
 \subsubsection{Smaller Updates}
 \label{sssec:smallerupdates}
