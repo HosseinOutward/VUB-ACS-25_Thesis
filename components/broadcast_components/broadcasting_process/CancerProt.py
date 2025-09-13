@@ -68,7 +68,7 @@ class CancerProtocol(HybridWZBroadcastProtocol):
                 qz_model = _train_model(
                     target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
                     bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
-                    binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
+                    binary_quant=self.binary_quantizer if self.curr_round_id >= 9 else False,
                     vec_slices=_get_vec_slices(dict_shape),
                     user_logger=self.wz_basic_quantizer.user_logger
                 )
@@ -83,14 +83,21 @@ class CancerProtocol(HybridWZBroadcastProtocol):
             assert self.is_hybrid_round_f(self.curr_round_id)
 
             print('--- updating frozen quantizers after worker-side ---')
+            self.frozen_quantizers = []
+            self.frozen_si = []
             for i in range(worker_count):
                 target_vec = self.past_worker_grad_recons_vec[i][-1]
                 side_info = self._get_side_info_for_grad_recons(i, force_is_hybrid_round=False)
-                qz_model = self.frozen_quantizers[agent_id]
-                qz_model = _update_wz_quant_model(qz_model, target_vec, side_info, 30)
+                qz_model = _train_model(
+                    target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
+                    bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                    binary_quant=self.binary_quantizer if self.curr_round_id >= 9 else False,
+                    vec_slices=_get_vec_slices(dict_shape),
+                    user_logger=self.wz_basic_quantizer.user_logger
+                )
 
-                self.frozen_quantizers[i]=qz_model
-                self.frozen_si[i]=side_info
+                self.frozen_quantizers.append(qz_model)
+                self.frozen_si.append(side_info)
 
         if coming_is_freezing:
             self.wz_quantizer_list=[a for a in self.frozen_quantizers]
