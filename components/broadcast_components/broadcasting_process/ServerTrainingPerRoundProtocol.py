@@ -493,7 +493,7 @@ def _test_main(brod_prot_class, worker_count=2, rounds=2, no_global_quant=False,
     import os
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2,
                                      bins_per_plane=16, lr=1e-3, marginal=True).to(torch.float32)
-    path_to_basic = r'D:\App External Data\Projects\VUB-ACS-25_Thesis\data\basicRNN_2plane_4bins_state.pt'
+    path_to_basic = r'..\..\..\data\basicRNN_2plane_4bins_state.pt'
     wz_model.load_state_dict(torch.load(path_to_basic, map_location='cpu'))
 
     base_quantizer = quantizer_class(wz_model, train_sample_size=200_000,
