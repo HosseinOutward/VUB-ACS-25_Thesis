@@ -212,14 +212,14 @@ if __name__ == "__main__":
 
     # %%
     bins, temp = wz_quantizer.encoding_process(y)
-    recons = wz_quantizer.decoding_process(bins, side_info_data, temp).numpy()
+    recons = wz_quantizer.decoding_process(bins, side_info_data, temp)
 
     # %%
-    # import matplotlib.pyplot as plt
-    # temp = np.argsort(y[:1_000_000])
-    # plt.figure(figsize=(16, 3))
-    # plt.scatter(y[temp], np.abs(y[temp] - recons[temp]) / np.mean(np.abs(y[temp])), s=0.1)
-    # plt.show()
+    import matplotlib.pyplot as plt
+    temp = np.argsort(y[:1_000_000])
+    plt.figure(figsize=(16, 3))
+    plt.scatter(y[temp], np.abs(y[temp] - recons[temp]) / np.mean(np.abs(y[temp])), s=0.1)
+    plt.show()
 
     # %%
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size
