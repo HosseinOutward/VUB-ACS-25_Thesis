@@ -27,7 +27,9 @@ class CancerProtocol(HybridWZBroadcastProtocol):
 
         self.frozen_quantizers = None
         self.frozen_si = None
-
+        single_is_hybrid_round_f = lambda round_id: round_id % self.hybrid_round_num == 0 and not self.warmup
+        self.is_hybrid_round_f = lambda round_id: single_is_hybrid_round_f(round_id)   or\
+                                                  single_is_hybrid_round_f(round_id+1)
         self.is_freezing_time = lambda round_id: round_id!=1 and (round_id-1) % self.update_interval == 0
 
     def _get_side_info_for_grad_recons(self, agent_id, **kwargs):

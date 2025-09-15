@@ -6,14 +6,15 @@ We consider a multi-terminal approach as we have multiple workers with correlate
 Since these agents do not communicate directly, we employ Distributed Source Coding (DSC) principles to exploit inter-node, and even temporal correlation. We first describe the quantizer framework, turning a gradient vector into a bitstream, and back. Then we will describe 2 different side information (SI) setup which define our two variants of the quantizer. Armed with these quantizers, we will finally explore possible communication protocols to leverage them in a federated learning setup.
 
 \begin{figure}[t]
-\caption{}
-\label{fig:grad_corr}
+    \includegraphics[width=0.45\textwidth]{sections/figure/calc correlationpng}
+    \caption{}
+    \label{fig:grad_corr}
 \end{figure}
 
 %-----------------------------------------------------------------------
 \subsection{Learned Successive Multi-terminal Wyner–Ziv Quantization (LSMT-WZ-Q)}
 \label{subsec:method-lsmtwzq}
-We first describe the main building block that is the quantizer used in our protocols.
+We first describe the main building block that is the quantizer used in our protocols \ref{fig:block}.
 At round \(r\), worker \(k\in\{1,\ldots,K\}\) holds accumulated gradient in the form of a flatten vector \(G_{k,r}\in\mathbb{R}^n\). This vector will be preprocessed into \(X_{k,r}\).
 This vector is then quantized, i.e. encoded into symbols \(u_{k,r,i,j}\) where i is the spatial index and j is the refinement index (if any). The list of symbols of the same refinement stage is denoted \(U_{k,r,j}\) which are separately further compressed into a bitstream \(O_{k,r}\) using a Slepian-Wolf (SW) coder conditioned on the prior \(p(u_{k,r}|{Y}_{k,r})\) which was estimated by a learned model as part of the training of the quantizer~\cite{OzyilkanRecoverBinning,JoukovskyLayeredWZ}. These bit streams are sent to the server where using the SW decoder (also conditioned on the same prior) the symbols vector \(U_{k,r,j}\) are recovered. Finally these symbols alongside the side information can be given to the learned decoder to reconstruct the vector \(\hat X_{k,r}\) and post-processed into the gradient estimate \(\hat G_{k,r}\). The figure below summarizes the process.
 
@@ -37,7 +38,7 @@ This vector is then quantized, i.e. encoded into symbols \(u_{k,r,i,j}\) where i
 % -----------------------------------------------------------------------
 \textbf{Pre-/Post-processing.}
 Learned WZ is sensitive to distribution drift. We apply robust, stats-based normalization per round using the (signed) 99th percentile to stabilize scales; with this, the round-to-round gradient KL for ResNet18 is \(<0.01\), indicating low shift. Two low-cost guards (not needed in our ResNet18 runs but useful elsewhere):
-\begin{itemize}[leftmargin=1.1em,itemsep=0pt,topsep=2pt]
+\begin{itemize}
   \item \emph{Per-layer normalization:} mitigates large layer-wise scale disparities at the cost of sending layer stats.
   \item \emph{Outlier handling:} values beyond \(0.3\times\mathrm{P99}\) are clipped/pulled into range and quantized with the rest; minimal side info restores them at decode.
 \end{itemize}
@@ -88,7 +89,7 @@ The training uses newly accumulated gradient \(G_{k,r}\) as target which will im
 %-----------------------------------------------------------------------
 \subsection{Communication Protocols leveraging LSMT-WZ-Q}
 \label{subsec:method-protocols}
-This is where we describe how to use the above quantizers in a federated learning setup. We explore multiple protocols with different trade-offs between performance and practicality as summarized below and are described in Figure~\ref{fig:protocols}.
+This is where we describe how to use the above quantizers in a federated learning setup. We explore multiple protocols with different trade-offs between performance and practicality as summarized below and are described in Figure~\ref{fig:protocols_timeline}.
 \begin{enumerate}
 \item Simple Protocol: Train once with one SI, use on all rounds.
 \item Multi-terminal Adaptive Protocol: Periodically update quantizers and use more SI.
@@ -96,16 +97,18 @@ This is where we describe how to use the above quantizers in a federated learnin
 \end{enumerate}
 
 \begin{figure}[ht]
-    \includegraphics[width=0.5\textwidth]{sections/figure/protocols}
+%    \includegraphics[width=0.5\textwidth]{sections/figure/protocols}
+    \input{sections/figure/protocol_timeline}
     \caption{Shows the overall idea of the 3 protocols as a timeline.}
-    \label{fig:protocols}
+    \label{fig:protocols_timeline}
 \end{figure}
 
 \subsubsection{Warm-up phase}
 All protocols start with a warm-up phase of 1 round where a learned non-WZ quantizer is trained on Laplacian distribution. This is to get initial reconstructions at the server and workers to be used as SI in the next rounds. Having a weak quantizer at this stage causes severe performance degradation in the next rounds as both variants of quantizers will have to start with a poor SI.
 
 \subsubsection{Simple Protocol}
-This protocol trains a multi-terminal quantizer once after the warm-up phase using the reconstructions from round 1. After that, per each round, the list of past reconstructions is updated but the quantizer is not retrained. This means the quantizer will only ever use \(K-1\) workers' reconstructions as SI, and the temporal correlation is essentially ignored.
+This protocol trains a multi-terminal quantizer once after the warm-up phase using the reconstructions from round 1. After that, per each round, the list of past reconstructions is updated but the quantizer is not retrained. The conditional prior is also not updated to see how well the prior model generalizes to new SI.
+This means the quantizer will only ever use \(K-1\) workers' reconstructions as SI, and the temporal correlation is essentially ignored.
 The main advantage of this protocol is its simplicity as it only requires one training phase and the server only needs to send the encoder once to the workers. However, it does not fully exploit the potential of the multi-terminal quantizer due to its limited SI and the distribution mismatch between training from the first round and inference from later rounds.
 
 \subsubsection{Multi-terminal Adaptive Protocol}
