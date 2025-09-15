@@ -1,24 +1,43 @@
 \section{Background}
 \label{sec:background}
 
-\subsection{Gradient Quantization for Communication Reduction}
-\label{ssec:quantcomp}
-Explain quantizer compression and their limitations.
-explain the speedups and flexibility gains from learned quantizers compared to classical quantizers.
-explain possible gains from using side information to reduce the rate of the quantizer.
+%-----------------------------------------------------------------------
+\subsection{Federated Learning and FedSGD}
+\label{ssec:backFL}
+For our work, we consider a standard FL setup based on the FedSGD algorithm.
+In this alg., we would have $K$ agents, and are aiming to minimize a global loss $F(\mathbf{w})$, with $F_k(\mathbf{w})$ being the local loss of each agent.
+In each communication round $r$ of the FedSGD algorithm, agent $k$ computes its local gradient $\mathbf{g}_{k,r}$. Gradients are sent to a central server, which aggregates them into $\mathbf{g}_r = \frac{1}{K} \sum_{k=1}^{K} \mathbf{g}_{k,r}$ and updates the global model $\mathbf{w}$ using the rule: $\mathbf{w}_{r+1} = \mathbf{w}_r - \eta \mathbf{g}_r$. This is repeated for $R$ rounds until convergence and is called FedSGD \cite{McMahan2017CommunicationEfficientLOcal}.
+This approach means that in each round, each agent needs to send its full accumulated gradient to the server, which can be communication-intensive, especially for large models.
 
-    \subsubsection{Learned Layered Wyner-Ziv Compression}
-    \label{sssec:layeredWZ}
-Explain the quantizer method from Joukovsky et al. \cite{JoukovskyLayeredWZ} and Ozyilkan et al. \cite{OzyilkanRecoverBinning} regarding speed and rate-distortion performance.
-Explain the improvments from Ozyilkan et al. \cite{OzyilkanRecoverBinning} to Joukovsky et al. \cite{JoukovskyLayeredWZ}.
-Explain the architecture, the training procedure, and the loss function.
-
+\subsection{Wyner-Ziv Theorem}
+\label{ssec:backwz}
+If given a source $X$ and a side information $Y$ only available at the decoder, the rate-distortion function for wyner-ziv coding is given by \cite{1055508}:
 \begin{equation}
-    \mathcal{L} = ...
+    R_{WZ}(D) = \min_{p(\hat{x}|x,y): \mathbb{E}[d(X,\hat{X})] \leq D} I(X;\hat{X}|Y)
 \end{equation}
+where $I(X;\hat{X}|Y)$ is the conditional mutual information between $X$ and its reconstruction $\hat{X}$ given $Y$, and $d(X,\hat{X})$ is a distortion measure.
+Under certain conditions, the Wyner-Ziv rate-distortion function archives the same performance as if the side information were available at both the encoder and decoder, known as the Slepian-Wolf bound \cite{SlepianWolf1973}.
 
-\subsection{Distributed Compression for Federated Learning}
-\label{ssec:distcomp}
-Explain the distributed compression method from Abrahamyan et al. \cite{Abrahamyan2022LGC} and Zhang et al. \cite{ZhangTao2022}.
-Explain the architecture, the training procedure, and the loss function.
+%-----------------------------------------------------------------------
+\subsection{Learned WZ Quantizers}
+\label{ssec:backlwzq}
+An encoder-decoder pair can be implemented using DNNs, as shown in \cite{OzyilkanRecoverBinning}. The encoder $\phi$ quantize the input $\mathbf{x}$ to a bin index $u$, while the decoder $\psi$ reconstructs $\hat{\mathbf{x}}$ using the bin index and side information $\mathbf{y}$.
+In the work of \cite{OzyilkanRecoverBinning}, the loss functions retrieved from the Wyner-Ziv theorem are estimated by training a DNN-based conditional posterior model $q(\mathbf{x}|\mathbf{y},u)$ to approximate the true posterior $p(\mathbf{x}|\mathbf{y},u)$. This prior could be used by a seprate prior-aware entropy coder to compress a list of bin index $u$. if this step is not needed, the prior could be replaced with a marginal $p(u|\mathbf{y})$, though we will not consider this case due to its higher rate.
+The loss function is given by:
+\begin{equation}
+\mathcal{L}(\phi, \psi) = \mathbb{E}_{X,Y} \left[ \mathbb{E}_{U|X}[-\log q(X|Y,U)] + \lambda \mathbb{E}_{U|X}[d(X,\hat{X})] \right]
+\end{equation}
+where $d$ is a distortion measure, and $\lambda$ is a Lagrange multiplier that controls the rate-distortion trade-off by effecting the relative importance of distortion component relative to the rate component.
+The implementation uses a gumbel-softmax to encourage the model to consider different quantization's in the early stages of training.
 
+%-----------------------------------------------------------------------
+\subsection{Successive Refinement}
+\label{ssec:backSR}
+Successive refinement coding allows for progressive more encoded information, where each stage provides increasingly better reconstruction quality. In WZ coding, $J$ stages is defined by encoder-decoder pairs $(\phi_j, \psi_j)$ for $j = 1, \ldots, J$. A learned version is presented in \cite{JoukovskyLayeredWZ} which improves rate-distortion performance compared to single-stage coding on gaussian sources.
+
+The encoders and decoders are defined as:
+\begin{align}
+\phi_j &: \mathcal{X}^n \rightarrow \{1, 2, \ldots, M_j\} \\
+\psi_j &: \{1, \ldots, M_1\} \times \cdots \times \{1, \ldots, M_j\} \times \mathcal{Y}^n \rightarrow \hat{\mathcal{X}}^n
+\end{align}
+where $M_j$ are code sizes and the decoders successively estimate $\hat{X}_j$ with distortion levels $(D_1, \ldots, D_J)$ using side information and previously accumulated codes. The total sum-rate after $j$ stages is $R_{tot}^j = \sum_{i=1}^j R_i$.
