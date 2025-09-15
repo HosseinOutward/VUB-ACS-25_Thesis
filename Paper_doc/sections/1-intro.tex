@@ -1,3 +1,22 @@
 \section{\bf Introduction}
 \label{sec:intro}
-IDK WHAT TO PUT HERE, AAAAAAA
+
+% Federated Learning and communication challenges
+Federated and distributed learning enable collaborative model training on decentralized data by iteratively exchanging model updates, such as gradients. The communication cost of these gradients, however, creates a significant overhead.
+
+To address this, gradient compression techniques like quantization, sparsification and compression are widely used. Yet these costs remain a primary bottleneck that challenges the practical scalability of distributed learning, especially for large models likes LLMs and ViTs.
+
+To this end, more advanced methods improve efficiency by exploiting the inherent correlation between gradients across time and also different nodes, reducing redundant transmissions.
+
+% DSC use in distributed learning
+Distributed Source Coding (DSC), based on Slepian-Wolf\cite{SlepianWolf1973} and Wyner-Ziv\cite{1055508} principles, enables workers to independently compress their correlated gradients, and then the parameter server acts as a joint decoder, using gradients from other workers as side information to decompress each update. This exploits inter-node redundancy to reduce communication rate to the joint entropy of the sources, without requiring any direct communication between workers.
+
+% Learned WZ quantizer
+Conventional DSC methods rely on rigid algorithms and are not well-suited to large and high-dimensional gradients in deep learning. Recent works\cite{OzyilkanRecoverBinning} propose learned Wyner-Ziv quantizers for Gaussian sources, which could be adapted to gradient distributions and multi-terminal settings. These methods train end-to-end models which includes a learned non-uniform quantizer and a dequantizer that jointly processes the incoming code and side information, allowing for lower rates.
+
+This framework can be extended with successive refinement\cite{JoukovskyLayeredWZ}, where a base layer is sent, followed by (optional) residual layers. This offers lower rate-distortion tradeoffs and flexibility to adapt to varying bandwidth constraints.
+
+Further, in a multiterminal scenario, the server sequentially decodes updates from each agent, and adds them to a list of side-information, allowing for progressively reduced rate for each subsequent worker, improving overall system efficiency.
+
+% Contributions
+In this paper, we present a unified framework that combines federated learning with learned successively refined Wyner-Ziv quantizer in a multi-terminal setting. Motivated by the proven bandwidth savings of DSC in FL \cite{ZhangTao2022, Abrahamyan2022LGC} and works on learned WZ quantizers that observed compression gains and scalability, we introduce a fully learned, multi-terminal, end-to-end pipeline specifically made for gradient compression in distributed learning.

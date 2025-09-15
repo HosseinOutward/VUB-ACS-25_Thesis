@@ -1,0 +1,39 @@
+\begin{adjustbox}{max width=\linewidth}
+\begin{tikzpicture}[
+  >=Latex, font=\small, transform shape,
+  node distance=.06\linewidth and .06\linewidth,
+  block/.style={draw, thick, minimum width=.10\linewidth, minimum height=10mm, align=center},
+  blockSmall/.style={block, minimum width=.2\linewidth, minimum height=8mm},
+  var/.style={inner sep=0pt}
+]
+
+% Blocks in order: Pre -> WZ Enc -> WZ Dec -> Post
+\node[blockSmall]                (Pre)  {Pre};
+\node[block,      right=of Pre]  (Enc)  {WZ Enc};
+\node[block,      right=of Enc]  (Dec)  {WZ Dec};
+\node[blockSmall, right=of Dec]  (Post) {Post};
+
+% Main input/output variables
+\node[var,   left =.08\linewidth of Pre]  (g)    {$g_{k,r,i}$};
+\node[var,   right=.08\linewidth of Post] (ghat) {$\hat{g}_{k,r,i}$};
+
+% Side inputs
+\node[var, above=.08\linewidth of Pre] (p) {$p_{aram}$};
+\node[var, below=.06\linewidth of Dec] (s) {$Y_{k,r}$};
+
+% Flow with labeled signals
+\draw[->] (g)   -- (Pre.west);
+\draw[->] (Pre) -- node[midway, above] {$x$}       (Enc);
+\draw[->] (Enc) -- node[midway, above] {$O$}       (Dec);
+\draw[->] (Dec) -- node[midway, above] {$\hat{x}$} (Post);
+\draw[->] (Post) -- (ghat);
+
+% Fan-out from p to Enc and Post
+\draw[-] (p) -- (Pre.north);
+\draw[->] (p) -| (Post.north);
+
+% External side info into decoder
+\draw[->] (s) -- (Dec.south);
+
+\end{tikzpicture}
+\end{adjustbox}
