@@ -1,25 +1,29 @@
 import numpy as np
 import lightning as pl
 import torch
-from WZQuantizerWithDataPrep import QuantizerWithDataPrep
+from components.broadcast_components.WZ_models.WZQuantizerWithDataPrep import QuantizerWithDataPrep
 from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
 
 class PL_ConditionalPrior(pl.LightningModule):
-    def __init__(self, cond_m, *args, **kwargs):
+    def __init__(self, coding_model, *args, **kwargs):
         super().__init__()
-        self.prior_model = cond_m
+        self.coding_model = coding_model
 
     def forward(self, side_info):
         return self.prior_model(side_info, tau=0)
 
     def training_step(self, batch, batch_idx):
-        bins, side_info = batch
-        logits = self.prior_model.layers(side_info)
-        loss = torch.nn.functional.cross_entropy(logits, bins)
-        self.log('train_loss', loss, on_step=True, prog_bar=True)
-        acc = (logits.argmax(dim=1) == bins).float().mean()
-        self.log('train_acc', acc, on_step=True, prog_bar=True)
+        soft_codes, side_info = batch
+        soft_codes = [a for a in soft_codes.transpose(0,1)]
+        bins = [torch.argmax(sc, dim=-1) for sc in soft_codes] # (planes,
+        logits = self.coding_model.get_priors(
+            codes=soft_codes, y=side_info, tau=None)
+        loss = sum([torch.nn.functional.cross_entropy(logits[i], bins[i])
+                    for i in range(len(bins))])
+        # self.log('train_loss', loss, on_step=True, prog_bar=True)
+        # acc = (logits.argmax(dim=1) == bins).float().mean()
+        # self.log('train_acc', acc, on_step=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -27,22 +31,22 @@ class PL_ConditionalPrior(pl.LightningModule):
         return optimizer
 
 
-def train_conditional(conditionalRNN, encoded_bins, side_info_data_list,):
-    con_pl_m = PL_ConditionalPrior(conditionalRNN).to(torch.float32)
+def train_conditional(coding_model, soft_c, side_info_data_list,):
+    con_pl_m = PL_ConditionalPrior(coding_model).to(torch.float32)
     trainer = pl.Trainer(max_epochs=20, logger=False, enable_checkpointing=False)
     dataset = torch.utils.data.TensorDataset(
-        torch.tensor(encoded_bins, dtype=torch.long),
+        torch.tensor(soft_c, dtype=torch.float32).transpose(0,1),
         torch.tensor(np.stack(side_info_data_list, axis=1), dtype=torch.float32)
     )
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=15000, shuffle=True, num_workers=8)
+        dataset, batch_size=15000, shuffle=True, num_workers=8, persistent_workers=True)
     trainer.fit(con_pl_m, dataloader)
-    con_pl_m.eval()
-    conditionalRNN.load_state_dict(con_pl_m.prior_model.state_dict())
 
 
 class LearnedNonWZQuantizer(QuantizerWithDataPrep):
-    def __init__(self, *args, data_folder_path=r'data', use_dsc_sw=True, **kwargs):
+    def __init__(self, *args,
+                 data_folder_path=r'D:\User\App Files\Projects\VUB-ACS-25_Thesis\data',
+                 use_dsc_sw=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.data_folder_path = data_folder_path
         self.use_dsc_sw = use_dsc_sw
@@ -60,8 +64,8 @@ class LearnedNonWZQuantizer(QuantizerWithDataPrep):
         qz = self.wz_pl_model
         self.wz_pl_model = PL_EncoderDecoder_RNN(
             inp_dim=1,
-            side_info_size=len(side_info_data_list),
-            marginal=qz.marginal,
+            side_info_size=0,
+            marginal=True,
             num_planes=num_planes,
             bins_per_plane=bins_per_plane,
 
@@ -80,20 +84,33 @@ class LearnedNonWZQuantizer(QuantizerWithDataPrep):
         print(f'--- loaded pretrained model from {path_to_sd} ---')
 
         if not self.use_dsc_sw:
-            self.wz_pl_model.marginal = True
             return
 
-        grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
-        encoded_bins = self.encoding_process(grad_vector)
+        temp = qz.coding_model.conditionalRNN
+        cond_m = temp.__class__(
+            bins_per_plane + len(side_info_data_list),
+            temp.hidden_dim, temp.layers, output_activation=False)
+        self.wz_pl_model.coding_model.marginal = False
+        self.wz_pl_model.coding_model.conditionalRNN = cond_m
+        _, soft_code = self.get_prior_and_softcodes(grad_vector, side_info_data_list)
         train_conditional(
-            self.wz_pl_model.coding_model.conditionalRNN,
-            encoded_bins, side_info_data_list,
-        )
+            self.wz_pl_model.coding_model, soft_code, side_info_data_list,)
+
+        _ = self.get_set_training_posterior_cdf(grad_vector, side_info_data_list)
+        self.count_side_info_data = 0
+
+    def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None,):
+        side_info_data_list = []
+        return super().decoding_process(quantized_data, side_info_data_list, encoding_extra_data)
+
 
 if __name__ == "__main__":
     from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import \
         _test_main, WZServerTrainingPerRoundProtocol
+    from components.broadcast_components.broadcasting_process.CancerProt import \
+        CancerProtocol
 
     bp_f = lambda worker_count, base_quantizer: (
-        WZServerTrainingPerRoundProtocol(worker_count, base_quantizer, epoch_count=1))
-    _test_main(bp_f, worker_count=2, rounds=50, quantizer_class=LearnedNonWZQuantizer)
+        CancerProtocol(worker_count, base_quantizer, epoch_count=1))
+    _test_main(bp_f, worker_count=2, rounds=50,
+               no_global_quant=True, quantizer_class=LearnedNonWZQuantizer)
