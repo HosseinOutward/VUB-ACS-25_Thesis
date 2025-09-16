@@ -4,14 +4,6 @@ from components.broadcast_components.broadcasting_process.HybridWZBroadcastProto
 from components.broadcast_components.broadcasting_process.ServerTrainingPerRoundProtocol import _train_model
 
 
-def _update_wz_quant_model(qz_model, grad_vector, side_info_vs, epochs):
-    assert len(side_info_vs) != 0
-    temp = np.random.normal(0, np.sqrt(1e-8), len(grad_vector), ).astype(np.float32)
-    qz_model.train_model(grad_vector + temp, side_info_vs, epoch=epochs, batch_size=10_000)
-    qz_model.get_set_training_posterior_cdf(grad_vector, side_info_vs)
-    return qz_model
-
-
 class CancerProtocol(HybridWZBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep,
                  small_update=False, update_interval=10, **kwargs):
@@ -69,7 +61,7 @@ class CancerProtocol(HybridWZBroadcastProtocol):
                 side_info = self._get_side_info_for_grad_recons(i, force_is_hybrid_round=False)
                 qz_model = _train_model(
                     target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                    bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                    bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 2)),
                     binary_quant=self.binary_quantizer if self.curr_round_id >= 9 else False,
                     vec_slices=_get_vec_slices(dict_shape),
                     user_logger=self.wz_basic_quantizer.user_logger
@@ -92,7 +84,7 @@ class CancerProtocol(HybridWZBroadcastProtocol):
                 side_info = self._get_side_info_for_grad_recons(i, force_is_hybrid_round=False)
                 qz_model = _train_model(
                     target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                    bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                    bins_per_plane=int(max(16 // (self.curr_round_id + 1), 2)),
                     binary_quant=self.binary_quantizer if self.curr_round_id >= 9 else False,
                     vec_slices=_get_vec_slices(dict_shape),
                     user_logger=self.wz_basic_quantizer.user_logger

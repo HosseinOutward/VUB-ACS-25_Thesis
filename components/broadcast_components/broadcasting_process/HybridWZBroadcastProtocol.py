@@ -36,8 +36,8 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             print('--- training worker-side model for hybrid ---')
             quantizer:QuantizerWithDataPrep = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id/2 + 1), 4)),
-                binary_quant=self.binary_quantizer if self.curr_round_id >= 25 else False,
+                bins_per_plane=int(max(self.hybrid_round_num * 16 // (self.curr_round_id + 1), 2)),
+                # binary_quant=self.binary_quantizer if self.curr_round_id >= 25 else False,
                 vec_slices=_get_vec_slices(dict_shape),
                 user_logger=self.wz_basic_quantizer.user_logger)
             self.wz_quantizer_list[agent_id] = quantizer
@@ -103,7 +103,7 @@ class HybridWZBroadcastProtocol(WZServerTrainingPerRoundProtocol):
             print('--- training all-out model for non-hybrid rounds ---')
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
-                bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                bins_per_plane=int(max(16 // (self.curr_round_id + 1), 2)),
                 binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
                 vec_slices=_get_vec_slices(dict_shape),
                 user_logger=self.wz_basic_quantizer.user_logger)

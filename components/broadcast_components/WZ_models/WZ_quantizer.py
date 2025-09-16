@@ -10,9 +10,11 @@ from components.other_utilities.user_logger import UnifiedLoggingClass
 
 class WZQuantizer:
     def __init__(self, wz_pl_model, count_side_info_data,
-                 enable_progress_bar=False, train_sample_size=100_000, user_logger:UnifiedLoggingClass=None,):
+                 enable_progress_bar=False, train_sample_size=100_000,
+                 user_logger:UnifiedLoggingClass=None, force_no_sw = False):
         from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
+        self.force_no_sw = force_no_sw
         self.val_indices = None
         self.training_posterior_cdf = None
         self.enable_progress_bar = enable_progress_bar
@@ -43,7 +45,20 @@ class WZQuantizer:
     def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
         if grad_vector is not None or side_info_data_list is not None:
             assert grad_vector is not None and side_info_data_list is not None
-            self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
+
+            if side_info_data_list == []:
+                bins = self.encoding_process(grad_vector)[0] # (num_planes, N)
+                probs_per_plane = []
+                for b_vec in bins:
+                    counts = np.bincount(b_vec, minlength=self.bin_count)
+                    probs = counts / counts.sum()
+                    probs_per_plane.append(probs)
+                probs_per_plane = np.array(probs_per_plane) # (num_planes, bin_count)
+
+                self.training_posterior_cdf = np.array([np.array([a]*len(grad_vector), dtype=np.float32)
+                                                   for a in probs_per_plane])
+            else:
+                self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
 
         assert self.training_posterior_cdf is not None
         return self.training_posterior_cdf
