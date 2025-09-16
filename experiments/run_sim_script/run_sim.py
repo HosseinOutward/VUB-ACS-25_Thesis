@@ -43,10 +43,12 @@ if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='Run FL simulation with different protocols')
     parser.add_argument('--protocol', type=str, choices=proto_choices, )
-    parser.add_argument('--no_global_quant', type=str, default=False)
+    parser.add_argument('--no_global_quant', type=str, default=True)
     parser.add_argument('--no_outlier_handling', type=str, default=False)
     parser.add_argument('--no_normalization', type=str, default=False)
     parser.add_argument('--dataset_name', type=str, default='SVHN')
+    parser.add_argument('--given_name', type=str, default=None)
+    parser.add_argument('--force_no_dsc', type=str, default=False)
 
     args = parser.parse_args()
 
@@ -105,8 +107,7 @@ if __name__ == "__main__":
     # %%
     def f(proto_name):
         worker_count = 5
-        batch_size = 15_000
-        # batch_size = 15_000//2
+        batch_size = 5000
 
         # *****************
         complete_name = proto_name
@@ -116,9 +117,15 @@ if __name__ == "__main__":
             complete_name += '_no_outlier_handling'
         if args.no_normalization != False:
             complete_name += '_no_normalization'
+        if args.force_no_dsc != False:
+            complete_name += '_no_dsc'
 
-        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=complete_name)
-        print('Running protocol {}'.format(complete_name))
+        if args.given_name is None:
+            args.given_name = complete_name
+
+        user_logger = UnifiedLoggingClass(worker_count, runs_reporting_folder='reports of runs/', name=args.given_name)
+        temp = args.given_name if args.given_name==complete_name else f'{args.given_name} ({complete_name})'
+        print(f'Running protocol {temp}', '  |  ', temp)
 
         broadcast_prot = None
         if proto_name != 'no_proto':
@@ -126,7 +133,7 @@ if __name__ == "__main__":
                                              reconst_ld=400, lr=1e-3, tau_rate=10, marginal=True).to(torch.float32)
             wz_model.load_state_dict(torch.load(f'{data_folder}/basicRNN_2plane_4bins_state.pt', map_location='cpu'))
 
-            base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=200_000,
+            base_quantizer = QuantizerWithDataPrep(wz_model, train_sample_size=300_000,
                                                    count_side_info_data=0, enable_progress_bar=False,
                                                    user_logger=user_logger)
 
@@ -192,16 +199,19 @@ if __name__ == "__main__":
             if args.no_normalization != False:
                 wz_model.no_normalization = True
 
+            if args.force_no_dsc != False:
+                broadcast_prot_base.force_no_sw = True
+
             broadcast_prot = BroadcastMetricGatheringUtilities(broadcast_prot_base, user_logger=user_logger)
 
         # *****************
 
-        model = ResNetPLModel(num_classes=num_classes, resnet_version='resnet18', lr=0.005, )
+        model = ResNetPLModel(num_classes=num_classes, resnet_version='resnet18', lr=0.001, )
         model.load_state_dict(torch.load(f'{data_folder}/resnet18_svhn.pth', map_location='cpu'))
 
         # *****************
         sim = FLSimulator(
-            pl_model=model, num_agents=worker_count, communication_rounds=50, client_epochs_per_round=10,
+            pl_model=model, num_agents=worker_count, communication_rounds=80, client_epochs_per_round=20,
             batch_size=batch_size, dataset_train=dataset[0], dataset_test=dataset[1],
             aggregation_method='fedavg', non_iid_sampling=False, user_logger=user_logger)
         # ****
