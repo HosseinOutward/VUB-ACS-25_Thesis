@@ -1,127 +1,104 @@
 \begin{adjustbox}{max width=\linewidth}
-\begin{tikzpicture}[x=1.2cm,y=0.42cm]
+\begin{tikzpicture}[x=1.0cm,y=0.40cm]
   %----- styles
   \tikzset{
-    lane/.style={line width=0.5pt, draw=black!40},
+    lane/.style={line width=0.45pt, draw=black!40},
     gridline/.style={thin, draw=black!15},
-    protolabel/.style={anchor=east, font=\scriptsize},
     roundlbl/.style={font=\scriptsize},
-    sepbar/.style={draw=black!35, line width=0.6pt}
+    ticklbl/.style={font=\scriptsize, anchor=east}
   }
 
   %----- marker macros
-  \newcommand{\Warmup}[2]{% orange diamond
-    \begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
-      \path[draw=orange,fill=orange] (0,2) -- (2,0) -- (0,-2) -- (-2,0) -- cycle;
-    \end{scope}}
-  \newcommand{\MTQ}[2]{% green circle
-    \begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
-      \path[draw=green!70!black,fill=green!70!black] (0,0) circle (2);
-    \end{scope}}
-  \newcommand{\TQ}[2]{% blue square
-    \begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
-      \path[draw=blue,fill=blue] (-2,-2) rectangle (2,2);
-    \end{scope}}
-  \newcommand{\DotsRound}[1]{% vertical "skipped rounds" dots spanning all protocols
-    \foreach \yy in {1.5,6.5,11.5} {
-      \node[font=\large, text=black!45] at (#1,\yy) {$\cdots$};
-    }
-  }
+  \newcommand{\Init}[2]{\begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
+    \path[draw=red,fill=red] (0,2.4) -- (2.4,-2.4) -- (-2.4,-2.4) -- cycle;
+  \end{scope}}
+  \newcommand{\Warmup}[2]{\begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
+    \path[draw=orange,fill=orange] (0,2) -- (2,0) -- (0,-2) -- (-2,0) -- cycle;
+  \end{scope}}
+  \newcommand{\MTQ}[2]{\begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
+    \path[draw=green!70!black,fill=green!70!black] (0,0) circle (2);
+  \end{scope}}
+  \newcommand{\TQ}[2]{\begin{scope}[shift={({#1},{#2})},x=1pt,y=1pt]
+    \path[draw=blue,fill=blue] (-2,-2) rectangle (2,2);
+  \end{scope}}
+  \newcommand{\DotsCol}[1]{\foreach \yy in {0.5,2.0,3.5} {\node[font=\large, text=black!45] at (#1,\yy) {$\cdots$};}}
 
   %----- parameters
-  \def\nlines{5}        % lanes per protocol
-  \def\blockstep{5}     % vertical spacing between protocol blocks
-  \def\yTop{15}         % top for gridlines (fits 3 blocks of 5 lanes)
+  \def\xmax{11}
+  \def\yTop{4.2}
 
-  %----- vertical round gridlines: boundaries 0..11 (=> 11 rounds)
-  \foreach \X in {0,...,11} {
+  %----- vertical gridlines
+  \foreach \X in {0,...,\xmax} {
     \draw[gridline] (\X,-0.8) -- (\X,\yTop);
   }
 
-  %----- phase labels per round (colored)
-  % R1 Warmup; R2 MT; R3 MT (P2,P3); R4-5 Temporal (P3); R6 Empty;
-  % R7 … (dots); R8 Empty; R9 MT (P2,P3); R10-11 Temporal (P3)
+  %----- tilted phase labels per round
   \foreach \xc/\txt/\col in {
-      0.5/Warmup/orange,
-      1.5/Multi-terminal/green!70!black,
-      2.5/Multi-terminal/green!70!black,
-      3.5/Temporal/blue,
-      4.5/Temporal/blue,
-      5.5/Empty/black!55,
+      0.5/Initialization/red,
+      1.5/Warmup/orange,
+      2.5/Warmup/orange,
+      3.5/Temporal Quantization/blue,
+      4.5/Temporal Quantization/blue,
+      5.5/No training (freeze)/black!55,
       6.5/\(\ldots\)/black!55,
-      7.5/Empty/black!55,
-      8.5/Multi-terminal/green!70!black,
-      9.5/Temporal/blue,
-      10.5/Temporal/blue
+      7.5/No training (freeze)/black!55,
+      8.5/Temporal Quantization/blue,
+      9.5/Temporal Quantization/blue,
+      10.5/All-SI Quantization/green!70!black,
+      11.5/\(\ldots\)/black!55
   }{
-    \node[roundlbl, text=\col] at (\xc,-1.0) {\txt};
+    \node[roundlbl, text=\col, rotate=35, anchor=east] at (\xc,-1.05) {\txt};
   }
 
-  %----- protocol blocks (3 protocols x 5 lanes)
-  \foreach \p [count=\pi from 1] in {Protocol 1,Protocol 2,Protocol 3} {
-    \pgfmathsetmacro{\ybase}{(\pi-1)*\blockstep}
+  %----- lanes (5 agents)
+  \foreach \l in {0,...,4} {
+    \pgfmathsetmacro{\yline}{\l}
+    \draw[lane] (0,\yline) -- (\xmax,\yline);
 
-    % label the protocol
-    \node[protolabel] at (-0.15, {\ybase+2}) {\p};
+    % R1 Initialization (end of round)
+    \Init{0.95}{\yline}
 
-    % lanes
-    \foreach \l in {0,...,4} {
-      \pgfmathsetmacro{\yline}{\ybase+\l}
-      \draw[lane] (0,\yline) -- (11,\yline);
+    % R2–R3 Warmup (sequential)
+    \pgfmathsetmacro{\xwA}{1.08 + 0.14*\l}
+    \pgfmathsetmacro{\xwB}{2.08 + 0.14*\l}
+    \Warmup{\xwA}{\yline}
+    \Warmup{\xwB}{\yline}
 
-      % R1: Warmup (all)
-      \Warmup{0.95}{\yline}
+    % R4–R5 Temporal (simultaneous at start)
+    \TQ{3.05}{\yline}
+    \TQ{4.05}{\yline}
 
-      % R2: MT (all protocols) — sequential within round
-      \pgfmathsetmacro{\xgA}{1.08 + 0.12*\l}
-      \MTQ{\xgA}{\yline}
+    % R9–R10 Temporal (simultaneous)
+    \TQ{8.05}{\yline}
+    \TQ{9.05}{\yline}
 
-      % R3: MT (Protocols 2 & 3)
-      \ifnum\pi>1
-        \pgfmathsetmacro{\xgB}{2.08 + 0.12*\l}
-        \MTQ{\xgB}{\yline}
-      \fi
-
-      % R4–R5: Temporal (Protocol 3, simultaneous at round start)
-      \ifnum\pi=3
-        \TQ{3.05}{\yline} % Round 4
-        \TQ{4.05}{\yline} % Round 5
-      \fi
-
-      % R8: Empty (no events)
-
-      % R9: MT (Protocols 2 & 3)
-      \ifnum\pi>1
-        \pgfmathsetmacro{\xgC}{8.08 + 0.12*\l}
-        \MTQ{\xgC}{\yline}
-      \fi
-
-      % R10–R11: Temporal (Protocol 3)
-      \ifnum\pi=3
-        \TQ{9.05}{\yline}  % Round 10
-        \TQ{10.05}{\yline} % Round 11
-      \fi
-    }
+    % R11 All-SI (simultaneous)
+    \MTQ{10.05}{\yline}
   }
 
-  %----- "skipped rounds" dots (once for all protocols)
-  \DotsRound{6.5}
+  % skipped rounds dots at Round 7
+  \DotsCol{6.5}
 
-  %----- horizontal separators between protocol blocks
-  \draw[sepbar] (0,4.5) -- (11,4.5);
-  \draw[sepbar] (0,9.5) -- (11,9.5);
+  % Agents axis (y)
+  \draw[black!40] (-0.06,0) -- (-0.06,4);
+  \foreach \l in {0,...,4} {
+    \draw[black!40] (-0.09,\l) -- (-0.03,\l);
+    \node[ticklbl] at (-0.12,\l) {\scriptsize \the\numexpr\l+1\relax};
+  }
+  \node[rotate=90, font=\scriptsize] at (-0.5,2) {Agents};
 
-  %----- compact legend (top-right)
-  \begin{scope}[shift={(8.4,13.7)}]
-    \draw[fill=white, draw=black!30, rounded corners=2pt] (-0.25,-1.2) rectangle (2.9,0.55);
-    \Warmup{0}{0}         \node[anchor=west, font=\scriptsize] at (0.30,0) {Warmup};
-    \MTQ{0}{-0.45}        \node[anchor=west, font=\scriptsize] at (0.30,-0.45) {Multi-terminal quantization};
-    \TQ{0}{-0.90}         \node[anchor=west, font=\scriptsize] at (0.30,-0.90) {Temporal-only quantization};
+  % Legend (raised, no box, looser spacing)
+  \begin{scope}[shift={(5.5,5.3)}] % push up a bit
+    % left column
+    \Init{-3.2}{0.30}     \node[anchor=west, font=\scriptsize] at (-2.8,0.30) {Initial Training};
+    \Warmup{-3.2}{-0.60}  \node[anchor=west, font=\scriptsize] at (-2.8,-0.60) {Warmup Training};
+    % right column
+    \TQ{0.1}{0.30}        \node[anchor=west, font=\scriptsize] at (0.45,0.30) {Temporal Quantization Training};
+    \MTQ{0.1}{-0.60}      \node[anchor=west, font=\scriptsize] at (0.45,-0.60) {All-SI Quantization Training};
   \end{scope}
 
-  % axis labels (small)
-  \node[font=\scriptsize] at (5.5,-1.6) {Rounds};
-  \node[rotate=90, font=\scriptsize] at (-0.9,7.5) {Protocols};
+  % Rounds axis label (lower)
+  \node[font=\scriptsize] at (5.5,-3.0) {Rounds};
 
 \end{tikzpicture}
 \end{adjustbox}

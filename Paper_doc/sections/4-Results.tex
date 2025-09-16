@@ -1,7 +1,7 @@
 \section{Results}
 \label{sec:results}
 \emph{Experimental Setup.}
-We will present the results of our experiments on the ResNet-18 trained on SVHN dataset. The FL settings include 5 clients, 50 communication rounds, and 30 epochs of local training per client, all working with SGD optimizer with a learning rate of 0.005 and a batch size of 15000. The aggregation method used is FedSGD.
+We will present the results of our experiments on the ResNet-18 trained on SVHN dataset. The FL settings include 5 clients, 50 communication rounds, and 30 epochs of local training per client, all working with SGD optimizer with a learning rate of 0.005 and a batch size of 5000. The aggregation method used is FedSGD.
 
 The learned quantizers are 2 stages with variable symbols per stage, but the 1bit quantizer use 1 stage with 2 symbols.
 The learned non-WZ quantizer uses 2 stages with 16 symbols each. the bound on list of past reconstructions per agent is set to 8. The training of the quantizers is done with Adam optimizer with a learning rate of 0.001, weight decay of 1e-4, and schaduler with step size 45 and gama of 0.3. the batch size is 10,000, training on a random subset of 200,000 samples per epoch, for 45 epochs. The initial softmax-gumble tempreture is set to 1.2 and the reconstruction loss weight, lambda, is set to 400.
@@ -11,22 +11,21 @@ Note that the bit capacity of the quantizer models do not always correspond to t
 Due to complexity, the step requiring Slepian wolf coding is replaced with a joint entropy coder which when given the conditional prior \(p(u|y)\) will approximate the performance of Slepian wolf coding \cite{rANS}.
 
 \subsection{Rate-Distortion Performance}
-By looking at the figure \ref{fig:rate_distortion} we see that the average rate-distortion of the different protocols. We also look at non-learned quantizers such as sign and round quantizers. but to make it a more fair comparison, we train a conditional prior for them and leverage the joint entropy coder. This way we can see the performance of the quantizer itself without the gains from the Slepian wolf coding.
+By looking at the figure \ref{fig:rate_distortion} we see that the average rate-distortion of the different protocols. We also look at non-learned quantizers such as sign quantizers (maps to mean of positives/negatives). but to make it a more fair comparison, we train a conditional prior for them and leverage the joint entropy coder. This way we can see the performance of the quantizer itself without the gains from the Slepian wolf coding. Note that the sign is more generously used here as it has access to the perfect conditional prior.
 
 \figure[ht]
     \centering
     \includegraphics[width=0.5\textwidth]{sections/figure/rate-dist}
-    \caption{Rate-Distortion performance of different communication protocols. The bigger dots are the mean values, and the smaller dots are the rounds mean values. The arrows indicate the evolution of the rate-distortion during the rounds. The distortion (log scale) is measured as MAPE between the original and reconstructed model updates. The rate is the bitstream length per model update dimension.}
+    \caption{Rate-Distortion performance of different communication protocols. The WZ boundry is calculated using Blahut–Arimoto which gives an empirical lower bound on the rate-distortion performance. Note that the boundry changes depending on the SI used and this boundry corresponds to the SI at round 30.}
     \label{fig:rate_distortion}
 \endfigure
 
-We see that our proposed WZ quantizer outperforms all other quantizers in terms of rate-distortion performance. The non-WZ learned quantizer also outperforms the sign and round quantizers, showing the benefits of learning the quantizer. The 1bit quantizer also performs well.
-The Multi-terminal protocol with Temporal realignment (MT-Tra) probably has the best rate-distortion (RD) performance and performs best in terms of FL training as well. The extra cost of using temporal realignment is less than 0.015 bits per parameter, which is negligible compared to the gains.
-The MT protocol has a slightly worse RD performance, and a significantly worse FL performance which was expected due to accumulated errors.
-The simple protocol is the worst which hints at the importance of retraining the models, and specifically the conditional prior, during the FL training which is probably the reason simple protocol performs worse than the non-WZ learned quantizer.
+We see that our proposed WZ quantizer outperforms all other quantizers in terms of rate-distortion performance. The non-WZ learned quantizer also outperforms the sign and round quantizers, showing the benefits of learning the quantizer. Intrestingly the rate-distortion performance imporves as the rounds of training progress. we believe the reason for that is temporal correlation increasing (while intra-agent correlation decreases as seen in figure \ref{fig:grad_corr}).
+
+One important discovery was made when isolating rounds based on if temporal quantizater was trained or not. We see that the temporal quantizer is slightly above the WZ boundry. Through our other testings we repeatedly found that the temporal quantizer outperforms nearly all other protocols, including the propsed WZ protocol. This might show the imporatance of temporal correlation in FL settings and also the gains from being able to train a quantizer on the actual data distribution that will be quantized and not a proxy reconstructed distribution.
 
 \subsection{FL Performance}
-We also look at the performance of the different quantization protocols in terms of the FL performance. By looking at the figure \ref{fig:fl_performance} we see that the WZ protocols are not that far behind the full precision model and are consistently better than the other low rate protocols.
+We also look at the performance of the different quantization protocols in terms of the FL performance. By looking at the figure \ref{fig:fl_performance} we see that the WZ protocols are not that far behind the full precision model and are consistently better than the other low rate protocols. we also see the communication cost of the different protocols. You can see the usefulness of the temporal step as it significantly reduces the rate for a while.
 
 \figure[ht]
     \centering

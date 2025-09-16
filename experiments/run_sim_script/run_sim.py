@@ -9,7 +9,7 @@ proto_choices = [
     'cancer-small-update',  # 10
     'cancer_1bit',  # 11
     'cancer-small-update_1bit',  # 12
-    *['conventional_'+r+rr for r in ['round', 'sign'] for rr in ['','_dsc']],  # 13, 14, 15, 16
+    *['conventional_'+r+rr for r in ['round', 'sign (with prior)'] for rr in ['','_dsc']],  # 13, 14, 15, 16
     'non-wz-cancer',
 ]
 proto_combo = [str(i) for i in range(0, len(proto_choices))]
@@ -181,9 +181,9 @@ if __name__ == "__main__":
                 from components.broadcast_components.broadcasting_process.ConventionalQuantizerProtocol import \
                     RoundDSCProtocol, SignDSCProtocol, RoundBasicProtocol, SignBasicProtocol
                 if 'dsc' in proto_name:
-                    temp = [RoundDSCProtocol, SignDSCProtocol][int('sign' in proto_name)]
+                    temp = [RoundDSCProtocol, SignDSCProtocol][int('sign (with prior)' in proto_name)]
                 else:
-                    temp = [RoundBasicProtocol, SignBasicProtocol][int('sign' in proto_name)]
+                    temp = [RoundBasicProtocol, SignBasicProtocol][int('sign (with prior)' in proto_name)]
                 broadcast_prot_base = temp(worker_count, base_quantizer)
             else:
                 raise ValueError(f'Unknown protocol: {proto_name}')
