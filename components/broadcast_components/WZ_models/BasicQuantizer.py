@@ -73,10 +73,6 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
         res = self._post_process_grads(res, *encoding_extra_data)
         return res.astype(np.float32)
 
-    def get_set_training_posterior_cdf(self, grad_vector=None, side_info_data_list=None):
-        res = super().get_set_training_posterior_cdf(grad_vector, side_info_data_list)
-        return res
-
     def get_prior_and_softcodes(self, grad_vector, side_info_data_list, batch_size=500_000):
         grad_vector, normal_param, outlier_param = self._apply_pre_process(grad_vector)
         encoded_bins = self.basic_encoding(grad_vector)

@@ -168,9 +168,9 @@ class PL_EncoderDecoder_RNN(PL_EncoderDecoder_ANN):
             p_u = prior_probs[i][torch.arange(soft_codes[i].size(0)), bins_no[i]]
             pu_vec[i]=p_u.detach()
             rate_loss = torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
-            rate_weight = lambda x:((x-1) + np.exp(x * np.log(abs(self.tau_rate))))/abs(self.tau_rate)
+            rate_weight = lambda x:((x-1) + np.exp(x * np.log(abs(self.tau_rate))))/abs(self.tau_rate)*1.25
             rate_weight = rate_weight(training_prog) if self.tau_rate <= 0 else 1-rate_weight(1-training_prog)
-            loss = loss + rate_loss * max(rate_weight, 0.1)
+            loss = loss + rate_loss * max(rate_weight, 0.2)
         loss = loss / self.num_planes
         f = lambda x: [a.detach() for a in x]
         return [loss, reconstruct[-1].detach(), single_grad_param,

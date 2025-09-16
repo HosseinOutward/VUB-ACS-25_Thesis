@@ -139,7 +139,7 @@ __debug_rans_check__ = {
     'encoded_data': None,
     'decoded_data': None,
 }
-def _compression_protocol(grad_dict, quantizer):
+def _compression_protocol(grad_dict, quantizer:QuantizerWithDataPrep):
     grad_dict = change_dtype_recursive(grad_dict, torch.float32)
     grad_flat, shapes_dict = dict_to_array(grad_dict)
 
@@ -167,7 +167,7 @@ def _compression_protocol(grad_dict, quantizer):
 
     # **********
     # compress the bins_vector using RANS
-    if quantizer.wz_pl_model.coding_model.marginal:
+    if quantizer.wz_pl_model.coding_model.marginal or quantizer.force_no_sw:
         # marginal case, the prior depends on nothing
         prior_vect = quantizer.get_set_training_posterior_cdf(grad_flat, [])
     else:
@@ -262,7 +262,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count, bins_p
 
     reconst_ld = reconst_ld if reconst_ld is not None else to_clone_quantizer.wz_pl_model.reconst_ld
 
-    num_planes = 2
+    num_planes = 3
 
     from components.broadcast_components.WZ_models.BasicQuantizer import _ConventionalQuantizer
     if issubclass(to_clone_quantizer.__class__, _ConventionalQuantizer):
@@ -293,6 +293,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count, bins_p
         ).to(torch.float32),
         enable_progress_bar=qz.enable_progress_bar,
         train_sample_size=qz.train_sample_size,
+        force_no_sw = qz.force_no_sw
     )
 
     temp = np.random.normal(0, np.sqrt(1e-8), len(grad_vector), ).astype(np.float32)
@@ -303,7 +304,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count, bins_p
 
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, global_base_quantizer = None,
-                 epoch_count=45, no_global_quantization=False, binary_quantization=False):
+                 epoch_count=60, no_global_quantization=False, binary_quantization=False):
         assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
 
         if global_base_quantizer is None:
@@ -479,7 +480,7 @@ class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
             quantizer = _train_model(
                 target_vec, side_info, self.wz_basic_quantizer, self.epoch_count,
 
-                bins_per_plane=int(max(16 // (self.curr_round_id/2 + 1), 4)),
+                bins_per_plane=int(max(16 // (self.curr_round_id + 1), 2)),
                 binary_quant=self.binary_quantizer if self.curr_round_id >= 12 else False,
 
                 vec_slices=_get_vec_slices(dict_shape),
