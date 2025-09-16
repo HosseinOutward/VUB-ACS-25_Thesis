@@ -1,3 +1,6 @@
+% Requires in preamble:
+% \usetikzlibrary{positioning,calc,decorations.pathmorphing}
+
 \begin{adjustbox}{max width=\linewidth}
 \begin{tikzpicture}[
   >=Latex, font=\small, transform shape,
@@ -7,33 +10,58 @@
   var/.style={inner sep=0pt}
 ]
 
-% Blocks in order: Pre -> WZ Enc -> WZ Dec -> Post
-\node[blockSmall]                (Pre)  {Pre};
-\node[block,      right=of Pre]  (Enc)  {WZ Enc};
-\node[block,      right=of Enc]  (Dec)  {WZ Dec};
-\node[blockSmall, right=of Dec]  (Post) {Post};
+% Blocks in order: Pre -> WZ Enc -> SW Cod -> SW Dec -> WZ Dec -> Post
+\node[blockSmall]                        (Pre)   {Pre};
+\node[block,      right=of Pre]          (Enc)   {WZ Enc};
+\node[block,      right=of Enc]          (SWEnc) {SW Cod};
+\node[block,      right=of SWEnc]        (SWDec) {SW Dec};
+\node[block,      right=of SWDec]        (Dec)   {WZ Dec};
+\node[blockSmall, right=of Dec]          (Post)  {Post};
 
 % Main input/output variables
-\node[var,   left =.08\linewidth of Pre]  (g)    {$g_{k,r,i}$};
-\node[var,   right=.08\linewidth of Post] (ghat) {$\hat{g}_{k,r,i}$};
+\node[var,   left =.08\linewidth of Pre]  (g)    {$G_{k,r}$};
+\node[var,   right=.08\linewidth of Post] (ghat) {$\hat{G}_{k,r}$};
 
 % Side inputs
-\node[var, above=.08\linewidth of Pre] (p) {$p_{aram}$};
-\node[var, below=.06\linewidth of Dec] (s) {$Y_{k,r}$};
+\node[var, above=.08\linewidth of Pre]  (p)  {$p_{aram}$};
+\node[var, below=.06\linewidth of Dec]  (s)  {$Y_{k,r}$};
+
+% Cond. prior centered & higher above SW blocks
+\node[var] (cond) at ($ (SWEnc.north)!0.5!(SWDec.north) + (0,0.15\linewidth) $) {\textit{cond.\ prior}};
 
 % Flow with labeled signals
 \draw[->] (g)   -- (Pre.west);
-\draw[->] (Pre) -- node[midway, above] {$x$}       (Enc);
-\draw[->] (Enc) -- node[midway, above] {$O$}       (Dec);
+\draw[->] (Pre) -- node[midway, above] {$x$}     (Enc);
+\draw[->] (Enc) -- node[midway, above] {$u$}     (SWEnc);
+\draw[->] (SWEnc) -- node[midway, above] {$O$}   (SWDec);
+\draw[->] (SWDec) -- node[midway, above] {$u$}   (Dec);
 \draw[->] (Dec) -- node[midway, above] {$\hat{x}$} (Post);
 \draw[->] (Post) -- (ghat);
 
-% Fan-out from p to Enc and Post
-\draw[-] (p) -- (Pre.north);
+% Fan-out from p to Pre and Post
+\draw[-]  (p) -- (Pre.north);
 \draw[->] (p) -| (Post.north);
 
-% External side info into decoder
+% External side info into WZ decoder
 \draw[->] (s) -- (Dec.south);
+
+% Fan-out of conditional prior to SW encoder/decoder
+\draw[->] (cond) -- (SWEnc.north);
+\draw[->] (cond) -- (SWDec.north);
+
+% --- Short fuzzy vertical divider centered on the O link ---
+\coordinate (splitCenter) at ($(SWEnc.east)!0.5!(SWDec.west)$);
+\draw[
+  decorate,
+  decoration={snake, amplitude=1pt, segment length=5pt},
+  line width=0.8pt, gray!60
+] ($(splitCenter)+(0,0.03\linewidth)$) -- ($(splitCenter)+(0,-0.03\linewidth)$);
+
+% --- Section labels above halves: AGENT (left) / SERVER (right) ---
+\coordinate (leftMidTop)  at ($ (Pre.north west)!0.5!(SWEnc.north east) $);
+\coordinate (rightMidTop) at ($ (SWDec.north west)!0.5!(Post.north east) $);
+\node[font=\bfseries] at ($(leftMidTop)+(0,0.15\linewidth)$)  {agent};
+\node[font=\bfseries] at ($(rightMidTop)+(0,0.15\linewidth)$) {server};
 
 \end{tikzpicture}
 \end{adjustbox}

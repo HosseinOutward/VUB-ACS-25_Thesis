@@ -1,0 +1,124 @@
+% Requires \usetikzlibrary{positioning,calc}
+% ---- compact/tidy spacings ----
+\newcommand{\vsep}{1.05cm}      % vertical gap between rows
+\newcommand{\hA}{1.10cm}        % h^(1) -> h^(L)
+\newcommand{\hB}{1.40cm}        % h^(L) -> SW Cod
+\newcommand{\hC}{1.40cm}        % SW Cod -> SW Dec
+\newcommand{\hD}{1.40cm}        % SW Dec -> \hat{h}^{(1)}
+\newcommand{\hx}{0.95cm}        % \hat{h}^{(1)} -> \hat{h}^{(L)}
+\tikzset{
+  >=Latex, font=\small, transform shape,
+  blk/.style={draw, thick, minimum width=1.45cm, minimum height=7.5mm, align=center},
+  dashblk/.style={blk, dashed, minimum width=2.10cm, minimum height=8.0mm},
+  flow/.style={-Latex, thick, shorten >=1pt, shorten <=1pt},
+  skip/.style={-Latex, dotted, thick, shorten >=1pt, shorten <=1pt}
+}
+
+\begin{adjustbox}{max width=\linewidth}
+\begin{tikzpicture}
+
+% ---------------- Left stacks (X → h) ----------------
+\node[blk] (h11) {$h^{(1)}_{1}$};
+\node[blk, right=\hA of h11] (h1L) {$h^{(L)}_{1}$};
+\draw[skip] (h11) -- (h1L);
+
+\node[blk, below=\vsep of h11] (h21) {$h^{(1)}_{2}$};
+\node[blk, right=\hA of h21] (h2L) {$h^{(L)}_{2}$};
+\draw[skip] (h21) -- (h2L);
+
+\node[blk, below=\vsep of h21] (hj1) {$h^{(1)}_{j}$};
+\node[blk, right=\hA of hj1] (hjL) {$h^{(L)}_{j}$};
+\draw[skip] (hj1) -- (hjL);
+
+% vertical arrows within left stacks
+\draw[flow] (h11.south) -- (h21.north);
+\draw[flow] (h21.south) -- (hj1.north);
+\draw[flow] (h1L.south) -- (h2L.north);
+\draw[flow] (h2L.south) -- (hjL.north);
+
+% === X fan (good) ===
+\node (xlabel) at ($(h21.west)+(-1.25cm,0)$) {\bfseries $X$};
+\coordinate (Xhub) at ($(h21.west)+(-0.65cm,0)$);
+\draw[flow] (xlabel.east) -- (Xhub);
+\draw[flow] (Xhub) |- (h11.west);
+\draw[flow] (Xhub) -- (h21.west);
+\draw[flow] (Xhub) |- (hj1.west);
+
+% ---------------- SW Cod ----------------
+\node[dashblk, right=\hB of h1L] (swc1) {SW Cod ($q_c$)};
+\node[dashblk, right=\hB of h2L] (swc2) {SW Cod ($q_c$)};
+\node[dashblk, right=\hB of hjL] (swcj) {SW Cod ($q_c$)};
+
+\draw[flow] (h1L.east) -- node[above, yshift=1pt] {$U_1$} (swc1.west);
+\draw[flow] (h2L.east) -- node[above, yshift=1pt] {$U_2$} (swc2.west);
+\draw[flow] (hjL.east) -- node[above, yshift=1pt] {$U_j$} (swcj.west);
+
+% ---------------- SW Dec and divider ----------------
+\node[dashblk, right=\hC of swc1] (swd1) {SW Dec ($q_c$)};
+\node[dashblk, right=\hC of swc2] (swd2) {SW Dec ($q_c$)};
+\node[dashblk, right=\hC of swcj] (swdj) {SW Dec ($q_c$)};
+
+\coordinate (divx) at ($(swc1.east)!0.5!(swd1.west)$);
+\draw[dashed, very thick]
+  ([yshift=6mm]divx |- swc1.north) -- ([yshift=-6mm]divx |- swcj.south);
+
+\draw[flow] (swc1.east) -- node[above, yshift=1pt] {$O_1$} (swd1.west);
+\draw[flow] (swc2.east) -- node[above, yshift=1pt] {$O_2$} (swd2.west);
+\draw[flow] (swcj.east) -- node[above, yshift=1pt] {$O_j$} (swdj.west);
+
+\draw[->, dashed, thick, shorten >=2pt, shorten <=2pt] (swd1.south) -- (swd2.north);
+\draw[->, dashed, thick, shorten >=2pt, shorten <=2pt] (swd2.south) -- (swdj.north);
+
+% ---------------- Right stacks (→ \hat{h} → \hat{X}) ----------------
+\node[blk, right=\hD of swd1] (hh11) {$\hat{h}^{(1)}_{1}$};
+\node[blk, right=\hx of hh11] (hh1L) {$\hat{h}^{(L)}_{1}$};
+\draw[skip] (hh11) -- (hh1L);
+\draw[flow] (swd1.east) -- (hh11.west);
+\draw[flow] (hh1L.east) -- ++(0.85cm,0) node[right] {$\hat{\mathbf{X}}$};
+
+\node[blk, right=\hD of swd2] (hh21) {$\hat{h}^{(1)}_{2}$};
+\node[blk, right=\hx of hh21] (hh2L) {$\hat{h}^{(L)}_{2}$};
+\draw[skip] (hh21) -- (hh2L);
+\draw[flow] (swd2.east) -- (hh21.west);
+\draw[flow] (hh2L.east) -- ++(0.85cm,0) node[right] {$\hat{\mathbf{X}}$};
+
+\node[blk, right=\hD of swdj] (hhj1) {$\hat{h}^{(1)}_{j}$};
+\node[blk, right=\hx of hhj1] (hhjL) {$\hat{h}^{(L)}_{j}$};
+\draw[skip] (hhj1) -- (hhjL);
+\draw[flow] (swdj.east) -- (hhj1.west);
+\draw[flow] (hhjL.east) -- ++(0.85cm,0) node[right] {$\hat{\mathbf{X}}$};
+
+% vertical arrows within right stacks
+\draw[flow] (hh11.south) -- (hh21.north);
+\draw[flow] (hh21.south) -- (hhj1.north);
+\draw[flow] (hh1L.south) -- (hh2L.north);
+\draw[flow] (hh2L.south) -- (hhjL.north);
+
+% === Y fan (non-overlapping with SW Dec → \hat{h}^{(1)}) ===
+% Place Y near the top row, then fan with small vertical offsets into each \hat{h}^{(1)}_i
+\node (ylabel) at ($(hh11.west)+(-1.25cm,0)$) {$Y$};
+\coordinate (Yhub) at ($(hh11.west)+(-0.70cm,0)$);
+\draw[flow] (ylabel.east) -- (Yhub);
+
+% Offsets so the Y taps don't coincide with the SW-Dec center entry
+\def\yoffTop{ 3.0pt}
+\def\yoffMid{ 1.5pt}
+\def\yoffBot{-3.0pt}
+
+% to row 1
+\coordinate (Yin1) at ($ (hh11.west)+(-2.0mm,\yoffTop) $);
+\draw[flow] (Yhub) |- (Yin1);
+\draw[flow] (Yin1) -- ($ (hh11.west)+(0,\yoffTop) $);
+
+% to row 2
+\coordinate (Yin2) at ($ (hh21.west)+(-2.0mm,\yoffMid) $);
+\draw[flow] (Yhub) |- (Yin2);
+\draw[flow] (Yin2) -- ($ (hh21.west)+(0,\yoffMid) $);
+
+% to row j
+\coordinate (Yin3) at ($ (hhj1.west)+(-2.0mm,\yoffBot) $);
+\draw[flow] (Yhub) |- (Yin3);
+\draw[flow] (Yin3) -- ($ (hhj1.west)+(0,\yoffBot) $);
+
+\end{tikzpicture}
+\end{adjustbox}
