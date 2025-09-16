@@ -15,6 +15,7 @@ class WZQuantizer:
         from components.broadcast_components.WZ_models.wz_quant_RNN import PL_EncoderDecoder_RNN
 
         self.force_no_sw = force_no_sw
+        self.training_si = None
         self.val_indices = None
         self.training_posterior_cdf = None
         self.enable_progress_bar = enable_progress_bar
@@ -46,17 +47,19 @@ class WZQuantizer:
         if grad_vector is not None or side_info_data_list is not None:
             assert grad_vector is not None and side_info_data_list is not None
 
+            self.training_si = side_info_data_list
+
             if side_info_data_list == []:
                 bins = self.encoding_process(grad_vector)[0] # (num_planes, N)
                 probs_per_plane = []
                 for b_vec in bins:
-                    counts = np.bincount(b_vec, minlength=self.bin_count)
+                    counts = np.bincount(b_vec, minlength=self.wz_pl_model.bins_per_plane)
                     probs = counts / counts.sum()
                     probs_per_plane.append(probs)
                 probs_per_plane = np.array(probs_per_plane) # (num_planes, bin_count)
 
-                self.training_posterior_cdf = np.array([np.array([a]*len(grad_vector), dtype=np.float32)
-                                                   for a in probs_per_plane])
+                self.training_posterior_cdf = torch.stack(
+                    [torch.tensor([a]*len(grad_vector), dtype=torch.float32) for a in probs_per_plane]).numpy()
             else:
                 self.training_posterior_cdf = self.get_prior_and_softcodes(grad_vector, side_info_data_list)[0].numpy()
 
