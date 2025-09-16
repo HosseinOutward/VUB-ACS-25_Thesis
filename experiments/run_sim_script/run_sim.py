@@ -10,6 +10,7 @@ proto_choices = [
     'cancer_1bit',  # 11
     'cancer-small-update_1bit',  # 12
     *['conventional_'+r+rr for r in ['round', 'sign'] for rr in ['','_dsc']],  # 13, 14, 15, 16
+    'non-wz-cancer',
 ]
 proto_combo = [str(i) for i in range(0, len(proto_choices))]
 proto_combo += [''.join([str(i), str(j)])
@@ -163,14 +164,19 @@ if __name__ == "__main__":
                 from components.broadcast_components.broadcasting_process.WorkersideTrainingWithAccumError import \
                     WorkersideTrainingWithAccumErrorProtocol
                 broadcast_prot_base = WorkersideTrainingWithAccumErrorProtocol(worker_count, base_quantizer)
+            elif proto_name == 'non-wz-cancer':
+                from components.broadcast_components.WZ_models.Learned_non_wz_quantizer import LearnedNonWZQuantizer
+                base_quantizer = LearnedNonWZQuantizer(wz_model, train_sample_size=300_000,
+                            count_side_info_data=0, enable_progress_bar=False, user_logger=user_logger)
+                from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
+                broadcast_prot_base = CancerProtocol(worker_count, base_quantizer,
+                                                     binary_quantization=('1bit' in proto_name),
+                                                     small_update=('small-update' in proto_name))
             elif 'cancer' in proto_name:
                 from components.broadcast_components.broadcasting_process.CancerProt import CancerProtocol
                 broadcast_prot_base = CancerProtocol(worker_count, base_quantizer,
                                                      binary_quantization=('1bit' in proto_name),
                                                      small_update=('small-update' in proto_name))
-            elif proto_name == 'MarginalOnly':
-                from components.broadcast_components.broadcasting_process.MarginalOnly import MarginalOnly
-                broadcast_prot_base = MarginalOnly(worker_count, base_quantizer)
             elif 'conventional_' in proto_name:
                 from components.broadcast_components.broadcasting_process.ConventionalQuantizerProtocol import \
                     RoundDSCProtocol, SignDSCProtocol, RoundBasicProtocol, SignBasicProtocol

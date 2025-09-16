@@ -305,7 +305,7 @@ def _train_model(grad_vector, side_info, to_clone_quantizer, epoch_count, bins_p
 class WZServerTrainingPerRoundProtocol(RawBroadcastProtocol):
     def __init__(self, agent_count, wz_base_quantizer: QuantizerWithDataPrep, global_base_quantizer = None,
                  epoch_count=60, no_global_quantization=False, binary_quantization=False):
-        assert isinstance(wz_base_quantizer, QuantizerWithDataPrep)
+        # assert issubclass(wz_base_quantizer.__class__, QuantizerWithDataPrep)
 
         if global_base_quantizer is None:
             global_base_quantizer = wz_base_quantizer
