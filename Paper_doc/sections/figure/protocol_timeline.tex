@@ -32,20 +32,24 @@
     \draw[gridline] (\X,-0.8) -- (\X,\yTop);
   }
 
-  %----- tilted phase labels per round
+  %----- round numbers (top, centered per round)
+  \foreach \i [evaluate=\i as \x using \i-0.5] in {1,...,11} {
+    \node[roundlbl, anchor=south] at (\x,\yTop+0.20) {R\i};
+  }
+
+  %----- tilted phase labels per round (renamed + middle "..." removed)
   \foreach \xc/\txt/\col in {
       0.5/Initialization/red,
       1.5/Warmup/orange,
       2.5/Warmup/orange,
-      3.5/Temporal Quantization/blue,
-      4.5/Temporal Quantization/blue,
-      5.5/No training (freeze)/black!55,
-      6.5/\(\ldots\)/black!55,
-      7.5/No training (freeze)/black!55,
-      8.5/Temporal Quantization/blue,
-      9.5/Temporal Quantization/blue,
-      10.5/All-SI Quantization/green!70!black,
-      11.5/\(\ldots\)/black!55
+      3.5/Realignment/blue,
+      4.5/Realignment/blue,
+      5.5/Freeze/black!55,
+      6.5/Freeze/black!55,            % <- previously "..."
+      7.5/Realignment/blue,
+      8.5/Realignment/blue,
+      9.5/Retrain/green!70!black,     % <- All-SI Quantization -> Retrain
+      10.5/\(\ldots\)/black!55
   }{
     \node[roundlbl, text=\col, rotate=35, anchor=east] at (\xc,-1.05) {\txt};
   }
@@ -55,8 +59,8 @@
     \pgfmathsetmacro{\yline}{\l}
     \draw[lane] (0,\yline) -- (\xmax,\yline);
 
-    % R1 Initialization (end of round)
-    \Init{0.95}{\yline}
+    % R1 Initialization (START of round)  <-- moved earlier
+    \Init{0.05}{\yline}
 
     % R2–R3 Warmup (sequential)
     \pgfmathsetmacro{\xwA}{1.08 + 0.14*\l}
@@ -64,20 +68,20 @@
     \Warmup{\xwA}{\yline}
     \Warmup{\xwB}{\yline}
 
-    % R4–R5 Temporal (simultaneous at start)
-    \TQ{3.05}{\yline}
-    \TQ{4.05}{\yline}
+    % R4–R5 Realignment (simultaneous at start)
+    \TQ{3.15}{\yline}
+    \TQ{4.15}{\yline}
 
-    % R9–R10 Temporal (simultaneous)
-    \TQ{8.05}{\yline}
-    \TQ{9.05}{\yline}
+    % R9–R10 Realignment (simultaneous)
+    \TQ{7.15}{\yline}
+    \TQ{8.15}{\yline}
 
-    % R11 All-SI (simultaneous)
-    \MTQ{10.05}{\yline}
+    % R11 Retrain (simultaneous)
+    \MTQ{9.15}{\yline}
   }
 
-  % skipped rounds dots at Round 7
-  \DotsCol{6.5}
+  % (removed) skipped rounds dots at former Round 7
+  % \DotsCol{6.5}
 
   % Agents axis (y)
   \draw[black!40] (-0.06,0) -- (-0.06,4);
@@ -87,14 +91,14 @@
   }
   \node[rotate=90, font=\scriptsize] at (-0.5,2) {Agents};
 
-  % Legend (raised, no box, looser spacing)
-  \begin{scope}[shift={(5.5,5.3)}] % push up a bit
+  % Legend (raised higher, no box, looser spacing; renamed)
+  \begin{scope}[shift={(5.5,6.3)}] % pushed further up
     % left column
-    \Init{-3.2}{0.30}     \node[anchor=west, font=\scriptsize] at (-2.8,0.30) {Initial Training};
-    \Warmup{-3.2}{-0.60}  \node[anchor=west, font=\scriptsize] at (-2.8,-0.60) {Warmup Training};
+    \Init{-3.2}{0.30}     \node[anchor=west, font=\scriptsize] at (-2.8,0.30) {Load pre-trained quantizer};
+    \Warmup{-3.2}{-0.60}  \node[anchor=west, font=\scriptsize] at (-2.8,-0.60) {Progressive All-SI process};
     % right column
-    \TQ{0.1}{0.30}        \node[anchor=west, font=\scriptsize] at (0.45,0.30) {Temporal Quantization Training};
-    \MTQ{0.1}{-0.60}      \node[anchor=west, font=\scriptsize] at (0.45,-0.60) {All-SI Quantization Training};
+    \TQ{0.1}{0.30}        \node[anchor=west, font=\scriptsize] at (0.45,0.30) {Temporal-only process};
+    \MTQ{0.1}{-0.60}      \node[anchor=west, font=\scriptsize] at (0.45,-0.60) {All-SI process};
   \end{scope}
 
   % Rounds axis label (lower)
