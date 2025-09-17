@@ -2,26 +2,24 @@
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
+# ----------------- utilities -----------------
+
 def _kmeans(y: np.ndarray, n_clusters: int, n_init: int = 5, max_iter: int = 100, rng: Optional[np.random.Generator] = None) -> Tuple[np.ndarray, np.ndarray]:
     """Simple k-means returning (centers, labels). y: (T, m)."""
     if rng is None:
         rng = np.random.default_rng(42)
     T = y.shape[0]
-    # init centers by sampling without replacement if possible
     idx = rng.choice(T, size=n_clusters, replace=False) if T >= n_clusters else rng.integers(0, T, size=n_clusters)
     centers = y[idx].copy()
     for _ in range(max_iter):
-        # assign
         d2 = ((y[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)  # (T, K)
         labels = d2.argmin(axis=1)
-        # update
         new_centers = np.zeros_like(centers)
         for k in range(n_clusters):
             mask = labels == k
             if np.any(mask):
                 new_centers[k] = y[mask].mean(axis=0)
             else:
-                # re-seed empty cluster
                 new_centers[k] = y[rng.integers(0, T)]
         if np.allclose(new_centers, centers):
             centers = new_centers
@@ -30,21 +28,15 @@ def _kmeans(y: np.ndarray, n_clusters: int, n_init: int = 5, max_iter: int = 100
     return centers, labels
 
 def _quantize_x(x: np.ndarray, n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Quantize x to n_bins using quantile binning. 
-    Returns (x_grid (M,), bin_index (T,))."""
+    """Quantize x to n_bins using quantile binning. Returns (x_grid (M,), bin_index (T,))."""
     x = x.astype(float).ravel()
-    # unique small number of bins if data smaller
     n_bins = int(min(max(4, n_bins), max(4, x.shape[0])))
-    # bin edges by quantiles
     edges = np.quantile(x, np.linspace(0, 1, n_bins + 1))
-    # ensure strictly increasing (handle ties)
     eps = 1e-12
     for i in range(1, edges.size):
         if edges[i] <= edges[i - 1]:
             edges[i] = edges[i - 1] + eps
-    # bin index
     bin_idx = np.clip(np.searchsorted(edges, x, side="right") - 1, 0, n_bins - 1)
-    # representative value per bin: mean of points in bin (fallback to mid-edge)
     x_grid = np.zeros(n_bins)
     for b in range(n_bins):
         m = bin_idx == b
@@ -54,29 +46,8 @@ def _quantize_x(x: np.ndarray, n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
             x_grid[b] = 0.5 * (edges[b] + edges[b + 1])
     return x_grid, bin_idx
 
-def _build_bucket_weights(y: Optional[np.ndarray], W: Optional[np.ndarray], n_buckets: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Return (weights W (T,K), p_u (K,)). If W is None, run k-means on y and make hard 1-hot weights."""
-    if W is not None:
-        W = np.asarray(W, dtype=float)
-        # normalize rows
-        row_sums = W.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1.0
-        W = W / row_sums
-        p_u = W.mean(axis=0)
-        return W, p_u
-    if y is None:
-        raise ValueError("Either W (p(u|y)) or y must be provided.")
-    centers, labels = _kmeans(y, n_buckets)
-    T = y.shape[0]
-    K = centers.shape[0]
-    W = np.zeros((T, K))
-    W[np.arange(T), labels] = 1.0
-    p_u = W.mean(axis=0)
-    return W, p_u
-
-def _empirical_p_x_given_u(x_bin_idx: np.ndarray, W: np.ndarray, n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute p(x|u) for discrete x bins from sample weights.
-    Returns (p_x_given_u: (K, M), p_u: (K,))."""
+def _empirical_p_x_given_u_from_soft(x_bin_idx: np.ndarray, W: np.ndarray, n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute p(x|u) for discrete x bins from soft weights W(t,k)=p(u|y_t)."""
     T, K = W.shape
     M = n_bins
     counts = np.zeros((K, M), dtype=float)
@@ -85,97 +56,78 @@ def _empirical_p_x_given_u(x_bin_idx: np.ndarray, W: np.ndarray, n_bins: int) ->
         b = int(x_bin_idx[t])
         counts[:, b] += W[t, :]
     p_x_given_u = counts / w_u[:, None]
-    # avoid zeros (for stability); do not renormalize to keep true mass zero if any
     p_x_given_u = np.clip(p_x_given_u, 1e-16, 1.0)
-    # renormalize each row
     p_x_given_u = p_x_given_u / p_x_given_u.sum(axis=1, keepdims=True)
     p_u = w_u / w_u.sum()
     return p_x_given_u, p_u
 
-def _mspe_distances(x_grid: np.ndarray, r_grid: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """Return distortion matrix d(i,j) = ((x_i - r_j) / (|x_i| + eps))^2, shape (M, J)."""
-    M = x_grid.shape[0]; J = r_grid.shape[0]
-    num = (x_grid[:, None] - r_grid[None, :]) ** 2
-    denom = (np.abs(x_grid)[:, None] + eps) ** 2
-    return num / denom
+def _empirical_p_x_given_u_from_hard(x_bin_idx: np.ndarray, u_idx: np.ndarray, K: int, M: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute p(x|u) using hard labels u_idx, without building a T×K matrix."""
+    counts = np.bincount(M*u_idx + x_bin_idx, minlength=K*M).reshape(K, M).astype(float)
+    p_u = counts.sum(axis=1); p_u /= p_u.sum()
+    p_x_given_u = counts + 1e-16
+    p_x_given_u /= p_x_given_u.sum(axis=1, keepdims=True)
+    return p_x_given_u, p_u
+
+def _distances(x_grid: np.ndarray, r_grid: np.ndarray, kind: str = "mspe", eps: float = 1e-6, mape_percent: bool = False) -> np.ndarray:
+    """Return distortion matrix for 'mspe' or 'mape'."""
+    x_col = x_grid[:, None]
+    r_row = r_grid[None, :]
+    if kind.lower() == "mspe":
+        num = (x_col - r_row) ** 2
+        den = (np.abs(x_col) + eps) ** 2
+        return num / den
+    elif kind.lower() == "mape":
+        frac = np.abs(x_col - r_row) / (np.abs(x_col) + eps)
+        return (100.0 * frac) if mape_percent else frac
+    else:
+        raise ValueError("Unknown distortion kind: %r" % kind)
 
 def _ba_bucket(p_x: np.ndarray, dmat: np.ndarray, s: float, max_iter: int = 500, tol: float = 1e-7) -> Tuple[np.ndarray, float, float]:
-    """Run BA for a single bucket (discrete x, fixed reconstruction grid).
-    Inputs:
-      p_x: (M,), dmat: (M,J), s >= 0 (slope).
-    Returns:
-      r: (J,) reproduction marginal,
-      D: scalar distortion,
-      R_bits: scalar mutual information in bits.
-    """
+    """Blahut–Arimoto for a single bucket (discrete source, fixed recon grid). Returns (r, D, R_bits)."""
     M, J = dmat.shape
-    r = np.ones(J) / J  # init
+    r = np.ones(J) / J
     for _ in range(max_iter):
-        # E-step: p(hat|x)
-        a = np.exp(-s * dmat) * r[None, :]  # (M, J)
+        a = np.exp(-s * dmat) * r[None, :]
         a_sum = a.sum(axis=1, keepdims=True)
         a_sum[a_sum == 0] = 1e-300
-        q = a / a_sum  # (M,J)
-        # M-step: r
+        q = a / a_sum
         r_new = (p_x[:, None] * q).sum(axis=0)
         if np.linalg.norm(r_new - r, 1) < tol:
             r = r_new
             break
         r = r_new
-    # compute D and R
     D = float((p_x[:, None] * q * dmat).sum())
-    # R in nats then to bits
     with np.errstate(divide='ignore'):
         log_term = np.log(q + 1e-300) - np.log(r[None, :] + 1e-300)
-    R_nats = float((p_x[:, None] * q * log_term).sum())
-    R_bits = R_nats / np.log(2.0)
+    R_bits = float((p_x[:, None] * q * log_term).sum()) / np.log(2.0)
     return r, D, R_bits
 
-def conditional_rd_mspe(
+# ----------------- main APIs -----------------
+
+def conditional_rd(
     x: np.ndarray,
     y: Optional[np.ndarray] = None,
     W: Optional[np.ndarray] = None,
+    u_idx: Optional[np.ndarray] = None,
     n_buckets: int = 8,
     n_x_bins: int = 64,
     n_recon: int = 64,
     s_grid: Optional[np.ndarray] = None,
     D_targets: Optional[np.ndarray] = None,
+    dist: str = "mspe",
+    mape_percent: bool = False,
     eps: float = 1e-6,
     max_iter: int = 400,
     tol: float = 1e-6,
     rng_seed: int = 42,
 ) -> Dict[str, Any]:
-    """Compute an empirical approximation to R_{X|Y}(D) with MSPE distortion.
-    
-    Two modes:
-      - If W is provided (shape T x K, rows sum to 1), uses soft buckets U with p(u|y_t)=W[t,k].
-      - Else clusters Y into K=n_buckets hard buckets (k-means) and uses those as U.
-    
-    We quantize X into n_x_bins mass points (x_grid), choose a reconstruction grid r_grid of size n_recon
-    (initialized to x_grid), and for each slope s in s_grid run BA per bucket with the *common* slope s.
-    
-    Args:
-      x: (T,) real-valued target samples aligned with Y.
-      y: (T, m) side information (only used if W is None).
-      W: (T, K) soft weights p(U=k | Y=y_t). If provided, n_buckets is ignored.
-      n_buckets: number of clusters if W is None.
-      n_x_bins: number of quantization bins for X (discrete source alphabet size M).
-      n_recon: number of reconstruction points J (codebook size).
-      s_grid: slopes to sweep; if None, uses np.logspace(-3, 3, 25).
-      D_targets: optional array of desired distortions to interpolate the rate at.
-      eps: epsilon for MSPE denominator (avoid divide-by-zero).
-      max_iter, tol: BA convergence parameters.
-      rng_seed: for reproducible k-means initialization.
-    
-    Returns dict with:
-      - 'D': (S,) distortions (MSPE) for each slope
-      - 'R': (S,) rates (bits/sample) for each slope
-      - 's_grid': (S,) slopes used
-      - 'x_grid': (M,) source mass points
-      - 'r_grid': (J,) reconstruction grid used
-      - 'p_u': (K,) bucket priors
-      - 'per_bucket': list of K dicts with last-iteration stats {'R': float, 'D': float, 'r': (J,)}
-      - if D_targets provided: 'R_at_D': (len(D_targets),) via monotone interpolation (nan if outside range)
+    """General conditional RD with choice of distortion ('mspe' or 'mape').
+    Exactly one of {W, u_idx, y} must be provided to define buckets U:
+      - W: soft weights p(u|y_t), shape (T,K)
+      - u_idx: hard labels (T,), integers in [0..K-1]
+      - y: will be clustered via k-means into n_buckets buckets (hard)
+    Returns dict with arrays D (distortion) and R (bits/sample) across s_grid, plus metadata.
     """
     rng = np.random.default_rng(rng_seed)
     x = np.asarray(x, dtype=float).ravel()
@@ -183,89 +135,74 @@ def conditional_rd_mspe(
     if s_grid is None:
         s_grid = np.logspace(-3, 3, 25)
     s_grid = np.asarray(s_grid, dtype=float)
-    # X quantization and reconstruction grid (start from same points)
+
+    # X alphabet and recon grid
     x_grid, x_bin_idx = _quantize_x(x, n_x_bins)
-    # start reconstruction grid as copies of x_grid shrunk/expanded to n_recon via quantiles of x
-    r_quant = np.quantile(x, np.linspace(0, 1, n_recon))
-    r_grid = r_quant.copy().astype(float)
-    # build bucket weights W and p_u
+    r_grid = np.quantile(x, np.linspace(0, 1, n_recon)).astype(float)
+    dmat = _distances(x_grid, r_grid, kind=dist, eps=eps, mape_percent=mape_percent)
+
+    # Buckets
     if W is not None:
-        W_norm = W / (W.sum(axis=1, keepdims=True) + 1e-16)
-        W = W_norm
-        p_u = W.mean(axis=0)
-        K = W.shape[1]
+        W = np.asarray(W, dtype=float)
+        row_sums = W.sum(axis=1, keepdims=True) + 1e-16
+        W = W / row_sums
+        p_x_given_u, p_u = _empirical_p_x_given_u_from_soft(x_bin_idx, W, x_grid.shape[0])
+    elif u_idx is not None:
+        u_idx = np.asarray(u_idx, int).ravel()
+        assert u_idx.shape[0] == T
+        K = int(u_idx.max()) + 1
+        p_x_given_u, p_u = _empirical_p_x_given_u_from_hard(x_bin_idx, u_idx, K, x_grid.shape[0])
     else:
         if y is None:
-            raise ValueError("Provide either W (p(u|y)) or y for automatic bucketing.")
-        centers, labels = _kmeans(np.asarray(y, dtype=float), n_buckets, rng=rng)
+            raise ValueError("Provide one of: W (soft), u_idx (hard), or y (to cluster).")
+        y = np.asarray(y, float)
+        if y.ndim == 1:
+            y = y[:, None]
+        assert y.shape[0] == T
+        centers, labels = _kmeans(y, n_buckets, rng=rng)
         K = centers.shape[0]
-        W = np.zeros((T, K))
-        W[np.arange(T), labels] = 1.0
-        p_u = W.mean(axis=0)
-    # compute p(x|u)
-    p_x_given_u, p_u_check = _empirical_p_x_given_u(x_bin_idx, W, x_grid.shape[0])
-    # sanity normalize
-    p_u = p_u_check
-    # precompute distortion matrices for all buckets (same dmat because distortion only depends on x,r)
-    dmat = _mspe_distances(x_grid, r_grid, eps=eps)  # (M,J)
-    S = s_grid.shape[0]
-    R_list = []
-    D_list = []
-    per_bucket_last = [None] * K
-    for s in s_grid:
-        R_sum = 0.0
-        D_sum = 0.0
-        per_bucket_stats = []
-        for k in range(K):
-            pk = p_u[k]
-            if pk < 1e-14:
-                per_bucket_stats.append({'R': 0.0, 'D': 0.0, 'r': np.full(r_grid.shape, np.nan)})
-                continue
-            p_x = p_x_given_u[k]  # (M,)
-            # BA for this bucket
-            r_k, D_k, R_k = _ba_bucket(p_x, dmat, s, max_iter=max_iter, tol=tol)
-            R_sum += pk * R_k
-            D_sum += pk * D_k
-            per_bucket_stats.append({'R': R_k, 'D': D_k, 'r': r_k})
-        R_list.append(R_sum)
-        D_list.append(D_sum)
-        per_bucket_last = per_bucket_stats  # keep last stats (for s final value)
-    R = np.array(R_list)
-    D = np.array(D_list)
-    out = {
-        'D': D,
-        'R': R,
-        's_grid': s_grid,
-        'x_grid': x_grid,
-        'r_grid': r_grid,
-        'p_u': p_u,
-        'per_bucket': per_bucket_last,
-    }
+        p_x_given_u, p_u = _empirical_p_x_given_u_from_hard(x_bin_idx, labels.astype(int), K, x_grid.shape[0])
 
-    # Optionally interpolate R at specific D targets (monotone in s; R increases as D decreases)
+    # Sweep slopes
+    R_list, D_list = [], []
+    per_bucket_last = []
+    for s in s_grid:
+        R_sum = 0.0; D_sum = 0.0
+        this_stats = []
+        for k in range(p_x_given_u.shape[0]):
+            if p_u[k] < 1e-14:
+                this_stats.append({'R': 0.0, 'D': 0.0, 'r': np.full(r_grid.shape, np.nan)})
+                continue
+            r_k, D_k, R_k = _ba_bucket(p_x_given_u[k], dmat, s, max_iter=max_iter, tol=tol)
+            R_sum += p_u[k]*R_k; D_sum += p_u[k]*D_k
+            this_stats.append({'R': R_k, 'D': D_k, 'r': r_k})
+        R_list.append(R_sum); D_list.append(D_sum); per_bucket_last = this_stats
+
+    R = np.array(R_list); D = np.array(D_list)
+    out = dict(D=D, R=R, s_grid=s_grid, x_grid=x_grid, r_grid=r_grid, p_u=p_u,
+               per_bucket=per_bucket_last, dist=dist, mape_percent=mape_percent)
+
     if D_targets is not None:
-        D_targets = np.asarray(D_targets, dtype=float).ravel()
-        # sort by increasing D (s small -> larger D)
-        order = np.argsort(D)[::-1]  # high D to low D
-        D_sorted = D[order]
-        R_sorted = R[order]
-        # Remove duplicates in D for interpolation
-        # Use rounding to merge numerical duplicates
-        _, uniq_idx = np.unique(np.round(D_sorted, decimals=12), return_index=True)
-        Du = D_sorted[sorted(uniq_idx)]
-        Ru = R_sorted[sorted(uniq_idx)]
-        # Ensure monotone increasing in D for interpolation
-        # Interpolate with numpy (expects increasing x)
-        R_at = np.full(D_targets.shape, np.nan)
-        if Du.size >= 2:
-            # If not strictly increasing, enforce by argsort
-            inc = np.argsort(Du)
-            Du_inc = Du[inc]
-            Ru_inc = Ru[inc]
+        D_targets = np.asarray(D_targets, float).ravel()
+        order = np.argsort(D)[::-1]
+        D_sorted = D[order]; R_sorted = R[order]
+        _, uniq_idx = np.unique(np.round(D_sorted, 12), return_index=True)
+        Du = D_sorted[sorted(uniq_idx)]; Ru = R_sorted[sorted(uniq_idx)]
+        inc = np.argsort(Du); Du_inc, Ru_inc = Du[inc], Ru[inc]
+        R_at = np.full(D_targets.shape, np.nan, float)
+        if Du_inc.size >= 2:
             for i, Dt in enumerate(D_targets):
-                if Dt < Du_inc.min() or Dt > Du_inc.max():
-                    R_at[i] = np.nan
-                else:
+                if Du_inc.min() <= Dt <= Du_inc.max():
                     R_at[i] = np.interp(Dt, Du_inc, Ru_inc)
-        out['R_at_D'] = R_at
+        out["R_at_D"] = R_at
+
     return out
+
+def conditional_rd_mspe(**kwargs) -> Dict[str, Any]:
+    return conditional_rd(dist="mspe", **kwargs)
+
+def conditional_rd_mape(mape_percent: bool = False, **kwargs) -> Dict[str, Any]:
+    return conditional_rd(dist="mape", mape_percent=mape_percent, **kwargs)
+
+def conditional_rd_hard_labels(x: np.ndarray, u_idx: np.ndarray, **kwargs) -> Dict[str, Any]:
+    return conditional_rd(x=x, u_idx=u_idx, **kwargs)

@@ -21,13 +21,14 @@ class PL_ConditionalPrior(pl.LightningModule):
             codes=soft_codes, y=side_info, tau=None)
         loss = sum([torch.nn.functional.cross_entropy(logits[i], bins[i])
                     for i in range(len(bins))])
-        # self.log('train_loss', loss, on_step=True, prog_bar=True)
-        # acc = (logits.argmax(dim=1) == bins).float().mean()
-        # self.log('train_acc', acc, on_step=True, prog_bar=True)
+        self.log('train_loss', loss, on_step=True, prog_bar=True)
+        acc = sum([(torch.argmax(logits[i], dim=-1)==bins[i]).float().mean()
+                   for i in range(len(bins))])/len(bins)
+        self.log('train_acc', acc, on_step=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-2)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
 
 
@@ -39,7 +40,8 @@ def train_conditional(coding_model, soft_c, side_info_data_list,):
         torch.tensor(np.stack(side_info_data_list, axis=1), dtype=torch.float32)
     )
     dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=15000, shuffle=True, num_workers=8, persistent_workers=True)
+        dataset, batch_size=15000, num_workers=8, persistent_workers=True,
+                sampler=torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=300_000),)
     trainer.fit(con_pl_m, dataloader)
 
 
@@ -52,17 +54,18 @@ class LearnedNonWZQuantizer(QuantizerWithDataPrep):
         self.use_dsc_sw = use_dsc_sw
 
     def train_model(self, grad_vector, side_info_data_list, *args, **kwargs):
-        temp = [2**1, 2**3, 3**3, 5**3]
+        temp = [2**1, 2**3, 3**3, 5**3, 16**2]
         index = len(temp)-1
         for i, a in enumerate(temp):
             if self.bin_count<=a:
                 index = i
                 break
-        bins_per_plane = [2,2,3,5][index]
+        bins_per_plane = [2,2,3,5,16][index]
         num_planes = 3 if self.bin_count>2 else 1
+        if index==4: num_planes = 2
 
         qz = self.wz_pl_model
-        self.wz_pl_model = PL_EncoderDecoder_RNN(
+        self.wz_pl_model = qz.__class__(
             inp_dim=1,
             side_info_size=0,
             marginal=True,
@@ -76,7 +79,7 @@ class LearnedNonWZQuantizer(QuantizerWithDataPrep):
         ).to(torch.float32)
 
         temp = ['basicRNN_1p2b.pt', 'basicRNN_3p2b.pt',
-                'basicRNN_3p3b.pt', 'basicRNN_3p5b.pt'][index]
+                'basicRNN_3p3b.pt', 'basicRNN_3p5b.pt', 'basicRNN_2plane_4bins_state.pt'][index]
         path_to_sd = f'{self.data_folder_path}/{temp}'
         state_dict = torch.load(path_to_sd, map_location='cpu')
         self.wz_pl_model.load_state_dict(state_dict)
