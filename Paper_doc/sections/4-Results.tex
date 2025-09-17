@@ -14,7 +14,7 @@ Due to complexity, the step requiring Slepian wolf coding is replaced with a joi
 \subsection{Rate-Distortion Performance}
 Figure \ref{fig:rate_distortion} shows the rate-distortion performance of the different communication protocols, including the proposed WZ quantizer, a learned non-WZ quantizer and the sign quantizer. To keep the comparison fair, we include the SW coding step in all protocols, with sign protocol getting a perfect prior which is not possible in practice.
 
-The WZ boundary was calculated using Blahut–Arimoto method which gives an empirical lower bound on the rate-distortion performance. Note that the boundry changes depending on the SI used and this boundry corresponds to the SI at round 35.
+The WZ boundary was calculated using Blahut–Arimoto method which gives an empirical lower bound on the rate-distortion performance. The SI used for this calculation is SI at round 25 which slightly before overfitting starts to happen.
 
 \figure[ht]
     \centering
