@@ -30,5 +30,5 @@ Our WZQ dominates the alternatives, and its rate--distortion curve improves over
 \subsection{FL Performance}
 Figure~\ref{fig:fl_performance} reports FL accuracy and per-round communication cost, including protocol variant with a post-warmup bit allowance of 1-bit for quantization instead of the 8-bit budget (3 stages with 2 bins). We also include a training report without any compression, which serves as an upper bound.
 
-The trained AUC is nearly perfect and outperforms the sign in both accuracy and communication cost. The 1-bit variant performs essentially as well.
-In both protocols, The rate generally increases until retraining, then becomes lower and more stable toward the end, probably due to the aforementioned shrinking updates and resetting.
+The trained AUC is nearly perfect and outperforms the sign quantizer in both accuracy and communication cost. The 1-bit variant performs essentially as well.
+In both protocols, the rate generally increases until retraining, then becomes lower and more stable toward the end, probably due to the aforementioned shrinking updates and resetting.
