@@ -24,7 +24,7 @@
 
 \begin{figure}[t]
     \input{sections/figure/protocol_timeline}
-    \caption{Proposed protocol timeline. Each dot is a quantization process happening which leads to a new reconstruction becoming available. Temporal-only uses worker-side trained quantizer trained on the true gradients before transmition, and only uses reconstructions made at other Temporal-only rounds as SI. The quantizer in All-SI is trained at server-side and uses all available reconstructions as SI, but can't see the true gradients and instead uses the most recent reconstruction of the worker as a proxy.}
+    \caption{Proposed protocol timeline (\(s=5\). Each dot is a quantization process happening which leads to a new reconstruction becoming available. Temporal-only uses worker-side trained quantizer trained on the true gradients before transmition, and only uses reconstructions made at other Temporal-only rounds as SI. The quantizer in All-SI is trained at server-side and uses all available reconstructions as SI, but can't see the true gradients and instead uses the most recent reconstruction of the worker as a proxy. explained in Sec.~\ref{subsec:method-protocols}.}
     \label{fig:protocols_timeline}
 \end{figure}
 
@@ -45,10 +45,10 @@ We consider two variants of the quantization process which are defined by where 
 
 \textbf{All-SI quantization process:}
 Our main process as it exploits inter-node correlation.
-Trained on the server, it uses all workers\’ past reconstructions as SI except for one; the most recent reconstruction (for the worker in question) is excluded and used as the training target. This leverages both inter-node and temporal correlation but introduces a train\–inference distribution mismatch, which we observe is usually the dominant cause of higher rate\–distortion cost. Another issues is that the resulting higher distortions degrade the reconstructions used om the next training phases, leading to multi-round error accumulation\—an issue we address with the next quantization process.
+Trained on the server, it uses all workers' past reconstructions as SI except for one; the most recent reconstruction (for the worker in question) is excluded and used as the training target. This leverages both inter-node and temporal correlation but introduces a train--inference distribution mismatch, which we observe is usually the dominant cause of higher rate--distortion cost. Another issue is that the resulting higher distortions degrade the reconstructions used on the next training phases, leading to multi-round error accumulation---an issue we address with the next quantization process.
 
 \textbf{Temporal-only quantization process}
-SI consists only of the same worker\’s past reconstructions produced by this quantization process. Training occurs on the worker side, so the true gradient to be transmitted can be used as the training target, minimizing train\–inference mismatch. Because the decoder is available at both ends, the server and worker can maintain an identical list of reconstructions. The benefit of low train\–inference mismatch comes at the cost of exploiting only temporal (not inter-node) correlation, so this variant is used periodically to realign reconstructions to the true gradients and mitigate error accumulation. In our experiments, it is very powerful, but we do not pursue it further because it cannot exploit inter-node correlation.
+SI consists only of the same worker's past reconstructions produced by this quantization process. Training occurs on the worker side, so the true gradient to be transmitted can be used as the training target, minimizing train--inference mismatch. Because the decoder is available at both ends, the server and worker can maintain an identical list of reconstructions. The benefit of low train--inference mismatch comes at the cost of exploiting only temporal (not inter-node) correlation, so this variant is used periodically to realign reconstructions to the true gradients and mitigate error accumulation. In our experiments, it is very powerful, but we do not pursue it further because it cannot exploit inter-node correlation.
 
 %-----------------------------------------------------------------------
 \subsection{Proposed Protocol leveraging WZQ}
@@ -60,14 +60,13 @@ Round 1 uses a pre-trained non-WZQ quantizer (no SI), trained on a Laplacian sou
 
 
 \noindent\textbf{2) Warm-up.}
-With one reconstruction per worker available, train an all-SI quantizer progressively: in round 2, training for agent 2 uses agent 1\’s fresh reconstruction as SI; continue for \(S-3\) rounds, where \(S\) is the max number of stored reconstructions per worker.
+With one reconstruction per worker available, train an all-SI quantizer progressively: in round 2, training for agent 2 uses agent 1's fresh reconstruction as SI; continue for \(S-3\) rounds, where \(S\) is the max number of stored reconstructions per worker.
 
 \noindent\textbf{3) Realignment.}
-Obtain two high-quality reconstructions\—one to augment the SI pool and one to serve as the training target for all-SI in retraining. While high-rate all-SI could produce these, at high rates temporal-only shows better rate--distortion; thus, per round, train a worker-side temporal-only quantizer in parallel and use it.
+Obtain two high-quality reconstructions---one to augment the SI pool and one to serve as the training target for all-SI in retraining. While high-rate all-SI could produce these, at high rates temporal-only shows better rate--distortion; thus, per round, train a worker-side temporal-only quantizer in parallel and use it.
 
 \noindent\textbf{4) Retraining.}
 Using these high-quality (but high-rate) reconstructions, train an all-SI quantizer for all workers in parallel on the server.
 
 \noindent\textbf{5) Freeze.}
 Freeze the retrained quantizer and the SI list used to train it, and use this fixed pair for the next \(S-3\) rounds; phases 3--5 then repeat thereafter.
-
