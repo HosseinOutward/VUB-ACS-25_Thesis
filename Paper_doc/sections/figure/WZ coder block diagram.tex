@@ -1,15 +1,15 @@
 % Requires \usetikzlibrary{positioning,calc}
 % ---- compact/tidy spacings ----
-\newcommand{\vsep}{1.05cm}      % vertical gap between rows
-\newcommand{\hA}{1.10cm}        % h^(1) -> h^(L)
-\newcommand{\hB}{1.40cm}        % h^(L) -> SW Cod
-\newcommand{\hC}{1.40cm}        % SW Cod -> SW Dec
-\newcommand{\hD}{1.40cm}        % SW Dec -> \hat{h}^{(1)}
-\newcommand{\hx}{0.95cm}        % \hat{h}^{(1)} -> \hat{h}^{(L)}
+\newcommand{\vsep}{0.85cm}      % vertical gap between rows
+\newcommand{\hA}{0.90cm}        % h^(1) -> h^(L)
+\newcommand{\hB}{1.10cm}        % h^(L) -> SW Cod
+\newcommand{\hC}{1.10cm}        % SW Cod -> SW Dec
+\newcommand{\hD}{1.10cm}        % SW Dec -> \hat{h}^{(1)}
+\newcommand{\hx}{0.80cm}        % \hat{h}^{(1)} -> \hat{h}^{(L)}
 \tikzset{
   >=Latex, font=\small, transform shape,
-  blk/.style={draw, thick, minimum width=1.45cm, minimum height=7.5mm, align=center},
-  dashblk/.style={blk, dashed, minimum width=2.10cm, minimum height=8.0mm},
+  blk/.style={draw, thick, minimum width=1.25cm, minimum height=7mm, align=center},
+  dashblk/.style={blk, dashed, minimum width=1.80cm, minimum height=7.5mm},
   flow/.style={-Latex, thick, shorten >=1pt, shorten <=1pt},
   skip/.style={-Latex, dotted, thick, shorten >=1pt, shorten <=1pt}
 }
@@ -96,28 +96,28 @@
 
 % === Y fan (non-overlapping with SW Dec → \hat{h}^{(1)}) ===
 % Place Y near the top row, then fan with small vertical offsets into each \hat{h}^{(1)}_i
-\node (ylabel) at ($(hh11.west)+(-1.25cm,0)$) {$Y$};
+\node (ylabel) at ($(hh11.west)+(-1.25cm,1cm)$) {$Y$};
 \coordinate (Yhub) at ($(hh11.west)+(-0.70cm,0)$);
-\draw[flow] (ylabel.east) -- (Yhub);
+\draw[flow, -] (ylabel.east) -- (Yhub);
 
 % Offsets so the Y taps don't coincide with the SW-Dec center entry
-\def\yoffTop{ 3.0pt}
-\def\yoffMid{ 1.5pt}
-\def\yoffBot{-3.0pt}
+\def\yoffTop{ 4.0pt}
+\def\yoffMid{ 4.0pt}
+\def\yoffBot{ 4.0pt}
 
 % to row 1
 \coordinate (Yin1) at ($ (hh11.west)+(-2.0mm,\yoffTop) $);
-\draw[flow] (Yhub) |- (Yin1);
+\draw[flow, -] (Yhub) |- (Yin1);
 \draw[flow] (Yin1) -- ($ (hh11.west)+(0,\yoffTop) $);
 
 % to row 2
 \coordinate (Yin2) at ($ (hh21.west)+(-2.0mm,\yoffMid) $);
-\draw[flow] (Yhub) |- (Yin2);
+\draw[flow, -] (Yhub) |- (Yin2);
 \draw[flow] (Yin2) -- ($ (hh21.west)+(0,\yoffMid) $);
 
 % to row j
 \coordinate (Yin3) at ($ (hhj1.west)+(-2.0mm,\yoffBot) $);
-\draw[flow] (Yhub) |- (Yin3);
+\draw[flow, -] (Yhub) |- (Yin3);
 \draw[flow] (Yin3) -- ($ (hhj1.west)+(0,\yoffBot) $);
 
 \end{tikzpicture}

@@ -1,67 +1,53 @@
-% Requires in preamble:
-% \usetikzlibrary{positioning,calc,decorations.pathmorphing}
+% Requires:
+% \usepackage{tikz}
+% \usetikzlibrary{arrows.meta,positioning,fit,calc}
 
 \begin{adjustbox}{max width=\linewidth}
-\begin{tikzpicture}[
+\begin{tikzpicture} [
   >=Latex, font=\small, transform shape,
-  node distance=.06\linewidth and .06\linewidth,
-  block/.style={draw, thick, minimum width=.10\linewidth, minimum height=10mm, align=center},
-  blockSmall/.style={block, minimum width=.2\linewidth, minimum height=8mm},
-  var/.style={inner sep=0pt}
+  node distance=0.8cm and 0.7cm,
+  block/.style={draw, thick, minimum width=2.0cm, minimum height=8mm, align=center},
+  group/.style={draw, dotted, ultra thick, rounded corners=2mm, inner xsep=4pt, inner ysep=4pt},
+  every node/.style={inner sep=1.5pt}
 ]
 
-% Blocks in order: Pre -> WZ Enc -> SW Cod -> SW Dec -> WZ Dec -> Post
-\node[blockSmall]                        (Pre)   {Pre};
-\node[block,      right=of Pre]          (Enc)   {WZ Enc};
-\node[block,      right=of Enc]          (SWEnc) {SW Cod};
-\node[block,      right=of SWEnc]        (SWDec) {SW Dec};
-\node[block,      right=of SWDec]        (Dec)   {WZ Dec};
-\node[blockSmall, right=of Dec]          (Post)  {Post};
+% --- main blocks (narrower/tidier) ---
+\node[block] (Q)  {WZ Quantizer\\$\phi_{\theta}$};
+\node[block, right=0.9cm of Q] (SWE) {Slepian--Wolf\\Encoder};
+\node[block, right=0.9cm of SWE] (SWD) {Slepian--Wolf\\Decoder};
+\node[block, right=0.9cm of SWD] (DQ)  {WZ Dequantizer\\$\psi_{\omega}$};
 
-% Main input/output variables
-\node[var,   left =.08\linewidth of Pre]  (g)    {$G_{k,r}$};
-\node[var,   right=.08\linewidth of Post] (ghat) {$\hat{G}_{k,r}$};
+% --- input / output ---
+\node[left=0.7cm of Q] (Xin) {$X$};
+\draw[thick,->] (Xin) -- (Q.west);
+\node[right=0.8cm of DQ] (Out) {$\hat X$};
+\draw[thick,->] (DQ.east) -- (Out);
 
-% Side inputs
-\node[var, above=.08\linewidth of Pre]  (p)  {$p_{aram}$};
-\node[var, below=.06\linewidth of Dec]  (s)  {$Y_{k,r}$};
+% --- pipeline arrows ---
+\draw[thick,->] (Q.east)  -- (SWE.west);
+\draw[thick,->] (SWD.east) -- (DQ.west);
 
-% Cond. prior centered & higher above SW blocks
-\node[var] (cond) at ($ (SWEnc.north)!0.5!(SWDec.north) + (0,0.15\linewidth) $) {\textit{cond.\ prior}};
+% SWE -> SWD with labels and a small slash
+\draw[thick,->] (SWE.east) -- node[midway,above=3pt] {$q_{\zeta}$}
+                          node[midway,below=3pt] {$R$} (SWD.west);
+\path (SWE.east) -- (SWD.west) coordinate[pos=.5] (midRS);
+\draw[thick] ($(midRS)+(-0.11,0.18)$) -- ($(midRS)+(0.11,-0.18)$);
 
-% Flow with labeled signals
-\draw[->] (g)   -- (Pre.west);
-\draw[->] (Pre) -- node[midway, above] {$x$}     (Enc);
-\draw[->] (Enc) -- node[midway, above] {$u$}     (SWEnc);
-\draw[->] (SWEnc) -- node[midway, above] {$O$}   (SWDec);
-\draw[->] (SWDec) -- node[midway, above] {$u$}   (Dec);
-\draw[->] (Dec) -- node[midway, above] {$\hat{x}$} (Post);
-\draw[->] (Post) -- (ghat);
+% --- side information Y with clean right-angle branches ---
+\coordinate (Y)   at ($(SWD.south) + ( -0.0,-0.9)$);
+\coordinate (YJ)  at ($(SWD.south) + (  0.0,-0.4)$); % junction under SWD
+\draw[thick] (Y) node[below=3pt] {$Y$} -- (YJ);
+\draw[thick,->] (YJ) -- (SWD.south);
+\draw[thick,->] (YJ) -| (DQ.south);
 
-% Fan-out from p to Pre and Post
-\draw[-]  (p) -- (Pre.north);
-\draw[->] (p) -| (Post.north);
+% --- dotted grouped regions ---
+%\node[group, fit=(Q)] (GQ) {};
+%\node[group, fit=(SWE)(SWD)] (Gmid) {};
+%\node[group, fit=(DQ)] (GDQ) {};
 
-% External side info into WZ decoder
-\draw[->] (s) -- (Dec.south);
-
-% Fan-out of conditional prior to SW encoder/decoder
-\draw[->] (cond) -- (SWEnc.north);
-\draw[->] (cond) -- (SWDec.north);
-
-% --- Short fuzzy vertical divider centered on the O link ---
-\coordinate (splitCenter) at ($(SWEnc.east)!0.5!(SWDec.west)$);
-\draw[
-  decorate,
-  decoration={snake, amplitude=1pt, segment length=5pt},
-  line width=0.8pt, gray!60
-] ($(splitCenter)+(0,0.03\linewidth)$) -- ($(splitCenter)+(0,-0.03\linewidth)$);
-
-% --- Section labels above halves: AGENT (left) / SERVER (right) ---
-\coordinate (leftMidTop)  at ($ (Pre.north west)!0.5!(SWEnc.north east) $);
-\coordinate (rightMidTop) at ($ (SWDec.north west)!0.5!(Post.north east) $);
-\node[font=\bfseries] at ($(leftMidTop)+(0,0.15\linewidth)$)  {agent};
-\node[font=\bfseries] at ($(rightMidTop)+(0,0.15\linewidth)$) {server};
+% --- "ANN" labels placed well above the groups (no overlap) ---
+%\node[anchor=south] at ($(GQ.north)+(0,4mm)$) {ANN};
+%\node[anchor=south] at ($(GDQ.north)+(0,4mm)$) {ANN};
 
 \end{tikzpicture}
 \end{adjustbox}

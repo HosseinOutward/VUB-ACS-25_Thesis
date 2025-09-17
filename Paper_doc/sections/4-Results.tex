@@ -4,34 +4,31 @@
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.5\textwidth]{sections/figure/rate-dist}
-    \caption{Rate-Distortion performance of different communication protocols.}
+    \caption{Rate-Distortion performance of different communication protocols. The WZ boundary is computed with Blahut--Arimoto using SI from round 25.}
     \label{fig:rate_distortion}
 \end{figure}
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.5\textwidth]{sections/figure/auc}
-    \caption{FL performance of different communication protocols. The left axis is the AUC and the right axis is the rate. The raw protocol is the full precision version.}
+    \caption{FL performance of different communication protocols.}
     \label{fig:fl_performance}
 \end{figure}
 
-\emph{Experimental Setup.}
-The model used in FL is ResNet-18 trained on SVHN dataset, including 5 workers, 80 communication rounds, FedSGD aggregation method, and 20 epochs of local training per client, all working with SGD optimizer with a learning rate of 0.001 and a batch size of 5000.
+\noindent\textbf{Experimental setup.}
+We train a ResNet-18 on SVHN in a 5-worker FL setting for 80 rounds using FedSGD aggregation and 20 local epochs per client. Optimization is SGD (learning rate \(10^{-3}\), batch size \(5000\)). The learned Wyner–Ziv quantizer (WZQ) uses 3 stages with progressively fewer symbols per stage (down to 2). For warmup/initialization we use a non-WZ quantizer with 2 stages and 16 symbols per stage. We retain at most 10 past reconstructions per worker as side information. Quantizers are trained with Adam (learning rate \(10^{-3}\), weight decay \(10^{-4}\)) and a step scheduler (step size \(45\), \(\gamma=0.3\)); batch size \(10{,}000\); for 60 epochs, each epoch sampling a random subset of \(300{,}000\) examples. The initial Gumbel–Softmax temperature is \(1.3\), and the reconstruction-loss weight is \(\lambda=400\).
 
-The learned quantizers are 3 stages with progressively decreasing symbols per stage to a minimum of 2, and an extra 1 bit setup using 1 stage and 2 symbols.
-The learned non-WZ quantizer used in initialization is 2 stages with 16 symbols each.
-Maximum number of reconstructions kept per worker is 10. The training of the quantizers is done with Adam optimizer with a learning rate of 0.001, weight decay of 1e-4, and scheduler with step size 45 and gamma of 0.3. The batch size is 10,000, training on a random subset of 300,000 samples per epoch, for 60 epochs. The initial Softmax-Gumbel temperature is set to 1.3 and the reconstruction loss weight, lambda, is set to 400.
+Note that the nominal symbol \emph{capacity} need not equal the symbols actually used; e.g., the initialization quantizer has capacity \(256\) symbols yet activates only 20.
 
-Note that the bit capacity of the quantizer models does not always correspond to the actual number of bits used. For example, the quantizer used in initialization has a capacity of 256 bins but only uses around 20.
+For coding complexity, we replace the explicit Slepian–Wolf (SW) stage with a joint entropy coder that, given \(p(u\,|\,y)\), closely approximates SW performance \cite{rANS}.
 
-Due to complexity, the step requiring Slepian-Wolf coding is replaced with a joint entropy coder which when given the conditional prior \(p(u|y)\) will approximate the performance of Slepian-Wolf coding \cite{rANS}.
+\subsection{Rate--Distortion Performance}
+Figure~\ref{fig:rate_distortion} compares (i) the proposed WZQ, (ii) a learned non-WZ quantizer, and (iii) a sign quantizer. We also report on a protocol variant \emph{without} realignment phases. To ensure fairness, all methods include the SW coding approximation step; the sign baseline is given a perfect (oracle) prior, which is idealized and not achievable in practice. The Wyner–Ziv (WZ) bound is computed via Blahut–Arimoto using side information from round 25.
 
-\subsection{Rate-Distortion Performance}
-Figure \ref{fig:rate_distortion} shows the rate-distortion performance of the different communication protocols, including the proposed WZ quantizer, a learned non-WZ quantizer and the sign quantizer. To keep the comparison fair, we include the SW coding step in all protocols, with the sign protocol getting a perfect prior which is not possible in practice.
-
-The WZ boundary was calculated using the Blahut–Arimoto method which gives an empirical lower bound on the rate-distortion performance. The SI used for this calculation is SI at round 25 which is slightly before overfitting starts to happen.
-
-We see that our proposed WZ quantizer outperforms all other quantizers in terms of rate-distortion performance. Interestingly, the rate-distortion performance improves as the rounds of training progress. We believe the reason for that is increased temporal correlation since smaller updates are aggregations of overfitting workers leading to similar changes from round to round.
+Our WZQ dominates the alternatives, and its rate–distortion curve improves over training rounds—likely because model updates shrink and become more similar across rounds for the same worker, resting them in a way each round (e.g., aggregation moderates overfitting workers). The variant without realignment degrades, highlighting the benefit of realignment.
 
 \subsection{FL Performance}
-In figure \ref{fig:fl_performance} we see the FL performance and communication cost per round. As you can see, there is a trend of increasing rate until retraining. We added a proposal without temporal realignment to show the importance of that step.
+Figure~\ref{fig:fl_performance} reports FL accuracy and per-round communication cost, including protocol variant with a post-warmup bit allowance of 1-bit for quantization instead of the 8-bit budget (3 stages with 2 bins). We also include a training report without any compression, which serves as an upper bound.
+
+The trained AUC is nearly perfect and outperforms the sign in both accuracy and communication cost. The 1-bit variant performs essentially as well.
+In both protocols, The rate generally increases until retraining, then becomes lower and more stable toward the end, probably due to the aforementioned shrinking updates and resting.

@@ -1,7 +1,6 @@
 \begin{abstract}
-
-We address the growing communication bottleneck in synchronous federated and distributed deep learning, intensified by large models. We present a learned distributed source coding (DSC) method that quantizes worker updates using a learned successive Wyner–Ziv (WZ) scheme. The server aggregates short-horizon side information from recent reconstructions across all workers, allowing the encoder to convert cross-worker and temporal redundancy into bit-rate savings while preserving model quality.
-Our approach is grounded in Wyner–Ziv limits for correlated sources, which motivate coding near conditional rates when side information is available. In contrast to past works that rely on uniform quantization or sparsification, we introduce: (i) a multi-terminal per-coordinate learned WZ quantizer with refinement stages, (ii) a protocol applying said quantizer in a standard FL training loop.
+We address the growing communication bottleneck in synchronous federated and distributed deep learning, intensified by large models. We present a learned distributed source coding (DSC) method that quantizes worker updates using a learned successive Wyner–Ziv (WZ) scheme. The server aggregates short-horizon side information from recent reconstructions across all workers, converting cross-worker and temporal redundancy into bit-rate savings while preserving model quality.
+Our approach is grounded in Wyner–Ziv limits for correlated sources, motivating coding near conditional rates when side information is available. In contrast to past works relying on uniform quantization or sparsification, we introduce: (i) a multi-terminal per-coordinate learned WZ quantizer with refinement stages, (ii) a protocol applying said quantizer in standard FL training.
 Our findings position learned inter-worker DSC quantization as a scalable communication primitive for federated learning and large-scale distributed training.
 \end{abstract}
 
