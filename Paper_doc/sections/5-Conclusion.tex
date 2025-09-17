@@ -1,9 +1,8 @@
 \section{Conclusion}
 \label{sec:conclusion}
-We have presented a novel approach to quantization of gradients in federated learning.
-Our method leverages the redundancy between agent updates to quantize the individual parameters more effectively.
-We have shown that our method improves upon traditional and even learned quantization techniques in terms of rate-distortion performance while maintaining model accuracy.
-Our approach is particularly effective in scenarios with a large number of agents and large models, where the benefits of exploiting inter-agent redundancy are most pronounced.
-Overall, our work demonstrates the potential of learned successive multi-terminal Wyner-Ziv quantization for improving communication efficiency in federated learning, paving the way for more scalable and efficient distributed learning systems.
+We present a novel gradient quantization approach for federated learning leveraging inter-agent redundancy.
+Our method exploits cross-worker and temporal correlations through learned successive multi-terminal Wyner-Ziv quantization, achieving superior rate-distortion performance while maintaining model accuracy.
+The approach is particularly effective for scenarios with many agents and large models where inter-agent redundancy benefits are pronounced.
+Our results demonstrate the potential of such techniques to significantly reduce communication overhead.
 
-Future work could explore the integration of our method with other compression techniques which follow after quantization, such as vector quantization.
+Future work could integrate our method with post-quantization compression techniques like vector quantization.

@@ -11,76 +11,63 @@
     \begin{minipage}[b]{1.0\linewidth}
       \centering
       \centerline{\input{sections/figure/LSMTWZQ}}
-      \centerline{(a) quantizer setup}\medskip
+      \centerline{(a)}\medskip
     \end{minipage}
-
     \begin{minipage}[b]{1.0\linewidth}
       \centering
       \input{sections/figure/WZ coder block diagram}
-      \centerline{(b) WZQ encoder-decoder setup}\medskip
+      \centerline{(b)}\medskip
     \end{minipage}
-
-    \caption{a) shows the overall WZQ quantization process with \(K\) workers and \(J\) successive stages. b) shows the internals of the learned successive WZ coder (encoder+decoder) with side information \(S\) accompanied by SW coder.}
+    \caption{In both, \(X\) is the pre-processed gradient. a) Overall quantization process. b) Detailes on the learned WZQ and how SW coding is integrated.}
     \label{fig:block}
 \end{figure}
 
 \begin{figure}[t]
-%    \includegraphics[width=0.5\textwidth]{sections/figure/protocols}
     \input{sections/figure/protocol_timeline}
-    \caption{Overall timeline of the proposed protocol. Temporal-only quantization is trained on the workers and is limited to SI at the same worker and is better at higher rates. All-SI quantization is trained on the server and uses all workers' past reconstructions as SI.}
+    \caption{Proposed protocol timeline. Each dot is a quantization process happening which leads to a new reconstruction becoming available. Temporal-only uses worker-side trained quantizer trained on the true gradients before transmition, and only uses reconstructions made at other Temporal-only rounds as SI. The quantizer in All-SI is trained at server-side and uses all available reconstructions as SI, but can't see the true gradients and instead uses the most recent reconstruction of the worker as a proxy.}
     \label{fig:protocols_timeline}
 \end{figure}
 
-%-----------------------------------------------------------------------
-In this section, we present our proposed framework.
-We consider a multi-terminal approach as we have multiple workers with correlated gradients. This link has been observed in other works~\cite{ZhangTao2022, Abrahamyan2022LGC} and further confirmed by us in~\ref{fig:grad_corr} (per-coordinate correlation). The distribution shift was also checked via KL divergence and found to be very low.
-Since these agents do not communicate directly, we employ Distributed Source Coding (DSC) principles to exploit inter-node, and even temporal correlation.
-We first describe the quantizer framework, turning a gradient vector into a bitstream, and back. Then we will describe 2 different side information (SI) setups which define our two variants of the quantizer. Armed with these quantizers, we will finally explore possible communication protocols to leverage them in a federated learning setup.
+We present our framework exploiting multi-terminal approach on correlated gradients. This correlation is observed in prior works~\cite{ZhangTao2022, Abrahamyan2022LGC} and confirmed for per-coordinate correlation coefficients in~\ref{fig:grad_corr}.
+The distribution shift was investigated and shown to be small assuming scale normalization.
+These enable the use of DSC methods, like a WZ quantizer.
 
-%-----------------------------------------------------------------------
 \subsection{Learned Successive Multi-terminal Wyner–Ziv Quantization (WZQ)}
 \label{subsec:method-lsmtwzq}
-We first describe the main building block that is the quantizer used in our protocols as seen in figure \ref{fig:block}.
-At some round \(r\), a worker \(k\in\{1,\ldots,K\}\) holds an accumulated gradient in the form of a flattened vector \(G_{k,r}\in\mathbb{R}^n\). This vector will be preprocessed into \(X_{k,r}\).
-Each element of this vector is then quantized, i.e., encoded into symbols \(u_{k,r,i,j}\) where i is the spatial index and j is the refinement stage (if any). The list of symbols of the same refinement stage is denoted \(U_{k,r,j}\) which are separately further compressed into a bitstream \(O_{k,r}\) using a Slepian-Wolf (SW) coder conditioned on the prior \(p(u_{k,r}|{Y}_{k,r})\) which was estimated by a learned model as part of the training of the quantizer (\ref{sec:background}). These bitstreams are sent to the server where using the SW decoder, and side information related to the said prior, the symbols vector \(U_{k,r,j}\) is recovered. Finally these symbols alongside the side information can be given to the learned decoder to reconstruct the vector \(\hat X_{k,r}\) and post-processed into the gradient estimate \(\hat G_{k,r}\).
+At round \(r\), worker \(k\in\{1,\ldots,K\}\) holds flattened gradient \(G_{k,r}\in\mathbb{R}^n\), preprocessed to \(X_{k,r}\). Each element is quantized to symbols \(u_{k,r,i,j}\) (spatial index \(i\), refinement stage \(j\)). Symbol lists \(U_{k,r,j}\) are further compressed to bitstreams \(O_{k,r}\) using SW coder paired with learned conditional prior estimating \(p(u_{k,r}|{Y}_{k,r})\). Server decodes using SW decoder and side information (\textbf{SI}) to recover \(U_{k,r,j}\), then dequantized using the SI into \(\hat X_{k,r}\) to finally be post-processed into \(\hat G_{k,r}\). Figure~\ref{fig:block} illustrates the process.
 
-% -----------------------------------------------------------------------
-\textbf{Pre-/Post-processing.}
-Normalization per layer helps with training stability and lower distortion when scales are different between layers. Outliers are few and can be separately encoded with a negligible rate cost. We also use a random permutation to break any spatial correlation which helps the quantizer generalize better.
+\textbf{Pre-/Post-processing:} Layer normalization aids training stability some layers have very small scale. Outliers are separately encoded as they are few in number.
 
 %-----------------------------------------------------------------------
 \subsubsection{Training Quantizers and SI variants}
-Each worker \(k\) has its own quantizer instance which is trained independently. The decoder has to be sent across to the other side once after training, but this is negligible compared to the per-round communication (e.g., less than 100KBs).
+Each worker has independent quantizer instances. Decoder transmission is negligible (100KBs decoder vs 11 million parameters in resnet-18).
+We consider two variants of the quantization process which are defined by where the quantizer is trained and what is included in the SI.
 
-We explore two variants of the quantizer process which are defined by where they train and what SI they use.
+\textbf{All-SI quantization process:}
+Our main process as it exploits inter-node correlation.
+Trained on the server, it uses all workers\’ past reconstructions as SI except for one; the most recent reconstruction (for the worker in question) is excluded and used as the training target. This leverages both inter-node and temporal correlation but introduces a train\–inference distribution mismatch, which we observe is usually the dominant cause of higher rate\–distortion cost. Another issues is that the resulting higher distortions degrade the reconstructions used om the next training phases, leading to multi-round error accumulation\—an issue we address with the next quantization process.
 
-\textbf{1- All-SI quantization process}
-This is the main quantization process since it can exploit inter-node correlation.
-It is trained on the server-side and uses all workers' past reconstructions as SI except the most recent reconstruction which is used as the training target. While this allows the quantizer to exploit both inter-node and temporal correlation, it risks a distribution mismatch between training and inference. We have observed that this usually is the dominant reason for a higher rate-distortion cost. This means higher distortions which affect the performance of the next All-SI quantizer that's trained on these distorted reconstructions. This can lead to error accumulation over multiple rounds. We address this via the next quantization process.
-
-
-\textbf{2- Temporal-only quantization process}
-The SI only contains the same worker's past reconstructions which were made using the same quantization process. This combined with training on the worker-side allows the server and worker to maintain the same list of past reconstructions (with the same quantization process). On top of the same SI, since the quantizer is trained on the worker-side, it can use the newly accumulated gradient as the training target. This means no distribution mismatch occurs. This is the main advantage of this variant. However, we will be limited to only exploiting temporal correlation.
-This process could be used to lower the error accumulation of the all-SI process.
-
-Note: In our experiments, we've seen that this variant usually outperforms all other methods, but since it cannot exploit inter-node correlation, we don't explore its potential much further.
+\textbf{Temporal-only quantization process}
+SI consists only of the same worker\’s past reconstructions produced by this quantization process. Training occurs on the worker side, so the true gradient to be transmitted can be used as the training target, minimizing train\–inference mismatch. Because the decoder is available at both ends, the server and worker can maintain an identical list of reconstructions. The benefit of low train\–inference mismatch comes at the cost of exploiting only temporal (not inter-node) correlation, so this variant is used periodically to realign reconstructions to the true gradients and mitigate error accumulation. In our experiments, it is very powerful, but we do not pursue it further because it cannot exploit inter-node correlation.
 
 %-----------------------------------------------------------------------
 \subsection{Proposed Protocol leveraging WZQ}
 \label{subsec:method-protocols}
-We will be describing a protocol to maximize the benefit of inter-node redundancy which is only possible with the all-SI quantization process.
-We have 2 main issues to address:
-1) Initializing the past reconstructions list to be used as SI, 2) Mitigating error accumulation due to distribution mismatch in all-SI.
-The proposed protocol is shown in figure \ref{fig:protocols_timeline}. It consists of 5 phases: initialization, realignment, retraining and freeze.
+To maximize inter-node redundancy via the all-SI quantization process, we use the five-phase protocol.: \emph{Initialization}, \emph{Warm-up}, \emph{Realignment}, \emph{Retraining}, and \emph{Freeze}. Fig.~\ref{fig:protocols_timeline} shows the overall protocol.
 
-\subsubsection{Initialization and Warm-up phase}
-Initialization: We start round 1 with a pre-trained non-WZ (since it has no SI) quantizer. This model is trained on a Laplacian distribution without SI. The decoder for this quantizer is also sent to workers so they can have access to their own first reconstructions.
+\noindent\textbf{1) Initialization.}
+Round 1 uses a pre-trained non-WZQ quantizer (no SI), trained on a Laplacian source without SI; its decoder is sent to workers so each can form a first local reconstruction, used by both temporal-only and all-SI.
 
-Warm-up: Now equipped with 1 reconstruction per worker, we train an all-SI quantizer in a progressive manner. This means on round 2, when training for agent 2, we use the newly reconstructed gradient of agent 1 as SI. This continues for \(S\) rounds (max number of kept reconstructions per worker).
 
-\subsubsection{Realignment, Retraining and Freeze phases}
-These phases start immediately after the warm-up phase and repeat for the rest of the training rounds.
-Realignment: The goal is to get 2 high-quality reconstructions, one to add to our pool of reconstructions, and the other to be used as a target for training an all-SI quantizer in the retraining phase.
-One could use a high-rate all-SI quantization to get these reconstructions, but we've noticed at high rates, the rate-distortion of temporal-only quantization is better. So we train a temporal-only quantizer on the worker-side in parallel and use it to get one of the reconstructions for 2 rounds.
-Retraining: Equipped with these new high-quality (but high-rate cost) reconstructions, we train an all-SI quantizer in the same progressive manner as the warm-up phase.
-Freeze: After retraining, we freeze the quantizer and the SI list that was used to train it and use it for the next \(S-3\) rounds.
+\noindent\textbf{2) Warm-up.}
+With one reconstruction per worker available, train an all-SI quantizer progressively: in round 2, training for agent 2 uses agent 1\’s fresh reconstruction as SI; continue for \(S-3\) rounds, where \(S\) is the max number of stored reconstructions per worker.
+
+\noindent\textbf{3) Realignment.}
+Obtain two high-quality reconstructions\—one to augment the SI pool and one to serve as the training target for all-SI in retraining. While high-rate all-SI could produce these, at high rates temporal-only shows better rate--distortion; thus, per round, train a worker-side temporal-only quantizer in parallel and use it.
+
+\noindent\textbf{4) Retraining.}
+Using these high-quality (but high-rate) reconstructions, train an all-SI quantizer for all workers in parallel on the server.
+
+\noindent\textbf{5) Freeze.}
+Freeze the retrained quantizer and the SI list used to train it, and use this fixed pair for the next \(S-3\) rounds; phases 3--5 then repeat thereafter.
+

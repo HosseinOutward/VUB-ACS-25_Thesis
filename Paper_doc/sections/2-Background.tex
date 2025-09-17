@@ -4,43 +4,31 @@
 %-----------------------------------------------------------------------
 \subsection{Federated Learning and FedSGD}
 \label{ssec:backFL}
-For our work, we consider a standard FL setup based on the FedSGD algorithm.
-In this algorithm, we have $K$ agents, and are aiming to minimize a global loss $L$, with $L_k$ being the local loss of agent $k$.
-In each communication round $r$ of the FedSGD algorithm, agent $k$ computes its local gradient $\mathbf{G}_{k,r}$. Gradients are flattened and sent to a central server, which aggregates them into $\mathbf{G}_r = \frac{1}{K} \sum_{k=1}^{K} \mathbf{G}_{k,r}$ and updates the global model $\mathbf{w}$ using the rule: $\mathbf{w}_{r+1} = \mathbf{w}_r - \eta \mathbf{g}_r$. This is repeated for $R$ rounds until convergence and is called FedSGD \cite{McMahan2017CommunicationEfficientLOcal}.
-This approach means that in each round, each agent needs to send its full accumulated gradient to the server, which can be communication-intensive, especially for large models.
+We consider standard FL setup with FedSGD algorithm With $K$ agents minimizing global loss $L$ (local loss $L_k$ for agent $k$). For each communication round $r$, agent $k$ compute local gradient which are accumulated over the local training steps. The acumelated gradient $\mathbf{G}_{k,r}$  are flattened and sent to the server, which aggregates them as $\mathbf{G}_r = \frac{1}{K} \sum_{k=1}^{K} \mathbf{G}_{k,r}$ and updates global model: $\mathbf{w}_{r+1} = \mathbf{w}_r - \eta \mathbf{g}_r$. This repeats for $R$ rounds until convergence.
 
 %-----------------------------------------------------------------------
 \subsection{Wyner-Ziv Theorem}
 \label{ssec:backwz}
-Given a remote source $X$ and side information $Y$, only available at the decoder, the rate-distortion function for Wyner-Ziv coding \cite{1055508} is given by:
+Given remote source $X$, and side information $Y$ only at decoder, the Wyner-Ziv rate-distortion function \cite{1055508} is:
 \begin{equation}
     R_{WZ}(D) = \min_{p(\hat{x}|x,y): \mathbb{E}[d(X,\hat{X})] \leq D} I(X;\hat{X}|Y)
 \end{equation}
-where $I(X;\hat{X}|Y)$ is the conditional mutual information between $X$ and its reconstruction $\hat{X}$ given $Y$, and $d(X,\hat{X})$ is a distortion measure.
-Under certain conditions, the Wyner-Ziv rate-distortion function achieves the same performance as if the side information were available at both the encoder and decoder, known as the Slepian-Wolf bound \cite{SlepianWolf1973}.
+where $I(X;\hat{X}|Y)$ is conditional mutual information between $X$ and reconstruction $\hat{X}$ given $Y$. Under certain conditions, this achieves the Wyner-Ziv bound, matching rate-distortion function with side information at both encoder and decoder \cite{1055508}.
 
 %-----------------------------------------------------------------------
-\subsection{Learned WZ Quantizers}
+\subsection{Learned WZ Quantizers + Slepian-Wolf Coding}
 \label{ssec:backlwzq}
-An encoder-decoder pair can be implemented using DNNs, as shown in \cite{OzyilkanRecoverBinning}. The encoder $\phi$ quantizes the input $\mathbf{x}$ to a bin index (symbol) $u$, while the decoder $\psi$ reconstructs $\hat{\mathbf{x}}$ using the bin index and side information $\mathbf{y}$.
-In the work of \cite{OzyilkanRecoverBinning}, the loss functions derived from the Wyner-Ziv theorem require knowledge of the conditional posterior $p(\mathbf{x}|\mathbf{y},u)$. This prior is estimated by training a DNN-based conditional posterior model $q(\mathbf{x}|\mathbf{y},u)$ to approximate the true posterior. This prior can be used by a separate prior-aware Slepian-Wolf coder to further compress a list of bin indices $u$ beyond its own entropy. If this step is not needed, the prior can be replaced with a marginal $p(u|\mathbf{y})$, though we will not consider this as we want lower rates. This step can be applied to non-WZ quantizations as well, such as sign quantization.
+Learnable encoder-decoder pairs using DNNs \cite{OzyilkanRecoverBinning}, where encoder $\phi$ quantizes input $\mathbf{x}$ to bin index $u$ (symbol); decoder $\psi$ reconstructs $\hat{\mathbf{x}}$ using bin index and side information $\mathbf{y}$.
+The derived Loss function requires conditional posterior (cond. prior) $p(\mathbf{x}|\mathbf{y},u)$, which is estimated by training a DNN-based model $q_\zeta(\mathbf{x}|\mathbf{y},u)$. Also, knowing the cond. prior enables the use of a seperate Slepian-Wolf coding of the list of indices $U$, further reducing rate. There are works~\cite{ZhangTao2022} showcasing effectiveness of this extra step in FL.
 
-The loss function is given by:
+The loss function is:
 \begin{equation}
-% L = E[log(p(u|x)/q_zeta(x|y,u))] + lambda * E[d(x, x_hat)]
 {L} = \mathbb{E} \left[ \log \frac{p(u|x)}{q_\zeta(x|y, u)} \right] + \lambda \mathbb{E}[d(x, \hat{x})]
 \end{equation}
-where $q_\zeta$ is the learned conditional prior with parameters $\zeta$, $d$ is a distortion measure (MAPE in our case), and $\lambda$ is a Lagrange multiplier that controls the impact of the distortion component relative to the rate component.
-Their implementation also uses Gumbel-Softmax to encourage the model to consider different quantization's in the early stages of training.
+where $q_\zeta$ is learned conditional prior, $d$ is distortion measure (MAPE), and $\lambda$ controls rate-distortion tradeoff. Implementation uses Gumbel-Softmax for early training exploration.
 
-%-----------------------------------------------------------------------
 \subsection{Successive Refinement}
 \label{ssec:backSR}
-Successive refinement coding allows for progressively more encoded information by sending multiple messages in stages, where each stage provides increasingly better reconstruction quality. In WZ coding, $J$ stages are defined by encoder-decoder pairs $(\phi_j, \psi_j)$ for $j = 1, \ldots, J$. A learned version is presented in \cite{JoukovskyLayeredWZ} by considering each stage's output as side information for the next stage, which improves rate-distortion performance compared to single-stage (monolithic) coding on Gaussian sources.
+Successive refinement sends multiple messages in stages for progressively better reconstruction. In WZ coding, $J$ stages use encoder-decoder pairs $(\phi_j, \psi_j)$. Learned versions \cite{JoukovskyLayeredWZ} essentially use each stage's output as side information for the next, improving rate-distortion over monolithic coding.
 
-The encoders and decoders are defined as:
-\begin{align}
-\phi_j &: X^n \rightarrow \{1, 2, \ldots, M_j\} \\
-\psi_j &: \{1, \ldots, M_1\} \times \cdots \times \{1, \ldots, M_j\} \times Y^n \rightarrow \hat{X}^n
-\end{align}
-where $M_j$ are code sizes and the decoders successively estimate $\hat{X}_j$ with distortion levels $(D_1, \ldots, D_J)$ using side information and previously accumulated codes. The total sum-rate after $j$ stages is $R_{tot}^j = \sum_{i=1}^j R_i$.
+Encoders: $\phi_j : X^n \rightarrow \{1, \ldots, M_j\}$. Decoders:  $\psi_j : \{1, \ldots, M_1\} \times \cdots \times \{1, \ldots, M_j\} \times Y^n \rightarrow \hat{X}^n$, where decoders estimate $\hat{X}_j$ with distortion $(D_1, \ldots, D_J)$ using side information and accumulated codes. Total sum-rate after $j$ stages: $R_{tot}^j = \sum_{i=1}^j R_i$.
