@@ -2,7 +2,7 @@
 \label{sec:ourmethod}
 %-----------------------------------------------------------------------
 In this section, we present our proposed framework.
-We consider a multi-terminal approach as we have multiple workers with correlated gradients. This link has been observed in other works~\cite{ZhangTao2022, Abrahamyan2022LGC} and further confirmed by us in~\ref{fig:grad_corr} (per-coordinate correlation).
+We consider a multi-terminal approach as we have multiple workers with correlated gradients. This link has been observed in other works~\cite{ZhangTao2022, Abrahamyan2022LGC} and further confirmed by us in~\ref{fig:grad_corr} (per-coordinate correlation). The distribution shift was also check via KL divergence and found to be very low.
 Since these agents do not communicate directly, we employ Distributed Source Coding (DSC) principles to exploit intra-node, and even temporal correlation.
 We first describe the quantizer framework, turning a gradient vector into a bitstream, and back. Then we will describe 2 different side information (SI) setup which define our two variants of the quantizer. Armed with these quantizers, we will finally explore possible communication protocols to leverage them in a federated learning setup.
 
@@ -38,11 +38,7 @@ Each element of this vector is then quantized, i.e. encoded into symbols \(u_{k,
 
 % -----------------------------------------------------------------------
 \textbf{Pre-/Post-processing.}
-WZQ is sensitive to distribution drift. We apply basic normalization per round using the 99th percentile to stabilize scales as gradients tend to become smaller in scale over time; with this, the round-to-round gradient KL for ResNet18 is \(<0.01\), indicating low shift. Two low-cost add-ons further improve performance but their benefit depends on the gradient distribution:
-
-\emph{\- Per-layer normalization:} mitigates large layer-wise scale disparities at the cost of sending layer min and max stats.
-
-\emph{\- Outlier handling:} values beyond \(0.3\times\\\mathrm{99th\ percentile}\) are pulled into range and quantized with the rest; minimal extra info is needed to restores them at server.
+Normalization per layers helps with training stability and lower distortion when scales are different between layers. Outliers are few and can be seperately encoded with a negligible rate cost. We also use a random permutation to break any spatial correlation which helps the quantizer generalize better.
 
 %-----------------------------------------------------------------------
 \subsubsection{Training Quantizers and SI variants}
@@ -72,7 +68,7 @@ The proposed protocol is shown in figure \ref{fig:protocols_timeline}. It consis
 \begin{figure}[ht]
 %    \includegraphics[width=0.5\textwidth]{sections/figure/protocols}
     \input{sections/figure/protocol_timeline}
-    \caption{Shows the overall idea of the propsed protocol as a timeline.}
+    \caption{Overall timeline of the propsed protocol. Temporal only quantization is trained on the workers and is limited to SI at the same worker and is better at higher rates. All-SI quantization is trained on the server and uses all workers' past reconstructions as SI.}
     \label{fig:protocols_timeline}
 \end{figure}
 
