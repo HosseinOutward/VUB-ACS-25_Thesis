@@ -90,14 +90,15 @@ class _ConventionalQuantizer(QuantizerWithDataPrep):
             conditional_prior_model = PL_ConditionalPrior(
                 code_size=self.bin_count, layers=4, hidden_dim=80, input_dim=len(side_info_data_list))
 
-            trainer = pl.Trainer(max_epochs=30, logger=False, enable_checkpointing=False,
+            trainer = pl.Trainer(max_epochs=20, logger=False, enable_checkpointing=False,
                                  enable_progress_bar=self.enable_progress_bar)
             dataset = torch.utils.data.TensorDataset(
                 torch.tensor(encoded_bins, dtype=torch.long),
                 torch.tensor(np.stack(side_info_data_list, axis=1), dtype=torch.float32)
             )
             dataloader = torch.utils.data.DataLoader(
-                dataset, batch_size=batch_size, shuffle=True, num_workers=8, persistent_workers=True)
+                dataset, batch_size=batch_size, num_workers=8, persistent_workers=True,
+                sampler=torch.utils.data.RandomSampler(dataset, replacement=True, num_samples=batch_size),)
             trainer.fit(conditional_prior_model, dataloader)
 
             conditional_prior_model.eval()
@@ -201,7 +202,7 @@ if __name__ == "__main__":
     wz_model = PL_EncoderDecoder_RNN(inp_dim=1, side_info_size=0, num_planes=2, bins_per_plane=4, tau=1.5, tau_rate=10,
                                      reconst_ld=400, lr=1e-3, marginal=True).to(torch.float32)
     # -----------
-    wz_quantizer = RoundBasicQuantizer(wz_model, train_sample_size=200_000, count_side_info_data=1,
+    wz_quantizer = SignDSCQuantizer(wz_model, train_sample_size=200_000, count_side_info_data=1,
                                        enable_progress_bar=True, vec_slices=[])
     # -----------
     wz_quantizer.train_model(y, side_info_data, epoch=50, batch_size=10_000)
@@ -211,11 +212,11 @@ if __name__ == "__main__":
     recons = wz_quantizer.decoding_process(bins, side_info_data, temp)
 
     # %%
-    import matplotlib.pyplot as plt
-    temp = np.argsort(y[:1_000_000])
-    plt.figure(figsize=(16, 3))
-    plt.scatter(y[temp], np.abs(y[temp] - recons[temp]) / np.mean(np.abs(y[temp])), s=0.1)
-    plt.show()
+    # import matplotlib.pyplot as plt
+    # temp = np.argsort(y[:1_000_000])
+    # plt.figure(figsize=(16, 3))
+    # plt.scatter(y[temp], np.abs(y[temp] - recons[temp]) / np.mean(np.abs(y[temp])), s=0.1)
+    # plt.show()
 
     # %%
     from components.broadcast_components.broadcasting_process.broadcast_reporting_utilities import get_obj_size

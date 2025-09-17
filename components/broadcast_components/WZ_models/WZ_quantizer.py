@@ -49,7 +49,7 @@ class WZQuantizer:
 
             self.training_si = side_info_data_list
 
-            if side_info_data_list == []:
+            if len(side_info_data_list) == 0:
                 bins = self.encoding_process(grad_vector)[0] # (num_planes, N)
                 probs_per_plane = []
                 for b_vec in bins:

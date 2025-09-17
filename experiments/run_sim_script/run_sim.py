@@ -12,15 +12,16 @@ proto_choices = [
     *['conventional_'+r+rr for r in ['round', 'sign (with prior)'] for rr in ['','_dsc']],  # 13, 14, 15, 16
     'non-wz-cancer',
 ]
-proto_combo = [str(i) for i in range(0, len(proto_choices))]
-proto_combo += [''.join([str(i), str(j)])
-                for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
-proto_combo += [''.join([str(i), str(j), str(k)])
-                for i in range(0, len(proto_choices))
-                for j in range(0, len(proto_choices))
-                for k in range(0, len(proto_choices))
-                if i != j and i != k and j != k]
-proto_choices += proto_combo
+# proto_combo = [str(i) for i in range(0, len(proto_choices))]
+# proto_combo += [''.join([str(i), str(j)])
+#                 for i in range(0, len(proto_choices)) for j in range(0, len(proto_choices)) if i != j]
+# proto_combo += [''.join([str(i), str(j), str(k)])
+#                 for i in range(0, len(proto_choices))
+#                 for j in range(0, len(proto_choices))
+#                 for k in range(0, len(proto_choices))
+#                 if i != j and i != k and j != k]
+# proto_choices += proto_combo
+proto_combo=[]
 
 if __name__ == "__main__":
     import gc
