@@ -31,4 +31,8 @@ where $q_\zeta$ is learned conditional prior, $d$ is distortion measure (MAPE), 
 \label{ssec:backSR}
 Successive refinement sends multiple messages in stages for progressively better reconstruction. In WZ coding, $J$ stages use encoder-decoder pairs $(\phi_j, \psi_j)$. Learned versions~\cite{JoukovskyLayeredWZ} essentially use each stage's output as side information for the next, improving rate-distortion over monolithic coding.
 
-Encoders: $\phi_j : X^n \rightarrow \{1, \ldots, M_j\}$. Decoders:  $\psi_j : \{1, \ldots, M_1\} \times \cdots \times \{1, \ldots, M_j\} \times Y^n \rightarrow \hat{X}^n$, where decoders estimate $\hat{X}_j$ with distortion $(D_1, \ldots, D_J)$ using side information and accumulated codes. Total sum-rate after $j$ stages: $R_{tot}^j = \sum_{i=1}^j R_i$.
+Encoders: $\phi_j : X^n \rightarrow \{1, \ldots, M_j\}$.
+
+Decoders: $\psi_j : \{1, \ldots, M_1\} \times \cdots \times \{1, \ldots, M_j\} \times Y^n \rightarrow \hat{X}^n$, where decoders estimate $\hat{X}_j$ with distortion $(D_1, \ldots, D_J)$ using side information and accumulated codes.
+
+Total sum-rate after $j$ stages: $R_{tot}^j = \sum_{i=1}^j R_i$.

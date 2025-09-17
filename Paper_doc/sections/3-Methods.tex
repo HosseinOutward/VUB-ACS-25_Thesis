@@ -32,11 +32,13 @@ We present our framework exploiting multi-terminal approach on correlated gradie
 The distribution shift was investigated and shown to be small assuming scale normalization.
 These enable the use of DSC methods, like a WZ quantizer.
 
-\subsection{Learned Successive Multi-terminal Wyner–Ziv Quantization (WZQ)}
+\subsection{Learned Successive Multi-terminal Wyner--Ziv Quantization (WZQ)}
 \label{subsec:method-lsmtwzq}
-At round \(r\), worker \(k\in\{1,\ldots,K\}\) holds flattened gradient \(G_{k,r}\in\mathbb{R}^n\), preprocessed to \(X_{k,r}\). Each element is quantized to symbols \(u_{k,r,i,j}\) (spatial index \(i\), refinement stage \(j\)). Symbol lists \(U_{k,r,j}\) are further compressed to bitstreams \(O_{k,r}\) using SW coder paired with learned conditional prior estimating \(p(u_{k,r}|{Y}_{k,r})\). Server decodes using SW decoder and side information (\textbf{SI}) to recover \(U_{k,r,j}\), then dequantized using the SI into \(\hat X_{k,r}\) to finally be post-processed into \(\hat G_{k,r}\). Figure~\ref{fig:block} illustrates the process.
+At round \(r\), worker \(k\in\{1,\ldots,K\}\) holds flattened gradient \(G_{k,r}\in\mathbb{R}^n\), preprocessed to \(X_{k,r}\). Each element is quantized to symbols \(u_{k,r,i,j}\) (spatial index \(i\), refinement stage \(j\)). Symbol lists \(U_{k,r,j}\) are further compressed to bitstreams \(O_{k,r}\) using SW coder paired with learned conditional prior estimating \(p(u_{k,r}|{Y}_{k,r})\).
 
-\textbf{Pre-/Post-processing:} Layer normalization aids training stability some layers have very small scale. Outliers are separately encoded as they are few in number.
+Server decodes using SW decoder and side information (\textbf{SI}) to recover \(U_{k,r,j}\), then dequantized using the SI into \(\hat X_{k,r}\) to finally be post-processed into \(\hat G_{k,r}\). Figure~\ref{fig:block} illustrates the process.
+
+\textbf{Pre-/Post-processing:} Layer normalization aids training stability as some layers have very small scale. Outliers are separately encoded as they are few in number.
 
 %-----------------------------------------------------------------------
 \subsubsection{Training Quantizers and SI variants}
