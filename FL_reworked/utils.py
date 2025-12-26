@@ -1,14 +1,15 @@
 from __future__ import annotations
 import random
 from collections import OrderedDict
-from typing import Dict, List
+from typing import Dict, List, Tuple, Optional
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
-from models import FLModelTemplate
+from models import FLModelTemplate, initialize_model
+from dataset import create_dataloader
 
 
 def set_global_seed(seed: int) -> None:
@@ -26,6 +27,47 @@ def get_device(device_id: int = 0) -> torch.device:
         torch.backends.cudnn.benchmark = True
         return device
     return torch.device("cpu")
+
+
+def setup_fl_worker(
+    cfg,
+    role: str,
+    device_id: int,
+    X_train: Optional[torch.Tensor],
+    y_train: Optional[torch.Tensor],
+    X_test: torch.Tensor,
+    y_test: torch.Tensor,
+    client_id: Optional[int] = None,
+    num_clients: Optional[int] = None
+) -> Tuple[FLModelTemplate, torch.device, DataLoader, Optional[DataLoader], StateDictManager]:
+    """
+    Common setup for FL server/client workers.
+
+    Returns:
+        model, device, test_loader, train_loader (None for server), sd_manager
+    """
+    device = get_device(device_id)
+    print(f"[{role}] Device: {device}")
+
+    model = initialize_model(cfg, device)
+    test_loader = create_dataloader(X_test, y_test, cfg, device, is_train=False)
+
+    train_loader = None
+    if X_train is not None and client_id is not None:
+        train_loader = create_dataloader(
+            X_train, y_train, cfg, device, is_train=True,
+            client_id=client_id, num_clients=num_clients
+        )
+
+    sd_manager = StateDictManager(model)
+
+    return model, device, test_loader, train_loader, sd_manager
+
+
+def format_metrics(metrics: Dict[str, float], prefix: str = "") -> str:
+    """Format metrics dict into a readable string."""
+    p = f"{prefix} " if prefix else ""
+    return f"{p}Loss: {metrics['loss']:.4f}, Acc: {metrics['acc']:.4f}, AUC: {metrics['auc']:.4f}"
 
 
 @torch.no_grad()

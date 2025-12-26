@@ -4,9 +4,7 @@ import torch
 import torch.distributed as dist
 
 from run_fl import FLConfig
-from utils import set_global_seed, get_device, recalibrate_batchnorm, StateDictManager, evaluate
-from models import initialize_model
-from dataset import create_dataloader
+from utils import set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics
 
 
 def run_federated_client(
@@ -19,22 +17,14 @@ def run_federated_client(
     y_test: torch.Tensor
 ) -> None:
     """Client performs local training and gradient compression."""
-    set_global_seed(cfg.seed + 1000 * rank)
     client_id = rank - 1
+    set_global_seed(cfg.seed + 1000 * rank)
 
-    device = get_device(client_id)
-    print(f"[Client {client_id}] Device: {device}")
-
-    model = initialize_model(cfg, device)
-
-    train_loader = create_dataloader(X_train, y_train, cfg, device, is_train=True,
-                               client_id=client_id, num_clients=world_size - 1)
-
-    # Create test loader for evaluation
-    test_loader = create_dataloader(X_test, y_test, cfg, device, is_train=False)
-
-    # Initialize state dict manager to handle parameter structure
-    sd_manager = StateDictManager(model)
+    model, device, test_loader, train_loader, sd_manager = setup_fl_worker(
+        cfg, f"Client {client_id}", device_id=client_id,
+        X_train=X_train, y_train=y_train, X_test=X_test, y_test=y_test,
+        client_id=client_id, num_clients=world_size - 1
+    )
 
     optimizer = model.configure_optimizer(device)
     use_amp = device.type == "cuda"
@@ -44,13 +34,10 @@ def run_federated_client(
     while True:
         print(f"[Client {client_id}] Starting round {curr_rnd_i}")
 
-        # ---- Receive updated global model from server (and get current round number) ----
-        # getting server state dict
+        # ---- Receive updated global model from server ----
         vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
         dist.broadcast(vec_srvr_sd, src=0)
-        srvr_sd = sd_manager.unflatten(vec_srvr_sd)
-
-        model.load_state_dict(srvr_sd, strict=False)
+        model.load_state_dict(sd_manager.unflatten(vec_srvr_sd), strict=False)
 
         if cfg.recalibrate_bn:
             recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)
@@ -68,7 +55,7 @@ def run_federated_client(
 
         assert srvr_rnd == curr_rnd_i, f"Round mismatch: expected {curr_rnd_i}, got {srvr_rnd}"
 
-        # ---- train the local model ----
+        # ---- Train the local model ----
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
@@ -77,24 +64,18 @@ def run_federated_client(
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 
-        # ---- evaluate local model post-training ----
+        # ---- Evaluate local model post-training ----
         train_metrics = evaluate(model, train_loader, device)
         test_metrics = evaluate(model, test_loader, device)
-        print(f"[Client {client_id}] Post-training - Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['acc']:.4f}, AUC: {train_metrics['auc']:.4f} | Test Loss: {test_metrics['loss']:.4f}, Acc: {test_metrics['acc']:.4f}, AUC: {test_metrics['auc']:.4f}")
+        print(f"[Client {client_id}] Post-training - {format_metrics(train_metrics, 'Train')} | {format_metrics(test_metrics, 'Test')}")
 
-        # ---- send model delta to server ----
+        # ---- Send model delta to server ----
         delta = sd_manager.compute_delta(post_train_state, pre_train_state)
         delta_vec = sd_manager.flatten(delta).cpu().contiguous()
-        n_samples = len(train_loader.dataset)
 
-        # Send client_id and round_id
         dist.send(torch.tensor([client_id, curr_rnd_i], dtype=torch.long), dst=0)
-        # Send number of samples
-        dist.send(torch.tensor([n_samples], dtype=torch.long), dst=0)
-        # Send delta
+        dist.send(torch.tensor([len(train_loader.dataset)], dtype=torch.long), dst=0)
         dist.send(delta_vec, dst=0)
 
         print(f"[Client {client_id}] Broadcast complete for round {srvr_rnd}")
-
-        # ---- wrap up ----
-        curr_rnd_i+=1
+        curr_rnd_i += 1
