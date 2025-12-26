@@ -10,12 +10,12 @@ class FLConfig:
     """Federated learning configuration."""
     codec: str = "basic"
 
-    num_clients: int = 2
-    num_loader_workers: int = 8
+    num_clients: int = 3
+    num_loader_workers: int = 4
     num_classes: int = 10
     data_folder: str = "../data"
     dataset_name: str = "SVHN"
-    rounds: int = 80
+    rounds: int = 5
     local_epochs: int = 20
     batch_size: int = 1000
     lr: float = 1e-3
