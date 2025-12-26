@@ -27,7 +27,7 @@ def run_federated_client(
     )
 
     optimizer = model.configure_optimizer(device)
-    use_amp = device.type == "cuda"
+    use_amp = cfg.mixed_precision
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     curr_rnd_i = 0
@@ -35,13 +35,6 @@ def run_federated_client(
         print(f"[Client {client_id}] Starting round {curr_rnd_i}")
 
         # ---- Receive updated global model from server ----
-        vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
-        dist.broadcast(vec_srvr_sd, src=0)
-        model.load_state_dict(sd_manager.unflatten(vec_srvr_sd), strict=False)
-
-        if cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)
-
         # Get current round number
         srvr_rnd = torch.zeros(1, dtype=torch.long)
         dist.broadcast(srvr_rnd, src=0)
@@ -52,6 +45,14 @@ def run_federated_client(
             assert curr_rnd_i == cfg.rounds, f"Client {client_id} received termination signal but at round {curr_rnd_i}"
             print(f"[Client {client_id}] Training complete. Shutting down.")
             break
+
+        # Get model state dict
+        vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
+        dist.broadcast(vec_srvr_sd, src=0)
+        model.load_state_dict(sd_manager.unflatten(vec_srvr_sd), strict=False)
+
+        if cfg.recalibrate_bn:
+            recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)
 
         assert srvr_rnd == curr_rnd_i, f"Round mismatch: expected {curr_rnd_i}, got {srvr_rnd}"
 

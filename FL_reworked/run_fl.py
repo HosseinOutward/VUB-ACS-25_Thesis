@@ -8,25 +8,30 @@ import torch.distributed as dist
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    codec: str = "basic"
+    codec: str = "cancer"
 
     num_clients: int = 3
-    num_loader_workers: int = 4
+    num_loader_workers: int = 2
     num_classes: int = 10
     data_folder: str = "../data"
     dataset_name: str = "SVHN"
-    rounds: int = 5
+    rounds: int = 20
     local_epochs: int = 20
-    batch_size: int = 1000
+    batch_size: int = 500
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 43
 
     recalibrate_bn: bool = True
     bn_recalib_batches: int = 100
+
+    # Memory and performance optimizations
     channels_last: bool = True
-    tf32: bool = True # Enable TF32 on Ampere+ GPUs
-    use_compile: bool = False # linux only, requires torch>=2.0
+    cudnn_benchmark: bool = True
+    fused_optimizer: bool = True
+    tf32: bool = True  # TF32 on Ampere+ GPUs
+    mixed_precision: bool = True  # AMP
+    compile_mode: str | bool = False  # linux only; False for no compiling
 
     records_dir: str | None = None  # Directory to save records, None to disable
     dataset_fraction: float = 0.1  # Fraction of dataset to use or None for full dataset

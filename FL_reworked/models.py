@@ -52,14 +52,12 @@ class FLModelTemplate(nn.Module, ABC):
 class Resnet18FLModelTemplate(FLModelTemplate):
     """ResNet18 model for federated learning."""
 
-    def __init__(self, num_classes: int, lr: float, weight_decay: float):
+    def __init__(self, cfg):
         super().__init__()
-        self.num_classes = num_classes
-        self.lr = lr
-        self.weight_decay = weight_decay
+        self.cfg = cfg
 
         backbone = resnet18(weights=None)
-        backbone.fc = nn.Linear(backbone.fc.in_features, num_classes)
+        backbone.fc = nn.Linear(backbone.fc.in_features, cfg.num_classes)
         self.model = backbone
 
         self.loss_fn = nn.CrossEntropyLoss()
@@ -70,19 +68,18 @@ class Resnet18FLModelTemplate(FLModelTemplate):
 
     def configure_optimizer(self, device: torch.device) -> optim.Optimizer:
         """Configure optimizer."""
-        fused = device.type == "cuda"
-        return optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay, fused=fused)
+        fused = self.cfg.fused_optimizer
+        return optim.AdamW(self.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay, fused=fused)
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], device: torch.device, cfg) -> torch.Tensor:
         """Single training step."""
         x, y = batch
 
-        if cfg.channels_last and device.type == "cuda" and x.ndim == 4:
-            x = x.to(device, non_blocking=True, memory_format=torch.channels_last)
-        else:
-            x = x.to(device, non_blocking=True)
-
+        x = x.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
+
+        if cfg.channels_last:
+            x = x.contiguous(memory_format=torch.channels_last)
 
         logits = self(x)
         loss = self.loss_fn(logits, y)
@@ -92,23 +89,27 @@ class Resnet18FLModelTemplate(FLModelTemplate):
 
 
 def initialize_model(cfg, device: torch.device) -> FLModelTemplate:
-    """Initialize model with optimizations and return trainable keys with the size of each value."""
-
-    model = Resnet18FLModelTemplate(cfg.num_classes, cfg.lr, cfg.weight_decay)
+    """Initialize model with optimizations."""
+    model = Resnet18FLModelTemplate(cfg)
     model = model.to(device)
 
     if device.type == "cuda":
         if cfg.channels_last:
-            # Convert model to channels_last memory format for conv layers
             for module in model.modules():
-                if isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
-                    for param in module.parameters():
-                        if param.ndim == 4:  # Conv weights
-                            param.data = param.data.to(memory_format=torch.channels_last)
-        if cfg.tf32 and hasattr(torch.backends.cuda, 'matmul'):
+                if not isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
+                    continue
+                for param in module.parameters():
+                    if param.ndim == 4:
+                        param.data = param.data.contiguous(memory_format=torch.channels_last)
+
+        if cfg.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-        if cfg.use_compile:
-            model = torch.compile(model, mode="reduce-overhead")
+
+        if cfg.cudnn_benchmark:
+            torch.backends.cudnn.benchmark = True
+
+        if cfg.compile_mode:
+            model = torch.compile(model, mode=cfg.compile_mode)
 
     return model

@@ -26,7 +26,7 @@ def run_federated_server(
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
 
-    codec = create_codec(cfg.codec)
+    codec = create_codec(cfg)
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using codec: {codec.__class__.__name__}")
 
@@ -45,9 +45,9 @@ def run_federated_server(
             break
 
         # ---- Send global model params and round number to clients ----
+        dist.broadcast(torch.tensor([rnd_i], dtype=torch.long), src=0)
         vectorized_params = sd_manager.flatten(model.state_dict()).contiguous().cpu()
         dist.broadcast(vectorized_params, src=0)
-        dist.broadcast(torch.tensor([rnd_i], dtype=torch.long), src=0)
 
         # ---- Receive deltas from clients ----
         grads_list = []
@@ -72,6 +72,7 @@ def run_federated_server(
             dist.recv(delta_vec, src=client_rank + 1)
 
             # Simulate compression and reconstruct
+            # recon_delta_vec = delta_vec
             recon_delta_vec = simulate_compression(
                 codec, delta_vec, rcvd_client_id, rnd_i,
                 eval_metrics=metrics, save_dir=cfg.records_dir)

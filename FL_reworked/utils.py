@@ -83,11 +83,10 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, device: to
             break
         x = x.to(device, non_blocking=True)
         if x.ndim == 4 and next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
-            x = x.to(memory_format=torch.channels_last)
+            x = x.contiguous(memory_format=torch.channels_last)
         model(x)
 
 
-@torch.no_grad()
 def evaluate(model: FLModelTemplate, loader: DataLoader, device: torch.device) -> Dict[str, float]:
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
@@ -97,21 +96,26 @@ def evaluate(model: FLModelTemplate, loader: DataLoader, device: torch.device) -
     all_probs = []
     total_loss = 0.0
 
-    for x, y in loader:
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+    with torch.inference_mode():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
 
-        logits = model(x)
-        total_loss += loss_fn(logits, y).item() * x.size(0)
+            use_channels_last = next(model.parameters()).is_contiguous(memory_format=torch.channels_last)
+            if use_channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
 
-        # Get predictions and probabilities
-        probs_P = torch.softmax(logits, dim=1)
-        y_preds = logits.argmax(dim=1)
+            logits = model(x)
+            total_loss += loss_fn(logits, y).item() * x.size(0)
 
-        # Move to CPU and store
-        all_labels.append(y.cpu().numpy())
-        all_probs.append(probs_P.cpu().numpy())
-        all_preds.append(y_preds.cpu().numpy())
+            # Get predictions and probabilities
+            probs_P = torch.softmax(logits, dim=1)
+            y_preds = logits.argmax(dim=1)
+
+            # Move to CPU and store
+            all_labels.append(y.cpu().numpy())
+            all_probs.append(probs_P.cpu().numpy())
+            all_preds.append(y_preds.cpu().numpy())
 
     # Concatenate all batches
     y_true = np.concatenate(all_labels)
