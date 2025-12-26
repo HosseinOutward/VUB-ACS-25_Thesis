@@ -11,7 +11,6 @@ class FLConfig:
     codec: str = "basic"
 
     num_clients: int = 2
-    single_process: bool = False  # Debug mode: run only server in single process
     num_loader_workers: int = 8
     num_classes: int = 10
     data_folder: str = "../data"
@@ -29,6 +28,9 @@ class FLConfig:
     tf32: bool = True # Enable TF32 on Ampere+ GPUs
     use_compile: bool = False # linux only, requires torch>=2.0
 
+    records_dir: str | None = None  # Directory to save records, None to disable
+    dataset_fraction: float = 0.1  # Fraction of dataset to use or None for full dataset
+
     backend: str = "gloo" # "gloo" or "nccl" for GPU/Linux
     master_addr: str = "localhost"
     master_port: str = "29500"
@@ -44,7 +46,13 @@ def _worker(
     y_test: torch.Tensor
 ) -> None:
     """Distributed worker with access to shared data tensors."""
+    import sys
+    import traceback as tb
+
+    # Set up process group
     dist.init_process_group(backend=cfg.backend, init_method='env://', world_size=world_size, rank=rank)
+
+    role = "Server" if rank == 0 else f"Client {rank - 1}"
 
     try:
         if rank == 0:
@@ -52,14 +60,21 @@ def _worker(
             run_federated_server(cfg, rank, world_size, X_test, y_test)
         else:
             from client import run_federated_client
-            run_federated_client(cfg, rank, world_size, X_train, y_train)
+            run_federated_client(cfg, rank, world_size, X_train, y_train, X_test, y_test)
     except Exception as e:
-        import traceback
-        print(f"\n{'='*60}")
-        print(f"[Rank {rank}] EXCEPTION OCCURRED:")
-        print(f"{'='*60}")
-        traceback.print_exc()
-        print(f"{'='*60}\n")
+        print(f"\n{'='*70}", file=sys.stderr)
+        print(f"[{role}] EXCEPTION OCCURRED", file=sys.stderr)
+        print(f"{'='*70}", file=sys.stderr)
+
+        # Print formatted traceback with role prefix
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        formatted_tb = tb.format_exception(exc_type, exc_value, exc_tb)
+
+        for line in formatted_tb:
+            for subline in line.rstrip().split('\n'):
+                print(f"[{role}] {subline}", file=sys.stderr)
+
+        print(f"{'='*70}\n", file=sys.stderr)
         raise
     finally:
         dist.destroy_process_group()
@@ -82,23 +97,18 @@ if __name__ == "__main__":
 
     # Precompute dataset and store in shared memory
     from dataset import precompute_svhn_to_shared
-    X_train, y_train = precompute_svhn_to_shared(cfg.data_folder, "train", torch.float32)
-    X_test, y_test = precompute_svhn_to_shared(cfg.data_folder, "test", torch.float32)
+    if cfg.dataset_fraction:
+        assert 0.0 < cfg.dataset_fraction < 1.0, "dataset_fraction must be in (0.0, 1.0)"
+        print(f"[Debug] Using {cfg.dataset_fraction*100:.1f}% of dataset for quick testing.")
+    X_train, y_train = precompute_svhn_to_shared(cfg.data_folder, "train", torch.float32, cfg.dataset_fraction)
+    X_test, y_test = precompute_svhn_to_shared(cfg.data_folder, "test", torch.float32, cfg.dataset_fraction)
 
     cfg.num_classes = torch.unique(y_train).numel()
 
-    # Run in single-process debug mode or spawn distributed processes
-    if cfg.single_process:
-        # Debug mode: run server only in single process
-        print("[DEBUG] Running in single-process mode")
-        dist.init_process_group(backend=cfg.backend, init_method='env://', world_size=1, rank=0)
-        from server import run_federated_server
-        run_federated_server(cfg, rank=0, world_size=1, X_test=X_test, y_test=y_test)
-        dist.destroy_process_group()
-    else:
-        mp.spawn(
-            _worker,
-            args=(cfg.num_clients + 1, cfg, X_train, y_train, X_test, y_test),
-            nprocs=cfg.num_clients + 1,
-            join=True
-        )
+    # Spawn distributed processes
+    mp.spawn(
+        _worker,
+        args=(cfg.num_clients + 1, cfg, X_train, y_train, X_test, y_test),
+        nprocs=cfg.num_clients + 1,
+        join=True
+    )

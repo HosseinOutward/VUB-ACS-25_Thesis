@@ -99,7 +99,12 @@ def initialize_model(cfg, device: torch.device) -> FLModelTemplate:
 
     if device.type == "cuda":
         if cfg.channels_last:
-            model = model.to(memory_format=torch.channels_last)
+            # Convert model to channels_last memory format for conv layers
+            for module in model.modules():
+                if isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
+                    for param in module.parameters():
+                        if param.ndim == 4:  # Conv weights
+                            param.data = param.data.to(memory_format=torch.channels_last)
         if cfg.tf32 and hasattr(torch.backends.cuda, 'matmul'):
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True

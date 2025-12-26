@@ -119,7 +119,7 @@ class StateDictManager:
         for key in self.keys:
             param = state_dict[key]
             flat_list.append(param.detach().reshape(-1))
-        return torch.cat(flat_list)
+        return torch.cat(flat_list, out=None)
 
     def unflatten(self, flat_vector: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
         state_dict = OrderedDict()

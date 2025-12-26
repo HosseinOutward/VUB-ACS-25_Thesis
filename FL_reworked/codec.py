@@ -1,8 +1,7 @@
 from __future__ import annotations
-from typing import Any, Dict, Tuple
-from abc import ABC, abstractmethod
+from typing import Any, Dict
 from pathlib import Path
-import json
+import csv
 import pickle
 import gzip
 
@@ -32,7 +31,6 @@ def get_obj_size(obj):
 
 def compress_data_list(data_list):
     """Compress data using pickle and gzip."""
-    # Convert to serializable format
     if isinstance(data_list, torch.Tensor):
         data_list = data_list.cpu().numpy()
     
@@ -47,170 +45,109 @@ def decompress_data_list(compressed_data):
     data_list = pickle.loads(decompressed_data)
     return data_list
 
-# --- Compression Codec Framework --- #
-class CompressionRecord(ABC):
-    def __init__(self, round_id: int, client_id: int):
+
+# --- Compression Record --- #
+class CompressionRecord:
+    """Record for compression metrics. Stores all attributes for CSV export."""
+
+    def __init__(self, round_id: int, client_id: int, method: str = "identity"):
         self.round_id = round_id
         self.client_id = client_id
-        self.compressed_bytes: int = None
-        self.global_eval_metrics: Dict[str, float] = {}
-    
-    def set_compressed_bytes(self, compressed_bytes: int) -> None:
-        """Set compressed bytes."""
-        self.compressed_bytes = compressed_bytes
-    
-    def set_global_eval(self, eval_metrics: Dict[str, float]) -> None:
-        """Set global evaluation metrics with 'global_eval_' prefix."""
-        for key, value in eval_metrics.items():
-            self.global_eval_metrics[f'global_eval_{key}'] = value
-    
-    @abstractmethod
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert record to dictionary for serialization."""
-        raise NotImplementedError
-    
-    def save_to_disk(self, save_dir: str = "compression_logs") -> None:
-        """Save record to disk as JSON."""
-        save_path = Path(save_dir)
-        save_path.mkdir(exist_ok=True, parents=True)
-        
-        filename = save_path / f"round_{self.round_id:03d}_client_{self.client_id}.json"
-        
-        with open(filename, 'w') as f:
-            json.dump(self.to_dict(), f, indent=2)
-
-
-class IdentityRecord(CompressionRecord):
-    """Record for identity codec (no compression)."""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'round_id': self.round_id,
-            'client_id': self.client_id,
-            'method': 'identity',
-            'compressed_bytes': self.compressed_bytes,
-            **self.global_eval_metrics
-        }
-
-
-class BasicCompressionRecord(CompressionRecord):
-    """Record for basic compression codec (float16 + gzip)."""
-    
-    def __init__(self, round_id: int, client_id: int):
-        super().__init__(round_id, client_id)
+        self.method = method
+        self.compressed_bytes: int = 0
         self.raw_bytes: int = 0
         self.compression_ratio: float = 0.0
-    
-    def set_raw_bytes(self, raw_bytes: int) -> None:
-        """Set raw bytes and calculate compression ratio."""
-        self.raw_bytes = raw_bytes
-        if self.raw_bytes > 0:
-            self.compression_ratio = self.compressed_bytes / self.raw_bytes
-    
+        self.global_eval_metrics: Dict[str, float] = {}
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        """Convert record to dictionary using class attributes."""
+        result = {
             'round_id': self.round_id,
             'client_id': self.client_id,
-            'method': 'basic',
+            'method': self.method,
             'compressed_bytes': self.compressed_bytes,
             'raw_bytes': self.raw_bytes,
             'compression_ratio': self.compression_ratio,
-            **self.global_eval_metrics
         }
+        # Add global eval metrics with prefix
+        for key, value in self.global_eval_metrics.items():
+            result[f'global_eval_{key}'] = value
+        return result
+
+    def save_to_csv(self, save_dir: str | None = None) -> None:
+        """Append record to CSV file. If save_dir is None, skip saving."""
+        if save_dir is None:
+            return
+
+        save_path = Path(save_dir)
+        save_path.mkdir(exist_ok=True, parents=True)
+
+        csv_file = save_path / "compression_records.csv"
+        record_dict = self.to_dict()
+
+        # Check if file exists to determine if we need to write headers
+        file_exists = csv_file.exists()
+
+        with open(csv_file, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=record_dict.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(record_dict)
 
 
-class FederatedCodec(ABC):
-    """Base class for gradient compression codecs."""
-    
-    @abstractmethod
+# --- Compression Codecs --- #
+class IdentityCodec:
+    """No compression - just pass through. Base codec to build upon."""
+
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
-        """Create a record instance for this codec."""
-        raise NotImplementedError
-    
-    @abstractmethod
-    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        """
-        Encode delta vector and update record.
-        
-        Args:
-            delta_vec: Flattened delta vector
-            record: Record to update with metrics
-            
-        Returns:
-            payload: Encoded data
-        """
-        raise NotImplementedError
-    
-    @abstractmethod
-    def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        """
-        Decode payload back to delta vector.
-        
-        Args:
-            payload: Encoded data
-            record: Record (for potential use in decoding)
-            
-        Returns:
-            Reconstructed delta vector
-        """
-        raise NotImplementedError
+        return CompressionRecord(round_id, client_id, method="identity")
 
-
-class IdentityCodec(FederatedCodec):
-    """No compression - just pass through."""
-    
-    def create_record(self, round_id: int, client_id: int) -> IdentityRecord:
-        return IdentityRecord(round_id, client_id)
-    
-    def encode(self, delta_vec: torch.Tensor, record: IdentityRecord) -> torch.Tensor:
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
         """No compression, just return the vector."""
-        compressed_bytes = get_obj_size(delta_vec)
-        record.set_compressed_bytes(compressed_bytes)
+        record.compressed_bytes = get_obj_size(delta_vec)
+        record.raw_bytes = record.compressed_bytes
+        record.compression_ratio = 1.0
         return delta_vec
     
-    def decode(self, payload: torch.Tensor, record: IdentityRecord) -> torch.Tensor:
+    def decode(self, payload: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
         """No decompression needed."""
         return payload
 
 
-class BasicCompressionCodec(FederatedCodec):
-    """Basic compression: float16 + gzip."""
-    
-    def create_record(self, round_id: int, client_id: int) -> BasicCompressionRecord:
-        return BasicCompressionRecord(round_id, client_id)
-    
-    def encode(self, delta_vec: torch.Tensor, record: BasicCompressionRecord) -> bytes:
+class BasicCompressionCodec(IdentityCodec):
+    """Basic compression: float16 + gzip. Extends IdentityCodec."""
+
+    def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
+        return CompressionRecord(round_id, client_id, method="basic")
+
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
         """Compress using float16 and gzip."""
         # Record raw size
-        raw_bytes = get_obj_size(delta_vec)
-        record.set_raw_bytes(raw_bytes)
-        
+        record.raw_bytes = get_obj_size(delta_vec)
+
         # Convert to float16
         delta_fp16 = delta_vec.to(torch.float16)
         
         # Compress
         compressed = compress_data_list(delta_fp16)
         
-        # Record compressed size
-        compressed_bytes = get_obj_size(compressed)
-        record.set_compressed_bytes(compressed_bytes)
-        
+        # Record compressed size and ratio
+        record.compressed_bytes = get_obj_size(compressed)
+        record.compression_ratio = record.compressed_bytes / record.raw_bytes if record.raw_bytes > 0 else 0.0
+
         return compressed
     
-    def decode(self, payload: bytes, record: BasicCompressionRecord) -> torch.Tensor:
+    def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
         """Decompress and convert back to float32."""
-        # Decompress
         decompressed = decompress_data_list(payload)
         
-        # Convert back to tensor if needed
         if isinstance(decompressed, np.ndarray):
             decompressed = torch.from_numpy(decompressed)
         
-        # Convert back to float32
         return decompressed.to(torch.float32)
 
 
-def create_codec(codec_name: str, **kwargs) -> FederatedCodec:
+def create_codec(codec_name: str, **kwargs) -> IdentityCodec:
     """Create codec instance."""
     if codec_name == "identity":
         return IdentityCodec()
@@ -221,39 +158,25 @@ def create_codec(codec_name: str, **kwargs) -> FederatedCodec:
 
 
 def simulate_compression(
-    codec: FederatedCodec,
+    codec: IdentityCodec,
     delta_vec: torch.Tensor,
     client_id: int,
     round_id: int,
-    eval_metrics: Dict[str, float] = None
+    eval_metrics: Dict[str, float],
+    save_dir: str | None = "compression_logs"
 ) -> torch.Tensor:
-    """
-    Entry point for compression simulation.
-    
-    Args:
-        codec: Compression codec
-        delta_vec: Flattened delta vector
-        client_id: Client identifier
-        round_id: Current round
-        eval_metrics: Global evaluation metrics (optional)
-        
-    Returns:
-        Tuple of (reconstructed delta vector, compression record)
-    """
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
     
-    # Set global eval metrics if provided
-    if eval_metrics is not None:
-        record.set_global_eval(eval_metrics)
-    
+    # Set global eval metrics (always required)
+    record.global_eval_metrics = eval_metrics
+
     # Encode (client-side simulation)
     payload = codec.encode(delta_vec, record)
     
     # Decode (server-side)
     reconstructed = codec.decode(payload, record)
 
-    record.save_to_disk()
+    record.save_to_csv(save_dir)
 
     return reconstructed
-
