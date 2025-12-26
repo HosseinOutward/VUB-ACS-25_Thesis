@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 
 from run_fl import FLConfig
-from utils import set_global_seed, get_device, recalibrate_batchnorm, StateDictManager
+from utils import set_global_seed, get_device, recalibrate_batchnorm, StateDictManager, evaluate
 from models import initialize_model
 from dataset import create_dataloader
 
@@ -14,7 +14,9 @@ def run_federated_client(
     rank: int,
     world_size: int,
     X_train: torch.Tensor,
-    y_train: torch.Tensor
+    y_train: torch.Tensor,
+    X_test: torch.Tensor,
+    y_test: torch.Tensor
 ) -> None:
     """Client performs local training and gradient compression."""
     set_global_seed(cfg.seed + 1000 * rank)
@@ -27,6 +29,9 @@ def run_federated_client(
 
     train_loader = create_dataloader(X_train, y_train, cfg, device, is_train=True,
                                client_id=client_id, num_clients=world_size - 1)
+
+    # Create test loader for evaluation
+    test_loader = create_dataloader(X_test, y_test, cfg, device, is_train=False)
 
     # Initialize state dict manager to handle parameter structure
     sd_manager = StateDictManager(model)
@@ -46,6 +51,7 @@ def run_federated_client(
         srvr_sd = sd_manager.unflatten(vec_srvr_sd)
 
         model.load_state_dict(srvr_sd, strict=False)
+
         if cfg.recalibrate_bn:
             recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)
 
@@ -70,6 +76,11 @@ def run_federated_client(
             model.train_epoch(train_loader, optimizer, device, scaler, use_amp, cfg)
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
+
+        # ---- evaluate local model post-training ----
+        train_metrics = evaluate(model, train_loader, device)
+        test_metrics = evaluate(model, test_loader, device)
+        print(f"[Client {client_id}] Post-training - Train Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['acc']:.4f}, AUC: {train_metrics['auc']:.4f} | Test Loss: {test_metrics['loss']:.4f}, Acc: {test_metrics['acc']:.4f}, AUC: {test_metrics['auc']:.4f}")
 
         # ---- send model delta to server ----
         delta = sd_manager.compute_delta(post_train_state, pre_train_state)

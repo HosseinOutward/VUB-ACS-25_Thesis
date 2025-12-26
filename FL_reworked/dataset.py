@@ -27,13 +27,26 @@ class SharedTensorDataset(Dataset):
 def precompute_svhn_to_shared(
     data_folder: str,
     split: str,
-    dtype: torch.dtype = torch.float32
+    dtype: torch.dtype = torch.float32,
+    fraction: float = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Precompute SVHN preprocessing and store in shared memory."""
     ds = SVHN(root=os.path.join(data_folder, "SVHN"), split=split, download=False, transform=None)
 
     X = torch.from_numpy(ds.data).float().div_(255.0)
     y = torch.tensor(ds.labels, dtype=torch.long)
+
+    if split == "train":
+        # shuffle dataset
+        perm = torch.randperm(len(y))
+        X = X[perm]
+        y = y[perm]
+
+        # Apply fraction if specified
+        if fraction:
+            n_samples = int(len(y) * fraction)
+            X = X[:n_samples]
+            y = y[:n_samples]
 
     mean = torch.tensor([0.4377, 0.4438, 0.4728]).view(1, 3, 1, 1)
     std = torch.tensor([0.1980, 0.2010, 0.1970]).view(1, 3, 1, 1)

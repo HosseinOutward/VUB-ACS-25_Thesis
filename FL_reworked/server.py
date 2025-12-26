@@ -49,7 +49,7 @@ def run_federated_server(
 
         ending_round = (rnd_i == cfg.rounds)
         temp = f'Start of Round {rnd_i:03d}' if not ending_round else 'Final'
-        print(f"[Server] {temp} - Loss: {metrics['loss']:.4f}, Acc: {metrics['acc']:.4f}")
+        print(f"[Server] {temp} - Loss: {metrics['loss']:.4f}, Acc: {metrics['acc']:.4f}, AUC: {metrics['auc']:.4f}")
 
         if ending_round:
             print("[Server] Training complete.")
@@ -84,8 +84,9 @@ def run_federated_server(
             dist.recv(rcvd_grads_vec, src=client_rank+1)
 
             # Simulate compression with eval metrics
-            reconstructed_vec = rcvd_grads_vec #simulate_compression(
-            #     codec, rcvd_grads_vec, rcvd_client_id, rnd_i, eval_metrics=metrics)
+            reconstructed_vec = rcvd_grads_vec  # simulate_compression(
+            #     codec, rcvd_grads_vec, rcvd_client_id, rnd_i,
+            #     eval_metrics=metrics, save_dir=cfg.records_dir)
 
             # Unflatten back to dict for aggregation
             grads_dict = sd_manager.unflatten(reconstructed_vec)
@@ -99,15 +100,17 @@ def run_federated_server(
 def _aggregate_and_update(model, grads_list, sample_counts, sd_manager: StateDictManager) -> None:
     """FedAvg aggregation weighted by sample counts."""
     total_samples = sum(sample_counts)
+    weights = [n / total_samples for n in sample_counts]
 
     # Weighted average of gradients
-    aggregated_delta = {}
+    aggregated_delta = grads_list[0]  # Start with first gradient
     for key in sd_manager.keys:
-        weighted_sum = torch.zeros_like(grads_list[0][key])
-        for grad_dict, n_samples in zip(grads_list, sample_counts):
-            weight = n_samples / total_samples
-            weighted_sum += grad_dict[key] * weight
-        aggregated_delta[key] = weighted_sum
+        # Scale first gradient in-place
+        aggregated_delta[key].mul_(weights[0])
+
+        # Add remaining gradients
+        for grad_dict, weight in zip(grads_list[1:], weights[1:]):
+            aggregated_delta[key].add_(grad_dict[key], alpha=weight)
 
     # Apply aggregated delta to model
     sd_manager.apply_delta_inplace(model.state_dict(), aggregated_delta)
