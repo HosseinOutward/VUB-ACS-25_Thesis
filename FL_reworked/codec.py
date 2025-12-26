@@ -9,6 +9,7 @@ import torch
 import numpy as np
 
 
+
 def get_obj_size(obj):
     """Get size of object in bytes."""
     if isinstance(obj, torch.Tensor):
@@ -97,20 +98,25 @@ class CompressionRecord:
 
 # --- Compression Codecs --- #
 class IdentityCodec:
-    """No compression - just pass through. Base codec to build upon."""
-
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         return CompressionRecord(round_id, client_id, method="identity")
 
-    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
-        """No compression, just return the vector."""
-        record.compressed_bytes = get_obj_size(delta_vec)
-        record.raw_bytes = record.compressed_bytes
-        record.compression_ratio = 1.0
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+        record.raw_bytes = get_obj_size(delta_vec)
+        payload = self._compress(delta_vec, record)
+        record.compressed_bytes = get_obj_size(payload)
+        record.compression_ratio = record.compressed_bytes / record.raw_bytes if record.raw_bytes > 0 else 0.0
+        return payload
+
+    def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
+        return self._decompress(payload, record)
+
+    # Methods to be overridden by subclasses
+    def (self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         return delta_vec
-    
-    def decode(self, payload: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
-        """No decompression needed."""
+
+    # Methods to be overridden by subclasses
+    def _decompress(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         return payload
 
 
@@ -120,29 +126,15 @@ class BasicCompressionCodec(IdentityCodec):
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         return CompressionRecord(round_id, client_id, method="basic")
 
-    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
-        """Compress using float16 and gzip."""
-        # Record raw size
-        record.raw_bytes = get_obj_size(delta_vec)
-
-        # Convert to float16
+    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
         delta_fp16 = delta_vec.to(torch.float16)
-        
-        # Compress
         compressed = compress_data_list(delta_fp16)
         
-        # Record compressed size and ratio
-        record.compressed_bytes = get_obj_size(compressed)
-        record.compression_ratio = record.compressed_bytes / record.raw_bytes if record.raw_bytes > 0 else 0.0
-
         return compressed
     
-    def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
-        """Decompress and convert back to float32."""
+    def _decompress(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
         decompressed = decompress_data_list(payload)
-        
-        if isinstance(decompressed, np.ndarray):
-            decompressed = torch.from_numpy(decompressed)
+        decompressed = torch.from_numpy(decompressed)
         
         return decompressed.to(torch.float32)
 
@@ -153,6 +145,9 @@ def create_codec(codec_name: str, **kwargs) -> IdentityCodec:
         return IdentityCodec()
     elif codec_name == "basic":
         return BasicCompressionCodec()
+    elif codec_name == "cancer":
+        from FL_reworked.cancer_protocol import CancerCodec
+        return CancerCodec(**kwargs)
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
@@ -167,9 +162,6 @@ def simulate_compression(
 ) -> torch.Tensor:
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
-    
-    # Set global eval metrics (always required)
-    record.global_eval_metrics = eval_metrics
 
     # Encode (client-side simulation)
     payload = codec.encode(delta_vec, record)
