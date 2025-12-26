@@ -63,19 +63,6 @@ def create_dataloader(
     X: torch.Tensor, y: torch.Tensor, cfg, device: torch.device,
     is_train: bool, client_id: Optional[int] = None, num_clients: Optional[int] = None
 ) -> DataLoader:
-    """
-    Create dataloader for training or testing.
-
-    Args:
-        X: Input data tensor
-        y: Label tensor
-        cfg: Configuration object
-        device: Device for pin_memory optimization
-        is_train: True for training (with IID partition), False for testing
-        client_id: Client ID for IID partition (only needed if is_train=True)
-        num_clients: Total number of clients (only needed if is_train=True)
-    """
-
     assert (client_id is None and is_train is False) or (client_id is not None and is_train is True)
 
     dataset = SharedTensorDataset(X, y)
@@ -90,17 +77,18 @@ def create_dataloader(
         return DataLoader(
             dataset,
             batch_size=cfg.batch_size,
-            shuffle=True,
-            pin_memory=device.type == "cuda",
+            pin_memory=(device.type == "cuda"),
             num_workers=cfg.num_loader_workers,
-            persistent_workers=cfg.num_loader_workers > 0
+            prefetch_factor=2 if cfg.num_loader_workers > 0 else None,
+            persistent_workers=cfg.num_loader_workers > 0,
+            shuffle=True,
         )
     else:
         # Testing: use full dataset, no shuffle, larger batch
         return DataLoader(
             dataset,
-            batch_size=512,
+            batch_size=cfg.batch_size*4,
             shuffle=False,
-            pin_memory=device.type == "cuda",
+            pin_memory=(device.type == "cuda"),
             num_workers=0
         )

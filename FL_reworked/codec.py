@@ -8,6 +8,7 @@ import gzip
 import torch
 import numpy as np
 
+from FL_reworked.run_fl import FLConfig
 
 
 def get_obj_size(obj):
@@ -52,8 +53,8 @@ class CompressionRecord:
     """Record for compression metrics. Stores all attributes for CSV export."""
 
     def __init__(self, round_id: int, client_id: int, method: str = "identity"):
-        self.round_id = round_id
-        self.client_id = client_id
+        self.round_id: int = round_id
+        self.client_id: int = client_id
         self.method = method
         self.compressed_bytes: int = 0
         self.raw_bytes: int = 0
@@ -102,6 +103,7 @@ class IdentityCodec:
         return CompressionRecord(round_id, client_id, method="identity")
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
         record.raw_bytes = get_obj_size(delta_vec)
         payload = self._compress(delta_vec, record)
         record.compressed_bytes = get_obj_size(payload)
@@ -109,10 +111,12 @@ class IdentityCodec:
         return payload
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        return self._decompress(payload, record)
+        res = self._decompress(payload, record)
+        assert res.dtype == torch.float32 and res.device == torch.device('cpu')
+        return res
 
     # Methods to be overridden by subclasses
-    def (self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         return delta_vec
 
     # Methods to be overridden by subclasses
@@ -139,15 +143,16 @@ class BasicCompressionCodec(IdentityCodec):
         return decompressed.to(torch.float32)
 
 
-def create_codec(codec_name: str, **kwargs) -> IdentityCodec:
+def create_codec(fl_cfg:FLConfig) -> IdentityCodec:
     """Create codec instance."""
+    codec_name = fl_cfg.codec.lower()
     if codec_name == "identity":
         return IdentityCodec()
     elif codec_name == "basic":
         return BasicCompressionCodec()
     elif codec_name == "cancer":
         from FL_reworked.cancer_protocol import CancerCodec
-        return CancerCodec(**kwargs)
+        return CancerCodec(fl_cfg)
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
