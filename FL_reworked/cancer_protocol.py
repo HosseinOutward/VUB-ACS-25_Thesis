@@ -60,16 +60,15 @@ class CancerConfig:
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 16, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: Tuple[str] = (('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 5
     max_side_info_count: int = 5
-    pretrain_pth_dir: str = '..data/'
+    pretrain_pth_dir: str = r'../data/pre_trained_pth/'
 
-    # WZ model params
     train_epochs: int = 10
-    reconst_ld: float = 100.0
-    train_sample_size: int = 100_000
+    reconst_ld: float = 400.0
+    train_sample_size: int = 300_000
     lr: float = 1e-3
     lr_step: int = 40
     tau_rate: float = 10.0
-    tau: float = 1.5
+    tau: float = 1.3
 
 
 class CancerRecord(CompressionRecord):
@@ -160,6 +159,7 @@ class CancerCodec(IdentityCodec):
     def _decompress(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
         client_idx = record.client_id
         bins = decompress_data_list(payload)
+        bins = torch.from_numpy(bins)
         reconst = self.frozen_quantizers[client_idx].decoding_process(bins)
 
         # Update server-side history (always)
@@ -178,13 +178,61 @@ class CancerCodec(IdentityCodec):
 
 
 if __name__ == "__main__":
-    num_clients = 5
-    codec = CancerCodec(FLConfig(num_clients=num_clients))
-    delta = torch.randn(1000)
+    import numpy as np
+    import gzip
 
-    for round_id in range(50):
+    num_clients = 5
+    num_rounds = 15
+    vector_size = 1_000_000
+
+    codec = CancerCodec(FLConfig(num_clients=num_clients))
+    base_vector = torch.normal(0.0, 1.0, size=(vector_size,))
+
+    print(f"Clients={num_clients}, Rounds={num_rounds}, Vector size={vector_size:,}\n")
+
+    mape_list, comp_vs_baseline_list = [], []
+
+    for round_id in range(num_rounds):
+        base_vector = base_vector + torch.normal(0.0, 0.1, size=(vector_size,))
+        client_deltas = [base_vector + torch.normal(0.0, 0.1, size=(vector_size,)) for _ in range(num_clients)]
+
+        if round_id == 0:
+            initial_mape = np.mean([
+                torch.mean(torch.abs(base_vector - delta) / (torch.abs(base_vector) + 1e-8)).item() * 100
+                for delta in client_deltas
+            ])
+            print(f"Initial MAPE (base vs clients): {initial_mape:.2f}%\n")
+
+        round_mape, round_comp_ratio = [], []
+
         for client_id in range(num_clients):
+            print(f"C{client_id} -- ", end='', flush=True)
+            delta = client_deltas[client_id]
             record = codec.create_record(round_id, client_id)
+
+            # Cancer compression
             compressed = codec.encode(delta, record)
             decompressed = codec.decode(compressed, record)
-            print(f"Round {round_id}, Client {client_id}")
+
+            # Baseline: float16 + gzip
+            baseline_compressed = gzip.compress(delta.to(torch.float16).numpy().tobytes())
+
+            # Metrics
+            mape = torch.mean(torch.abs(delta - decompressed) / (torch.abs(delta) + 1e-8)).item() * 100
+            comp_ratio = len(baseline_compressed) / len(compressed)
+
+            round_mape.append(mape)
+            round_comp_ratio.append(comp_ratio)
+
+        avg_mape = np.mean(round_mape)
+        avg_comp = np.mean(round_comp_ratio)
+        mape_list.append(avg_mape)
+        comp_vs_baseline_list.append(avg_comp)
+
+        print(f"\nR{round_id:2d} [{record.phase[0]}|{record.round_type}|"
+              f"{record.bits_per_plane}bpp|{record.num_planes}p] -- "
+              f"MAPE={avg_mape:5.2f}%, compr_ratio(vs FP16+zip): {avg_comp:.2f}x")
+
+    print(f"\n{'='*60}")
+    print(f"Overall: MAPE={np.mean(mape_list):.2f}% | Comp vs baseline={np.mean(comp_vs_baseline_list):.2f}x")
+    print(f"{'='*60}")
