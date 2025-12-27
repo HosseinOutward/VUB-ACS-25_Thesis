@@ -13,19 +13,20 @@ if TYPE_CHECKING:
 class WZQuantizerCancer:
     def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int, bins_per_plane: int,
                  train_x_vec: torch.Tensor, side_info_list: List[torch.Tensor], pretrained: bool = False):
+        self.si_vec_size = None
         self.c_cfg = c_cfg
         self.fl_cfg = fl_cfg
         self.coding_model = EncoderDecoderLayeredRNN(
             num_planes=num_planes, bins_per_plane=bins_per_plane,
-            side_info_size=len(side_info_list), input_dim=1,
+            side_info_size=max(1, len(side_info_list)), input_dim=1,
             layers=3, hidden_dim=100, marginal=pretrained)
 
         self.side_info_list_used = None
 
         if pretrained:
-            return # <--------------------------
             weight_path = c_cfg.pretrain_pth_dir + f'bpp{bins_per_plane}_np{num_planes}_pretrained_wzq_rnn.pth'
-            self.coding_model.load_state_dict(torch.load(weight_path))
+            self.coding_model.load_state_dict(torch.load(weight_path), strict=False)
+            self.side_info_list_used = []
             assert train_x_vec is None and side_info_list == [], "Pretrained model should not have training data."
             return
 
@@ -90,9 +91,21 @@ class WZQuantizerCancer:
 
         return loss
 
+    def get_x_dataset(self, x_vec, ):
+        x_vec = x_vec.cuda(non_blocking=True).unsqueeze(1).to(torch.float32).contiguous()
+        if self.si_vec_size is None:
+            self.si_vec_size = x_vec.shape[0]
+        return x_vec
+
+    def get_si_dataset(self, ):
+        if self.side_info_list_used == []:
+            self.side_info_list_used = [torch.zeros(self.si_vec_size)]
+        side_info_list = torch.stack(self.side_info_list_used).cuda(non_blocking=True).T.to(torch.float32).contiguous()
+        return side_info_list
+
     def train_model(self, x_vec, side_info_list, batch_size=50_000):
-        return # <--------------------------
         self.side_info_list_used = side_info_list
+        assert len(side_info_list) != 0, "Side information is required for training."
 
         # Enable TF32 for faster matmul on Ampere+ GPUs
         if self.fl_cfg.tf32:
@@ -106,17 +119,9 @@ class WZQuantizerCancer:
         scheduler = torch.optim.lr_scheduler.StepLR(
             optimizer, step_size=int(self.c_cfg.train_epochs*np.ceil(self.c_cfg.lr_step/180)), gamma=0.3)
 
-        # Move data to GPU with contiguous memory layout
-        x_vec = x_vec.cuda(non_blocking=True).unsqueeze(1).to(torch.float32).contiguous()
-
-        if len(side_info_list) == 0:
-            side_info_list = [torch.zeros(len(x_vec), device='cuda')]
-        side_info_list = torch.stack(side_info_list).cuda(non_blocking=True).T.to(torch.float32).contiguous()
-
+        x_vec = self.get_x_dataset(x_vec)
+        side_info_list = self.get_si_dataset()
         train_dataset = torch.utils.data.TensorDataset(x_vec, side_info_list)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=0, pin_memory=False, drop_last=True)  # drop_last for consistent batch sizes
 
         self.coding_model.cuda()
 
@@ -130,15 +135,20 @@ class WZQuantizerCancer:
 
         # Mixed precision training with GradScaler
         use_amp = self.fl_cfg.mixed_precision and torch.cuda.is_available()
-        scaler = torch.cuda.amp.GradScaler() if use_amp else None
+        scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
         for epoch in range(self.c_cfg.train_epochs):
-            for x_batch, si_batch in train_loader:
-                optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
+            indices = torch.randint(0, len(train_dataset), (self.c_cfg.train_sample_size,), dtype=torch.long)
+            subset_dataset = torch.utils.data.Subset(train_dataset, indices)
+            for start_i in range(0, len(subset_dataset), batch_size):
+                end_i = min(start_i + batch_size, len(subset_dataset))
+                x_batch, si_batch = subset_dataset[start_i:end_i]
+
+                optimizer.zero_grad()
 
                 if use_amp:
                     # Automatic mixed precision
-                    with torch.cuda.amp.autocast():
+                    with torch.amp.autocast('cuda'):
                         loss = self.compute_loss(x_batch, si_batch, epoch)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
@@ -148,54 +158,80 @@ class WZQuantizerCancer:
                     loss.backward()
                     optimizer.step()
 
+            # Step scheduler after all batches in epoch (after optimizer.step() calls)
             scheduler.step()
 
         # Move back to CPU and cleanup
         self.coding_model.cpu()
         torch.cuda.empty_cache()
 
-    def encoding_process(self, grad_vector:torch.Tensor, batch_size=500_000):
-        return torch.round(grad_vector*1000).to(torch.int16)
+    def _batch_loop(self, func, batch_size):
+        self.coding_model.to('cuda', non_blocking=True)
+        self.coding_model.eval()
 
-    def decoding_process(self, quantized_data:np.ndarray, batch_size=500_000):
-        return torch.from_numpy(quantized_data).float()/1000.0
+        with torch.inference_mode():
+            # Pre-allocate list with estimated capacity
+            num_batches = (self.si_vec_size + batch_size - 1) // batch_size
+            all_res = [None] * num_batches
 
-    # ----------------------------------------------------------------------
-    # def _batch_loop(self, func, batch_size, total_size):
-    #     self.coding_model.to('cuda', non_blocking=True)
-    #     self.coding_model.eval()
-    #
-    #     with torch.inference_mode():
-    #         # Pre-allocate list with estimated capacity
-    #         num_batches = (total_size + batch_size - 1) // batch_size
-    #         all_res = [None] * num_batches
-    #
-    #         batch_idx = 0
-    #         for start_i in range(0, total_size, batch_size):
-    #             end_idx = min(start_i + batch_size, total_size)
-    #             res = func(start_i, end_idx)
-    #             all_res[batch_idx] = res
-    #             batch_idx += 1
-    #
-    #     self.coding_model.to('cpu')
-    #     torch.cuda.empty_cache()
-    #     return all_res
-    #
-    # def _encode_net(self, grad_vector):
-    #     bins_list, _ = self.coding_model.encode(grad_vector)
-    #     bins_list = torch.stack(bins_list)
-    #
-    #     assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane**self.coding_model.num_planes
-    #
-    #     return bins_list
-    #
-    # def _decode_net(self, bins, side_info):
-    #     b_p_p = self.coding_model.bins_per_plane
-    #     assert bins.float().max() < b_p_p
-    #     codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins]
-    #     reconstruct = self.coding_model.decode(codes, side_info)
-    #     return reconstruct[-1]
-    #
+            batch_idx = 0
+            for start_i in range(0, self.si_vec_size, batch_size):
+                end_idx = min(start_i + batch_size, self.si_vec_size)
+                res = func(start_i, end_idx)
+                all_res[batch_idx] = res
+                batch_idx += 1
+        concat_res = torch.cat(all_res, dim=1) if all_res[0].shape[1] > 1 else torch.cat(all_res, dim=0)
+        self.coding_model.to('cpu')
+        torch.cuda.empty_cache()
+        return concat_res
+
+    def encoding_process(self, grad_vector, batch_size=500_000):
+        # return torch.round(grad_vector*1000).to(torch.int16)
+
+        grad_vector = self.get_x_dataset(grad_vector)
+
+        assert grad_vector.shape[0] == self.si_vec_size
+
+        def func(start_i, end_idx):
+            x_batch = grad_vector[start_i:end_idx]
+            bins_list, _ = self.coding_model.encode(x_batch)
+            bins_list = torch.stack(bins_list)
+            assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane ** self.coding_model.num_planes
+            return bins_list.to('cpu', non_blocking=True)
+        bins = self._batch_loop(func, batch_size)
+
+        dtype = torch.uint8 if self.bins_per_plane < 2**8 else torch.uint16
+
+        assert self.num_planes == bins.shape[0]
+        assert bins.shape[1] == self.si_vec_size
+
+        return bins.to(dtype)
+
+    def decoding_process(self, bins, batch_size=500_000):
+        # return torch.from_numpy(quantized_data).float()/1000.0
+
+        assert self.num_planes == bins.shape[0]
+        assert bins.shape[1] == self.si_vec_size
+        b_p_p = self.coding_model.bins_per_plane
+        assert bins.float().max() < b_p_p
+
+        side_info = self.get_si_dataset()
+        def func(start_i, end_idx):
+            bins_batch = bins[:, start_i:end_idx].to('cuda', non_blocking=True)
+            side_info_batch = side_info[start_i:end_idx].to('cuda', non_blocking=True)
+
+            codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins_batch]
+            reconstructs_batch = self.coding_model.decode(codes, side_info_batch)[-1]
+
+            return reconstructs_batch.to('cpu', non_blocking=True)
+        all_reconstructs = self._batch_loop(func, batch_size)
+
+        res = all_reconstructs.squeeze()
+
+        assert res.shape[0] == self.si_vec_size
+
+        return res
+
     # def get_prior_and_softcodes_net(self, grad_vector, side_info=None):
     #     assert not self.coding_model.training
     #     assert self.coding_model.marginal == (side_info is None or len(side_info)==0)
@@ -258,53 +294,32 @@ class WZQuantizerCancer:
     #         prior[i] /= prior[i].sum(dim=-1, keepdim=True)
     #
     #     return prior, soft_codes
-    #
-    # def encoding_process(self, grad_vector, batch_size=500_000):
-    #     # from components.broadcast_components.WZ_models.simple import simple_quantize
-    #     # return simple_quantize(grad_vector)
-    #
-    #     grad_tensor = torch.tensor(grad_vector, dtype=torch.float32)
-    #     total_size = len(grad_tensor)
-    #
-    #     def func(start_i, end_idx):
-    #         grad_batch = grad_tensor[start_i:end_idx].unsqueeze(1).to('cuda', non_blocking=True)
-    #         bins_batch = self.encode_net(grad_batch)
-    #         return bins_batch.to('cpu', non_blocking=True)
-    #     all_bins = self._batch_loop(func, batch_size, total_size)
-    #
-    #     bins = torch.cat(all_bins, dim=1) if len(all_bins[0].shape) > 1 else torch.cat(all_bins, dim=0)
-    #
-    #     dtype = torch.uint8 if self.bins_per_plane < 2**8 else torch.uint16
-    #     return bins.to(dtype), None
-    #
-    # def decoding_process(self, quantized_data, side_info_data_list, encoding_extra_data=None, batch_size=500_000):
-    #     # from components.broadcast_components.WZ_models.simple import simple_dequantize
-    #     # return simple_dequantize(quantized_data, np.float32)
-    #
-    #     bins_tensor = torch.from_numpy(np.asarray(quantized_data))
-    #     total_size = len(bins_tensor[0])
-    #
-    #     assert len(side_info_data_list) == self.count_side_info_data
-    #     if self.count_side_info_data == 0:
-    #         side_info_data_list = [np.zeros(len(quantized_data[0]))]
-    #
-    #     assert total_size == len(side_info_data_list[0])
-    #
-    #     side_info_array = torch.from_numpy(np.array(side_info_data_list)).to(torch.float32).T
-    #
-    #     def func(start_i, end_idx):
-    #         if len(bins_tensor.shape) != 2:
-    #             bins_batch = bins_tensor[start_i:end_idx].to('cuda', non_blocking=True)
-    #         else:
-    #             bins_batch = bins_tensor[:, start_i:end_idx].to('cuda', non_blocking=True)
-    #
-    #         side_info_batch = side_info_array[start_i:end_idx].to('cuda', non_blocking=True)
-    #
-    #         reconstructs_batch = self.coding_model.decode_net(bins_batch, side_info_batch)
-    #         return reconstructs_batch.to('cpu', non_blocking=True)
-    #
-    #     all_reconstructs = self._batch_loop(func, batch_size, total_size)
-    #
-    #     all_reconstructs = torch.cat(all_reconstructs, dim=0)
-    #     res = all_reconstructs.squeeze_().numpy()  # In-place squeeze
-    #     return res
+
+
+if __name__ == "__main__":
+    from FL_reworked.cancer_protocol import CancerConfig
+
+    # Create synthetic data: base signal + noise
+    base_signal = torch.from_numpy(np.random.normal(0, 1, 10_000_000).astype(np.float32))
+    y = base_signal + torch.from_numpy(np.random.normal(0, 0.1, 10_000_000).astype(np.float32))
+    side_info = [base_signal.clone()]
+
+    # Test with side info (from run_sim.py: num_planes=2, bins_per_plane=16)
+    print("Training quantizer (num_planes=2, bins_per_plane=16)...")
+    quantizer = WZQuantizerCancer(c_cfg=CancerConfig(),
+        fl_cfg=FLConfig(num_clients=1), num_planes=3, bins_per_plane=16,
+        train_x_vec=y, side_info_list=side_info, pretrained=False
+    )
+
+    # Encode and decode
+    bins = quantizer.encoding_process(y)
+    recons = quantizer.decoding_process(bins)
+
+    # Calculate metrics
+    mse = torch.mean((y - recons) ** 2).item()
+    mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
+
+    print(f"MSE: {mse:.6f}")
+    print(f"MAPE: {mape:.2f}%")
+    print(f"Bins shape: {bins.shape}")
+    print(f"Unique bins used per plane: {[torch.unique(bins[i]).numel() for i in range(bins.shape[0])]}")

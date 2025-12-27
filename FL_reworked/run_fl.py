@@ -10,14 +10,14 @@ class FLConfig:
     """Federated learning configuration."""
     codec: str = "cancer"
 
-    num_clients: int = 3
+    num_clients: int = 2#5
     num_loader_workers: int = 2
     num_classes: int = 10
     data_folder: str = "../data"
     dataset_name: str = "SVHN"
-    rounds: int = 20
+    rounds: int = 20#80
     local_epochs: int = 20
-    batch_size: int = 500
+    batch_size: int = 500#5000
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 43

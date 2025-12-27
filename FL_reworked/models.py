@@ -34,7 +34,7 @@ class FLModelTemplate(nn.Module, ABC):
         self.train()
 
         for batch in dataloader:
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 loss = self.training_step(batch, device, cfg)
