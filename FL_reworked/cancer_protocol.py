@@ -44,9 +44,10 @@ import gc
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import torch
+import numpy as np
 
 from FL_reworked.cancer_quantizer import WZQuantizerCancer
-from FL_reworked.codec import IdentityCodec, CompressionRecord, compress_data_list, decompress_data_list
+from FL_reworked.codec import IdentityCodec, CompressionRecord
 from FL_reworked.run_fl import FLConfig
 
 
@@ -62,7 +63,7 @@ class CancerConfig:
     max_side_info_count: int = 5
     pretrain_pth_dir: str = r'../data/pre_trained_pth/'
 
-    train_epochs: int = 10
+    train_epochs: int = 60
     reconst_ld: float = 400.0
     train_sample_size: int = 300_000
     lr: float = 1e-3
@@ -110,6 +111,9 @@ class CancerCodec(IdentityCodec):
         # Frozen state for frozen phase
         self.frozen_quantizers: List[Optional[WZQuantizerCancer]] = [None] * self.num_clients
 
+    def get_new_quantizer(self, **kargs) -> WZQuantizerCancer:
+        return WZQuantizerCancer(**kargs)
+
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
         is_warmup = round_id < len(cfg.warmup_phase)
@@ -121,7 +125,7 @@ class CancerCodec(IdentityCodec):
             round_id=round_id, client_id=client_id, method="cancer",
             phase=phase, round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
 
-    def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
+    def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> torch.Tensor:
         round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
         client_idx = record.client_id
 
@@ -143,7 +147,7 @@ class CancerCodec(IdentityCodec):
             else:
                 raise ValueError(f"Invalid round type for training: {round_type}")
 
-            self.frozen_quantizers[client_idx] = WZQuantizerCancer(
+            self.frozen_quantizers[client_idx] = self.get_new_quantizer(
                 c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
                 train_x_vec=target_x, side_info_list=train_si, pretrained=(round_type == 'P')
             )
@@ -152,15 +156,12 @@ class CancerCodec(IdentityCodec):
             torch.cuda.empty_cache()
 
         # Encode using current quantizer
-        bins = self.frozen_quantizers[client_idx].encoding_process(delta_vec)
-        res = compress_data_list(bins)
-        return res
+        payload_content = self.frozen_quantizers[client_idx].encoding_process(delta_vec)
+        return payload_content
 
-    def _decompress(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
+    def _decompress(self, payload_content: np.ndarray, record: CancerRecord) -> torch.Tensor:
         client_idx = record.client_id
-        bins = decompress_data_list(payload)
-        bins = torch.from_numpy(bins)
-        reconst = self.frozen_quantizers[client_idx].decoding_process(bins)
+        reconst = self.frozen_quantizers[client_idx].decoding_process(payload_content)
 
         # Update server-side history (always)
         self._update_history(self.srvr_past_reconst[client_idx], reconst)
@@ -185,7 +186,13 @@ if __name__ == "__main__":
     num_rounds = 15
     vector_size = 1_000_000
 
-    codec = CancerCodec(FLConfig(num_clients=num_clients))
+    # codec = CancerCodec(FLConfig(num_clients=num_clients))
+    print(' Using normal Cancer prot for testing...\n')
+
+    from cancer_preprocess_protocol import CancerDataPrepCodec
+    codec = CancerDataPrepCodec(FLConfig(num_clients=num_clients), vec_slices=[slice(i, None, 3) for i in range(3)],)
+    print(' NOTE ** Using CancerDataPrepCodec for testing...\n')
+
     base_vector = torch.normal(0.0, 1.0, size=(vector_size,))
 
     print(f"Clients={num_clients}, Rounds={num_rounds}, Vector size={vector_size:,}\n")
@@ -198,10 +205,10 @@ if __name__ == "__main__":
 
         if round_id == 0:
             initial_mape = np.mean([
-                torch.mean(torch.abs(base_vector - delta) / (torch.abs(base_vector) + 1e-8)).item() * 100
-                for delta in client_deltas
+                torch.mean(torch.abs(delta1 - delta2) / (torch.abs(base_vector) + 1e-8)).item() * 100
+                for i, delta1 in enumerate(client_deltas) for delta2 in client_deltas[i+1:]
             ])
-            print(f"Initial MAPE (base vs clients): {initial_mape:.2f}%\n")
+            print(f"Initial MAPE (clients vs clients): {initial_mape:.2f}%\n")
 
         round_mape, round_comp_ratio = [], []
 

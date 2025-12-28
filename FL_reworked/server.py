@@ -26,7 +26,7 @@ def run_federated_server(
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
 
-    codec = create_codec(cfg)
+    codec = create_codec(cfg, sd_manager)
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using codec: {codec.__class__.__name__}")
 

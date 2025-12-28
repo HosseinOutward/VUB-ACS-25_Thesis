@@ -31,10 +31,7 @@ def create_training_progress_bar(
     }
 
     # Check if we got a total (int) or an iterable
-    if isinstance(iterable_or_total, int):
-        return tqdm(total=iterable_or_total, **common_config)
-    else:
-        return tqdm(iterable_or_total, **common_config)
+    return tqdm(total=iterable_or_total, **common_config)
 
 
 def set_global_seed(seed: int) -> None:
@@ -104,10 +101,11 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, device: to
 
     model.train()
     for i, (x, _) in enumerate(loader):
+        x: torch.Tensor
         if i >= max_batches:
             break
         x = x.to(device, non_blocking=True)
-        if x.ndim == 4 and next(model.parameters()).is_contiguous(memory_format=torch.channels_last):
+        if x.ndim == 4:
             x = x.contiguous(memory_format=torch.channels_last)
         model(x)
 
@@ -202,6 +200,14 @@ class StateDictManager:
             offset += numel
 
         return state_dict
+
+    def get_slices(self) -> List[slice]:
+        slices = []
+        offset = 0
+        for numel in self.numels:
+            slices.append(slice(offset, offset + numel))
+            offset += numel
+        return slices
 
     def clone_trainable(self, state_dict: dict) -> OrderedDict[str, torch.Tensor]:
         return OrderedDict((k, state_dict[k].detach().clone()) for k in self.keys)

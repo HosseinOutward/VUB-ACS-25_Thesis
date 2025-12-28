@@ -67,7 +67,7 @@ def _worker(
         else:
             from client import run_federated_client
             run_federated_client(cfg, rank, world_size, X_train, y_train, X_test, y_test)
-    except Exception as e:
+    except Exception:
         print(f"\n{'='*70}", file=sys.stderr)
         print(f"[{role}] EXCEPTION OCCURRED", file=sys.stderr)
         print(f"{'='*70}", file=sys.stderr)
