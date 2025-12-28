@@ -33,6 +33,7 @@ class FLConfig:
     mixed_precision: bool = True  # AMP
     compile_mode: str | bool = False  # linux only; False for no compiling
 
+    training_progress_bar: bool = True
     records_dir: str | None = None  # Directory to save records, None to disable
     dataset_fraction: float = 0.1  # Fraction of dataset to use or None for full dataset
 
