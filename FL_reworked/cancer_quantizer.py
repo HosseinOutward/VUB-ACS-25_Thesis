@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from FL_reworked.run_fl import FLConfig
+from FL_reworked.utils import create_training_progress_bar
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
@@ -137,9 +138,22 @@ class WZQuantizerCancer:
         use_amp = self.fl_cfg.mixed_precision and torch.cuda.is_available()
         scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
+        # Calculate total iterations (all batches across all epochs)
+        indices = torch.randint(0, len(train_dataset), (self.c_cfg.train_sample_size,), dtype=torch.long)
+        subset_dataset = torch.utils.data.Subset(train_dataset, indices)
+
+        # Single progress bar for all training
+        total_iterations = self.c_cfg.train_epochs * ((len(subset_dataset) + batch_size - 1) // batch_size)
+        pbar = create_training_progress_bar(
+            total_iterations,
+            desc="Training Quantizer",
+            disable=not self.fl_cfg.training_progress_bar
+        )
+
         for epoch in range(self.c_cfg.train_epochs):
             indices = torch.randint(0, len(train_dataset), (self.c_cfg.train_sample_size,), dtype=torch.long)
             subset_dataset = torch.utils.data.Subset(train_dataset, indices)
+
             for start_i in range(0, len(subset_dataset), batch_size):
                 end_i = min(start_i + batch_size, len(subset_dataset))
                 x_batch, si_batch = subset_dataset[start_i:end_i]
@@ -147,7 +161,6 @@ class WZQuantizerCancer:
                 optimizer.zero_grad()
 
                 if use_amp:
-                    # Automatic mixed precision
                     with torch.amp.autocast('cuda'):
                         loss = self.compute_loss(x_batch, si_batch, epoch)
                     scaler.scale(loss).backward()
@@ -158,8 +171,16 @@ class WZQuantizerCancer:
                     loss.backward()
                     optimizer.step()
 
-            # Step scheduler after all batches in epoch (after optimizer.step() calls)
+                if self.fl_cfg.training_progress_bar:
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.2f}',
+                    })
+                    pbar.update(1)
+
             scheduler.step()
+
+        if self.fl_cfg.training_progress_bar:
+            pbar.close()
 
         # Move back to CPU and cleanup
         self.coding_model.cpu()

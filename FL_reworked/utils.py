@@ -1,15 +1,40 @@
 from __future__ import annotations
 import random
+import sys
 from collections import OrderedDict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from tqdm import tqdm
 
 from models import FLModelTemplate, initialize_model
 from dataset import create_dataloader
+
+
+def create_training_progress_bar(
+    iterable_or_total: Union[int, object],
+    desc: str,
+    disable: bool = False,
+    leave: bool = False,
+    position: int = 0
+):
+    common_config = {
+        'disable': disable,
+        'desc': desc,
+        'file': sys.stderr,  # PyCharm handles stderr better for dynamic updates
+        'bar_format': '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}',
+        'leave': leave,
+        'position': position
+    }
+
+    # Check if we got a total (int) or an iterable
+    if isinstance(iterable_or_total, int):
+        return tqdm(total=iterable_or_total, **common_config)
+    else:
+        return tqdm(iterable_or_total, **common_config)
 
 
 def set_global_seed(seed: int) -> None:
