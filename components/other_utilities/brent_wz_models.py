@@ -65,8 +65,8 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
         assert bins_per_plane > 1, 'need at least single bit (2 bins) per plane'
 
-        self.bins_per_plane = bins_per_plane
-        self.num_planes = num_planes
+        self.bins_per_plane:int = bins_per_plane
+        self.num_planes:int = num_planes
         self.shared_decoder = shared_decoder
         self.shared_encoder = shared_encoder
         self.shared_priors = shared_priors

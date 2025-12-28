@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict
+from typing import Any, Dict, OrderedDict
 from pathlib import Path
 import csv
 import pickle
@@ -9,10 +9,10 @@ import torch
 import numpy as np
 
 from FL_reworked.run_fl import FLConfig
+from FL_reworked.utils import StateDictManager
 
 
 def get_obj_size(obj):
-    """Get size of object in bytes."""
     if isinstance(obj, torch.Tensor):
         return obj.element_size() * obj.nelement()
     elif isinstance(obj, np.ndarray):
@@ -31,12 +31,33 @@ def get_obj_size(obj):
         raise TypeError(f"Unsupported object type: {type(obj)}")
 
 
+def make_seriable(item):
+    if isinstance(item, np.ndarray):
+        return item
+    elif isinstance(item, (np.uint8, np.uint16, np.uint32, np.uint64, np.float16)):
+        return item.item()
+    elif isinstance(item, (int, float, str, bytes)):
+        return item
+    elif isinstance(item, torch.Tensor):
+        return item.cpu().numpy()
+    elif isinstance(item, OrderedDict):
+        return OrderedDict({k: make_seriable(v) for k, v in item.items()})
+    elif isinstance(item, (list, tuple)):
+        return [make_seriable(x) for x in item]
+    elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
+        numpy_dtype = eval('np.' + str(item._dtype))
+        return np.array(item, dtype=numpy_dtype)
+    elif item is None:
+        return None
+    else:
+        raise TypeError(f"Unsupported type for serialization: {type(item)}.")
+
+
 def compress_data_list(data_list):
     """Compress data using pickle and gzip."""
-    if isinstance(data_list, torch.Tensor):
-        data_list = data_list.cpu().numpy()
-    
-    pickled_data = pickle.dumps(data_list, protocol=pickle.HIGHEST_PROTOCOL)
+    serializable_list = make_seriable(data_list)
+
+    pickled_data = pickle.dumps(serializable_list, protocol=pickle.HIGHEST_PROTOCOL)
     compressed_data = gzip.compress(pickled_data, compresslevel=6)
     return compressed_data
 
@@ -105,13 +126,17 @@ class IdentityCodec:
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
         record.raw_bytes = get_obj_size(delta_vec)
-        payload = self._compress(delta_vec, record)
+
+        payload_content = self._compress(delta_vec, record)
+        payload = compress_data_list(payload_content)
+
         record.compressed_bytes = get_obj_size(payload)
         record.compression_ratio = record.compressed_bytes / record.raw_bytes if record.raw_bytes > 0 else 0.0
         return payload
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        res = self._decompress(payload, record)
+        payload_content = decompress_data_list(payload)
+        res = self._decompress(payload_content, record)
         assert res.dtype == torch.float32 and res.device == torch.device('cpu')
         return res
 
@@ -120,8 +145,8 @@ class IdentityCodec:
         return delta_vec
 
     # Methods to be overridden by subclasses
-    def _decompress(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        return payload
+    def _decompress(self, payload_content: Any, record: CompressionRecord) -> torch.Tensor:
+        return payload_content
 
 
 class BasicCompressionCodec(IdentityCodec):
@@ -130,20 +155,16 @@ class BasicCompressionCodec(IdentityCodec):
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         return CompressionRecord(round_id, client_id, method="basic")
 
-    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
+    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         delta_fp16 = delta_vec.to(torch.float16)
-        compressed = compress_data_list(delta_fp16)
-        
-        return compressed
+        return delta_fp16
     
-    def _decompress(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
-        decompressed = decompress_data_list(payload)
-        decompressed = torch.from_numpy(decompressed)
-        
+    def _decompress(self, payload_content: bytes, record: CompressionRecord) -> torch.Tensor:
+        decompressed = decompress_data_list(payload_content)
         return decompressed.to(torch.float32)
 
 
-def create_codec(fl_cfg:FLConfig) -> IdentityCodec:
+def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     """Create codec instance."""
     codec_name = fl_cfg.codec.lower()
     if codec_name == "identity":
@@ -153,6 +174,9 @@ def create_codec(fl_cfg:FLConfig) -> IdentityCodec:
     elif codec_name == "cancer":
         from FL_reworked.cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg)
+    elif codec_name == "cancer_data_prep":
+        from FL_reworked.cancer_preprocess_protocol import CancerDataPrepCodec
+        return CancerDataPrepCodec(fl_cfg, sd_manager.get_slices())
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
