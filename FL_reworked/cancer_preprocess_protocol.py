@@ -5,7 +5,6 @@ import torch
 from FL_reworked.cancer_protocol import CancerCodec
 from FL_reworked.cancer_quantizer import WZQuantizerCancer
 from FL_reworked.run_fl import FLConfig
-from FL_reworked.utils import StateDictManager
 
 
 def get_normalization_factor(y: torch.Tensor) -> float:
@@ -123,6 +122,17 @@ class WZQuantizerCancerWithDataPrep(WZQuantizerCancer):
 
         return vector
 
+    def _get_posterior(self, x_vec: torch.Tensor, bins_vec_save_compute: Optional[Tuple] = None):
+        """Override to use preprocessed data for hashing and handle tuple return from encoding."""
+        # Extract bins from tuple if needed (this class returns (bins, extra_data))
+        bins_only = bins_vec_save_compute[0] if isinstance(bins_vec_save_compute, tuple) else bins_vec_save_compute
+
+        # Use preprocessed data for hashing to ensure consistency
+        x_vec_preprocessed, _ = self.get_x_data(x_vec)
+
+        # Call parent with preprocessed data
+        return super()._get_posterior(x_vec_preprocessed.squeeze(), bins_only)
+
 
 class CancerDataPrepCodec(CancerCodec):
     def __init__(self, fl_cfg: FLConfig, vec_slices: List[slice]) -> None:
@@ -153,6 +163,10 @@ if __name__ == "__main__":
     bins, extra = quantizer.encoding_process(y)
     recons = quantizer.decoding_process((bins.numpy(), extra))
 
+    # Calculate prior
+    print("Calculating prior probabilities...")
+    prior = quantizer._get_posterior(y, bins_vec_save_compute=(bins, extra))
+
     # Calculate metrics
     mse = torch.mean((y - recons) ** 2).item()
     mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
@@ -160,4 +174,12 @@ if __name__ == "__main__":
     print(f"MSE: {mse:.6f}")
     print(f"MAPE: {mape:.2f}%")
     print(f"Bins shape: {bins.shape}")
+    print(f"Prior shape: {prior.shape}")
     print(f"Unique bins used per plane: {[torch.unique(bins[i]).numel() for i in range(bins.shape[0])]}")
+
+    # Calculate rate using prior
+    temp = [prior[i, torch.arange(bins.shape[1]), bins[i].to(int)] for i in range(len(bins))]
+    temp = [-torch.log2(p + 1e-12).mean() for p in temp]
+    print(f"Prior rate: {sum(temp):.4f} bits/symbol")
+
+
