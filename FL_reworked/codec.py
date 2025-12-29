@@ -42,6 +42,8 @@ def make_seriable(item):
         return item.cpu().numpy()
     elif isinstance(item, OrderedDict):
         return OrderedDict({k: make_seriable(v) for k, v in item.items()})
+    elif isinstance(item, Dict):
+        return {k: make_seriable(v) for k, v in item.items()}
     elif isinstance(item, (list, tuple)):
         return [make_seriable(x) for x in item]
     elif hasattr(item, '_dtype') and hasattr(item, '__len__'):

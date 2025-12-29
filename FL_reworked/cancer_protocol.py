@@ -44,7 +44,6 @@ import gc
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import torch
-import numpy as np
 
 from FL_reworked.cancer_quantizer import WZQuantizerCancer
 from FL_reworked.codec import IdentityCodec, CompressionRecord
@@ -125,43 +124,68 @@ class CancerCodec(IdentityCodec):
             round_id=round_id, client_id=client_id, method="cancer",
             phase=phase, round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
 
-    def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> torch.Tensor:
+    def _train_quantizer(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
+        """Train new quantizer if needed (P, T, R rounds)."""
         round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
         client_idx = record.client_id
 
-        # Train new quantizer if needed (P, T, R rounds)
-        if round_type in ('P', 'T', 'R'):
-            # Determine training side info and target based on round type
-            if round_type == 'P':
-                train_si, target_x = [], None
-            elif round_type == 'T':
-                train_si = [item
-                            for cid, reconst_list in enumerate(self.srvr_past_reconst)
-                            for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
-                target_x = self.srvr_past_reconst[client_idx][-1]
-                assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,
-                                            self.c_cfg.max_side_info_count * self.num_clients - 1)
-            elif round_type == 'R':
-                train_si = [item for reconst_list in self.client_past_reconst for item in reconst_list]
-                target_x = delta_vec
-            else:
-                raise ValueError(f"Invalid round type for training: {round_type}")
+        # Determine training side info and target based on round type
+        if round_type == 'P': # Pretrained
+            train_si, target_x = [], None
 
-            self.frozen_quantizers[client_idx] = self.get_new_quantizer(
-                c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-                train_x_vec=target_x, side_info_list=train_si, pretrained=(round_type == 'P')
-            )
+        elif round_type == 'T': # Temporal
+            train_si = [item
+                        for cid, reconst_list in enumerate(self.srvr_past_reconst)
+                        for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
+            target_x = self.srvr_past_reconst[client_idx][-1]
+            assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,
+                                        self.c_cfg.max_side_info_count * self.num_clients - 1)
 
-            gc.collect()
-            torch.cuda.empty_cache()
+        elif round_type == 'R': # Retrain
+            train_si = [item for reconst_list in self.client_past_reconst for item in reconst_list]
+            target_x = delta_vec
+
+        else:
+            raise ValueError(f"Invalid round type for training: {round_type}")
+
+        self.frozen_quantizers[client_idx] = self.get_new_quantizer(
+            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
+            train_x_vec=target_x, side_info_list=train_si, pretrained=(round_type == 'P')
+        )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
+        if record.round_type != 'F':
+            self._train_quantizer(delta_vec, record)
 
         # Encode using current quantizer
-        payload_content = self.frozen_quantizers[client_idx].encoding_process(delta_vec)
-        return payload_content
+        quantizer = self.frozen_quantizers[record.client_id]
+        encoded_data = quantizer.encoding_process(delta_vec)
 
-    def _decompress(self, payload_content: np.ndarray, record: CancerRecord) -> torch.Tensor:
+        # Build payload
+        payload = self._build_payload(encoded_data, quantizer, record)
+        return payload
+
+    def _build_payload(self, encoded_data, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
+        payload = {
+            'payload_content': encoded_data,
+        }
+
+        # Include model states for tracking overhead size
+        if record.round_type in ['P', 'T']:
+            # if it's a T round, clients sending the decoder state as well
+            # for P rounds, decoder is sent to clients so they have reconstruction of non-side-info case
+            payload['decoder_state'] = quantizer.coding_model.decoder.state_dict()
+        else:
+            payload['encoder_state'] = quantizer.coding_model.encoder.state_dict()
+        return payload
+
+    def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
         client_idx = record.client_id
-        reconst = self.frozen_quantizers[client_idx].decoding_process(payload_content)
+        quantizer = self.frozen_quantizers[client_idx]
+        reconst = quantizer.decoding_process(payload['payload_content'])
 
         # Update server-side history (always)
         self._update_history(self.srvr_past_reconst[client_idx], reconst)
