@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Dict, OrderedDict
+from typing import Any, Dict, OrderedDict, Optional
 from pathlib import Path
 import csv
 import pickle
@@ -8,6 +8,7 @@ import gzip
 import torch
 import numpy as np
 
+from FL_reworked.prior_calculator import PriorCalculator
 from FL_reworked.run_fl import FLConfig
 from FL_reworked.utils import StateDictManager
 
@@ -79,10 +80,15 @@ class CompressionRecord:
         self.round_id: int = round_id
         self.client_id: int = client_id
         self.method = method
-        self.compressed_bytes: int = 0
-        self.raw_bytes: int = 0
-        self.compression_ratio: float = 0.0
+        self.compressed_bytes: Optional[int] = None
+        self.basic_raw_bytes: Optional[int] = None
+        self.compression_ratio: Optional[float] = None
         self.global_eval_metrics: Dict[str, float] = {}
+        self.entropy_real_rate: Optional[float] = None
+        self.mse: Optional[float] = None
+        self.mape: Optional[float] = None
+        self.mspe_sqrt: Optional[float] = None
+        self.model_size: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary using class attributes."""
@@ -91,8 +97,13 @@ class CompressionRecord:
             'client_id': self.client_id,
             'method': self.method,
             'compressed_bytes': self.compressed_bytes,
-            'raw_bytes': self.raw_bytes,
+            'basic_raw_bytes': self.basic_raw_bytes,
             'compression_ratio': self.compression_ratio,
+            'entropy_real_rate': self.entropy_real_rate,
+            'mse': self.mse,
+            'mape': self.mape,
+            'mspe_sqrt': self.mspe_sqrt,
+            'model_size': self.model_size,
         }
         # Add global eval metrics with prefix
         for key, value in self.global_eval_metrics.items():
@@ -127,19 +138,31 @@ class IdentityCodec:
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
-        record.raw_bytes = get_obj_size(delta_vec)
+        record.basic_raw_bytes = get_obj_size(compress_data_list(delta_vec)) / (1024 ** 2)
 
         payload_content = self._compress(delta_vec, record)
         payload = compress_data_list(payload_content)
 
-        record.compressed_bytes = get_obj_size(payload)
-        record.compression_ratio = record.compressed_bytes / record.raw_bytes if record.raw_bytes > 0 else 0.0
+        record.compressed_bytes = get_obj_size(payload) / (1024**2)
+        record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
+        record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
+
+        record.mse = delta_vec # temporary placeholder for post decompression mse calculation
+
         return payload
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         payload_content = decompress_data_list(payload)
         res = self._decompress(payload_content, record)
         assert res.dtype == torch.float32 and res.device == torch.device('cpu')
+
+        delta_vec = record.mse
+        record.mse = torch.mean((res - delta_vec) ** 2).item()
+        record.mape = torch.mean(torch.abs(res - delta_vec) / (torch.abs(delta_vec) + 1e-8)).item() * 100
+        record.mspe_sqrt = torch.sqrt(torch.mean(
+            (res - delta_vec) ** 2 / (delta_vec ** 2 + 1e-8)
+        )).item() * 100
+
         return res
 
     # Methods to be overridden by subclasses
@@ -189,10 +212,12 @@ def simulate_compression(
     client_id: int,
     round_id: int,
     eval_metrics: Dict[str, float],
-    save_dir: str | None = "compression_logs"
+    save_dir: str | None = "compression_logs",
+    model_size: int|None = None,
 ) -> torch.Tensor:
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
+    record.model_size = model_size
 
     # Encode (client-side simulation)
     payload = codec.encode(delta_vec, record)

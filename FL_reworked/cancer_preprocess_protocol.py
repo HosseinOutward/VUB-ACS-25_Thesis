@@ -170,9 +170,11 @@ if __name__ == "__main__":
     # Calculate metrics
     mse = torch.mean((y - recons) ** 2).item()
     mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
+    mspe_sqrt = torch.sqrt(torch.mean((y - recons) ** 2 / (y ** 2 + 1e-8))).item() * 100
 
     print(f"MSE: {mse:.6f}")
     print(f"MAPE: {mape:.2f}%")
+    print(f"MSPE_sqrt: {mspe_sqrt:.2f}%")
     print(f"Bins shape: {bins.shape}")
     print(f"Prior shape: {prior.shape}")
     print(f"Unique bins used per plane: {[torch.unique(bins[i]).numel() for i in range(bins.shape[0])]}")
