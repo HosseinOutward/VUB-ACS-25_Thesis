@@ -46,7 +46,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from FL_reworked.cancer_quantizer import WZQuantizerCancer
-from FL_reworked.codec import IdentityCodec, CompressionRecord
+from FL_reworked.codec import IdentityCodec, CompressionRecord, get_obj_size
+from FL_reworked.prior_calculator import PriorCalculator
 from FL_reworked.run_fl import FLConfig
 
 
@@ -81,6 +82,9 @@ class CancerRecord(CompressionRecord):
         self.round_type: Optional[str] = round_type
         self.bits_per_plane: Optional[int] = bits_per_plane
         self.num_planes: Optional[int] = num_planes
+        self.prior_rate: Optional[float] = None
+        self.marginal_rate: Optional[float] = None
+        self.encoder_decoder_size: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
@@ -89,6 +93,9 @@ class CancerRecord(CompressionRecord):
             "round_type": self.round_type,
             "bits_per_plane": self.bits_per_plane,
             "num_planes": self.num_planes,
+            "prior_rate": self.prior_rate,
+            "marginal_rate": self.marginal_rate,
+            "encoder_decoder_size": self.encoder_decoder_size,
         })
         return result
 
@@ -166,7 +173,23 @@ class CancerCodec(IdentityCodec):
 
         # Build payload
         payload = self._build_payload(encoded_data, quantizer, record)
+
+        bins_vec = payload['payload_content'] \
+            if not isinstance(payload['payload_content'], tuple) else payload['payload_content'][0]
+
+        # add prior info to record for analysis
+        prior = quantizer._get_posterior(delta_vec, encoded_data)
+        prior = [prior[i, torch.arange(prior.shape[1]), bins_vec[i].to(int)] for i in range(prior.shape[0])]
+        record.prior_rate = sum([torch.mean(-torch.log2(prior[i] + 1e-10)).item() for i in range(len(prior))])
+
+        # compatibility with preprocess quantizer
+        m_prior = PriorCalculator.compute_marginal_prior(
+            bins_vec, quantizer.bins_per_plane, quantizer.num_planes)
+        m_prior = [m_prior[i, torch.arange(m_prior.shape[1]), bins_vec[i].to(int)] for i in range(m_prior.shape[0])]
+        record.marginal_rate = sum([torch.mean(-torch.log2(m_prior[i] + 1e-10)).item() for i in range(len(m_prior))])
+
         return payload
+
 
     def _build_payload(self, encoded_data, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
         payload = {
@@ -178,8 +201,10 @@ class CancerCodec(IdentityCodec):
             # if it's a T round, clients sending the decoder state as well
             # for P rounds, decoder is sent to clients so they have reconstruction of non-side-info case
             payload['decoder_state'] = quantizer.coding_model.decoder.state_dict()
+            record.encoder_decoder_size = get_obj_size(payload['decoder_state'])/(1024**2)
         else:
             payload['encoder_state'] = quantizer.coding_model.encoder.state_dict()
+            record.encoder_decoder_size = get_obj_size(payload['encoder_state'])/(1024**2)
         return payload
 
     def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
@@ -204,7 +229,6 @@ class CancerCodec(IdentityCodec):
 
 if __name__ == "__main__":
     import numpy as np
-    import gzip
 
     num_clients = 5
     num_rounds = 15
@@ -221,7 +245,8 @@ if __name__ == "__main__":
 
     print(f"Clients={num_clients}, Rounds={num_rounds}, Vector size={vector_size:,}\n")
 
-    mape_list, comp_vs_baseline_list = [], []
+    mape_list, mspe_sqrt_list, comp_ratio_list = [], [], []
+    prior_rate_list, marginal_rate_list, entropy_real_rate_list = [], [], []
 
     for round_id in range(num_rounds):
         base_vector = base_vector + torch.normal(0.0, 0.1, size=(vector_size,))
@@ -232,38 +257,56 @@ if __name__ == "__main__":
                 torch.mean(torch.abs(delta1 - delta2) / (torch.abs(base_vector) + 1e-8)).item() * 100
                 for i, delta1 in enumerate(client_deltas) for delta2 in client_deltas[i+1:]
             ])
-            print(f"Initial MAPE (clients vs clients): {initial_mape:.2f}%\n")
+            initial_mspe_sqrt = np.mean([
+                torch.sqrt(torch.mean(
+                    (delta1 - delta2) ** 2 / (base_vector ** 2 + 1e-8)
+                )).item() * 100
+                for i, delta1 in enumerate(client_deltas) for delta2 in client_deltas[i+1:]
+            ])
+            print(f"Initial MAPE (clients vs clients): {initial_mape:.2f}%")
+            print(f"Initial MSPE_sqrt (clients vs clients): {initial_mspe_sqrt:.2f}%\n")
 
-        round_mape, round_comp_ratio = [], []
+        round_records = []
 
         for client_id in range(num_clients):
             print(f"C{client_id} -- ", end='', flush=True)
             delta = client_deltas[client_id]
             record = codec.create_record(round_id, client_id)
+            record.model_size = vector_size
 
-            # Cancer compression
+            # Cancer compression & decompression (metrics computed in encode/decode)
             compressed = codec.encode(delta, record)
             decompressed = codec.decode(compressed, record)
 
-            # Baseline: float16 + gzip
-            baseline_compressed = gzip.compress(delta.to(torch.float16).numpy().tobytes())
+            round_records.append(record)
 
-            # Metrics
-            mape = torch.mean(torch.abs(delta - decompressed) / (torch.abs(delta) + 1e-8)).item() * 100
-            comp_ratio = len(baseline_compressed) / len(compressed)
+        # Use metrics from records
+        avg_mape = np.mean([r.mape for r in round_records])
+        avg_mspe_sqrt = np.mean([r.mspe_sqrt for r in round_records])
+        avg_comp_ratio = np.mean([r.compression_ratio for r in round_records])
+        avg_prior_rate = np.mean([r.prior_rate for r in round_records])
+        avg_marginal_rate = np.mean([r.marginal_rate for r in round_records])
+        avg_entropy_real_rate = np.mean([r.entropy_real_rate for r in round_records])
 
-            round_mape.append(mape)
-            round_comp_ratio.append(comp_ratio)
-
-        avg_mape = np.mean(round_mape)
-        avg_comp = np.mean(round_comp_ratio)
         mape_list.append(avg_mape)
-        comp_vs_baseline_list.append(avg_comp)
+        mspe_sqrt_list.append(avg_mspe_sqrt)
+        comp_ratio_list.append(avg_comp_ratio)
+        prior_rate_list.append(avg_prior_rate)
+        marginal_rate_list.append(avg_marginal_rate)
+        entropy_real_rate_list.append(avg_entropy_real_rate)
 
-        print(f"\nR{round_id:2d} [{record.phase[0]}|{record.round_type}|"
-              f"{record.bits_per_plane}bpp|{record.num_planes}p] -- "
-              f"MAPE={avg_mape:5.2f}%, compr_ratio(vs FP16+zip): {avg_comp:.2f}x")
+        # Print round summary using first client's record for phase info
+        r = round_records[0]
+        print(f"\nR{round_id:2d} [{r.phase[0]}|{r.round_type}|{r.bits_per_plane}bpp|{r.num_planes}p]")
+        print(f"  MAPE={avg_mape:5.2f}% | MSPE_sqrt={avg_mspe_sqrt:5.2f}% | Comp_ratio={avg_comp_ratio:.2f}x")
+        print(f"  Prior_rate={avg_prior_rate:.3f}bpp | Marginal_rate={avg_marginal_rate:.3f}bpp | Entropy_real_rate={avg_entropy_real_rate:.3f}bpp")
 
-    print(f"\n{'='*60}")
-    print(f"Overall: MAPE={np.mean(mape_list):.2f}% | Comp vs baseline={np.mean(comp_vs_baseline_list):.2f}x")
-    print(f"{'='*60}")
+    print(f"\n{'='*70}")
+    print(f"Overall Metrics:")
+    print(f"  MAPE={np.mean(mape_list):.2f}% | MSPE_sqrt={np.mean(mspe_sqrt_list):.2f}%")
+    print(f"  Comp_ratio={np.mean(comp_ratio_list):.2f}x")
+    print(f"  Prior_rate={np.mean(prior_rate_list):.3f}bpp | Marginal_rate={np.mean(marginal_rate_list):.3f}bpp | Entropy_real_rate={np.mean(entropy_real_rate_list):.3f}bpp")
+    print(f"{'='*70}")
+
+
+

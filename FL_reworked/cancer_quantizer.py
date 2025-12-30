@@ -36,7 +36,7 @@ class WZQuantizerCancer:
             return
 
         # train the model
-        self.mspe_denom: float = torch.mean(train_x_vec ** 2).item()
+        self.mspe_denom: float = torch.mean(train_x_vec ** 2).item() + 1e-8
         noise = torch.from_numpy(np.random.normal(0, np.sqrt(1e-8), len(train_x_vec)).astype(np.float32))
         self.train_model(train_x_vec + noise, side_info_list)
 
@@ -74,26 +74,12 @@ class WZQuantizerCancer:
             pu_vec[i] = p_u.detach()
             rate_loss = torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
 
-            rate_weight = lambda x: ((x - 1) + np.exp(x * np.log(abs(self.c_cfg.tau_rate)))) / abs(
-                self.c_cfg.tau_rate) * 1.25
+            rate_weight = lambda x: (((x - 1) + np.exp(x * np.log(abs(self.c_cfg.tau_rate))))
+                                     / abs(self.c_cfg.tau_rate) * 1.25)
             rate_weight = rate_weight(training_prog) if self.c_cfg.tau_rate <= 0 else 1 - rate_weight(1 - training_prog)
 
             loss = loss + rate_loss * max(rate_weight, 0.2)
         loss = loss / self.num_planes
-
-        # f = lambda x: [a.detach() for a in x]
-        # loss = loss
-        # inp_rec = reconstruct[-1].detach()
-        # inp = single_grad_param.detach()
-        # bin_no_vec = f(bins_no)
-        # p_u = pu_vec
-        # bins_probs = f(soft_codes)
-        # prior_probs = f(prior_probs)
-        # mape = torch.mean((inp - inp_rec)**2) / (self.mspe_denom + 1e-8) * 100
-        # mse = F.mse_loss(inp_rec, inp)
-        # rate_bits = np.sum([torch.mean(-torch.log2(a + 1e-12)).cpu().numpy() for a in p_u])
-        # practical_p_u, _ = get_real_bin_prob(bin_no_vec, self.bin_count)
-        # real_bit_r = torch.mean(-torch.log2(practical_p_u + 1e-12))
 
         return loss
 
@@ -340,6 +326,9 @@ if __name__ == "__main__":
 
     mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
     print(f"MAPE: {mape:.2f}%")
+
+    mspe_sqrt = torch.sqrt(torch.mean((y - recons) ** 2 / (y ** 2 + 1e-8))).item() * 100
+    print(f"MSPE_sqrt: {mspe_sqrt:.2f}%")
 
     temp = [prior[i, torch.arange(bins.shape[1]), bins[i].to(int)] for i in range(len(bins))]
     temp = [-torch.log2(p + 1e-12).mean() for p in temp]
