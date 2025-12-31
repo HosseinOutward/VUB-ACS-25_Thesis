@@ -8,6 +8,15 @@ from FL_reworked.utils import create_training_progress_bar
 
 class PriorCalculator:
     @staticmethod
+    def compute_rate_from_prior_tensor(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> float:
+        """Compute rate from prior probabilities for given bins."""
+        n_samples = bins.shape[1]
+        return sum(
+            -torch.log2(prior[i, torch.arange(n_samples), bins[i].long()] + 1e-10).mean().item()
+            for i in range(num_planes)
+        )
+
+    @staticmethod
     def get_hash(x_vec: torch.Tensor, sample_size: int = 128) -> str:
         sample = x_vec[:sample_size*3:3]
         sample = sample.cpu().numpy().round(decimals=1).astype(np.int32)
