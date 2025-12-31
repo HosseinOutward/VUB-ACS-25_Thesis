@@ -39,6 +39,9 @@ Each round has a type that determines quantizer training and side information us
 
 'F' - FROZEN:
     - NO training; reuses the last trained quantizer
+
+'M' - MARGINAL (optional, not in default config):
+    - Similar to 'P' but trains a marginal model from scratch instead of loading pretrained
 """
 import gc
 from dataclasses import dataclass
@@ -61,7 +64,7 @@ class CancerConfig:
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 16, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: Tuple[str] = (('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 5
     max_side_info_count: int = 5
-    pretrain_pth_dir: str = r'../data/pre_trained_pth/'
+    pretrain_pth_dir: str = r'../data/pre_trained_pth/' # ignored if train_marginal=True
 
     train_epochs: int = 60
     reconst_ld: float = 400.0
@@ -128,17 +131,20 @@ class CancerCodec(IdentityCodec):
         phase = "warmup" if is_warmup else "routine"
 
         return CancerRecord(
-            round_id=round_id, client_id=client_id, method="cancer",
-            phase=phase, round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
+            round_id=round_id, client_id=client_id, method="cancer", phase=phase,
+            round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
 
-    def _train_quantizer(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
-        """Train new quantizer if needed (P, T, R rounds)."""
+    def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
+        """Train new quantizer or load pretrained if needed (P, T, R rounds)."""
         round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
         client_idx = record.client_id
 
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
-            train_si, target_x = [], None
+            train_si, target_x = None, None
+
+        elif round_type == 'M': # Marginal
+            train_si, target_x = [], delta_vec
 
         elif round_type == 'T': # Temporal
             train_si = [item
@@ -155,17 +161,27 @@ class CancerCodec(IdentityCodec):
         else:
             raise ValueError(f"Invalid round type for training: {round_type}")
 
-        self.frozen_quantizers[client_idx] = self.get_new_quantizer(
-            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-            train_x_vec=target_x, side_info_list=train_si, pretrained=(round_type == 'P')
-        )
+        # Create a new quantizer instance
+        quantizer = self.get_new_quantizer(
+            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np,
+            bins_per_plane=round_bpp, si_size=len(train_si))
+
+        # Load pretrained weights or train the model
+        if round_type != 'P':
+            quantizer.train_model(target_x, train_si)
+        else:
+            weight_path = self.c_cfg.pretrain_pth_dir + f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
+            quantizer.coding_model.load_state_dict(torch.load(weight_path), strict=False)
+            quantizer.side_info_list_used = []  # Pretrained models are marginal
+
+        self.frozen_quantizers[client_idx] = quantizer
 
         gc.collect()
         torch.cuda.empty_cache()
 
     def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
         if record.round_type != 'F':
-            self._train_quantizer(delta_vec, record)
+            self._train_quantizer_or_load(delta_vec, record)
 
         # Encode using current quantizer
         quantizer = self.frozen_quantizers[record.client_id]
