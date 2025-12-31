@@ -65,13 +65,18 @@ class WZQuantizerCancerWithDataPrep(WZQuantizerCancer):
         res = self._post_process_grads(recons_grad, *encoding_extra_data)
         return res
 
-    def train_model(self, x_vec: torch.Tensor, side_info_list: List[torch.Tensor], batch_size: int = 50_000) -> None:
-        assert len(side_info_list) != 0, "Side information is required for training."
-        assert self.side_info_list_used is None, "Model has already been trained since the side info is set."
-        side_info_list=[
-            self._apply_pre_process(si, False, True)[0] for si in side_info_list]
+    def train_model(self, x_vec: torch.Tensor, side_info_list: Optional[List[torch.Tensor]], batch_size: int = 50_000) -> None:
+        if self.coding_model.marginal:
+            assert side_info_list is None, "Marginal model expects an empty side_info_list for training."
+            side_info_list = []
+        else:
+            assert len(side_info_list) > 0, "Conditional model requires side info for training."
+        assert self.side_info_list_used in [None, 'P'], "This quantizer instance has already been trained."
+        assert x_vec is not None, "Training data x_vec must be provided for training."
+
         self.side_info_list_used = side_info_list
 
+        self.mspe_denom:float = torch.mean(x_vec ** 2).item() + 1e-8
         x_vec, _ = self.get_x_data(x_vec)
         side_info_list = self.get_si_data()
         self._train_model(x_vec, side_info_list, batch_size)
@@ -141,47 +146,4 @@ class CancerDataPrepCodec(CancerCodec):
 
     def get_new_quantizer(self, **kargs: Any) -> WZQuantizerCancer:
         return WZQuantizerCancerWithDataPrep(self.vec_slices, **kargs)
-
-
-if __name__ == "__main__":
-    from FL_reworked.cancer_protocol import CancerConfig
-
-    # Create synthetic data: base signal + noise
-    base_signal = torch.from_numpy(np.random.normal(0, 1, 10_000_000).astype(np.float32))
-    y = base_signal + torch.from_numpy(np.random.normal(0, 0.1, 10_000_000).astype(np.float32))
-    side_info = [base_signal.clone()]
-
-    # Test with side info (from run_sim.py: num_planes=3, bins_per_plane=16)
-    print("Training quantizer (num_planes=3, bins_per_plane=16)...")
-    quantizer = WZQuantizerCancerWithDataPrep(
-        vec_slices=[slice(i, None, 3) for i in range(3)],
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1), num_planes=3, bins_per_plane=16,
-        train_x_vec=y, side_info_list=side_info, pretrained=False
-    )
-
-    # Encode and decode
-    bins, extra = quantizer.encoding_process(y)
-    recons = quantizer.decoding_process((bins.numpy(), extra))
-
-    # Calculate prior
-    print("Calculating prior probabilities...")
-    prior = quantizer._get_posterior(y, bins_vec_save_compute=(bins, extra))
-
-    # Calculate metrics
-    mse = torch.mean((y - recons) ** 2).item()
-    mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
-    mspe_sqrt = torch.sqrt(torch.mean((y - recons) ** 2 / (y ** 2 + 1e-8))).item() * 100
-
-    print(f"MSE: {mse:.6f}")
-    print(f"MAPE: {mape:.2f}%")
-    print(f"MSPE_sqrt: {mspe_sqrt:.2f}%")
-    print(f"Bins shape: {bins.shape}")
-    print(f"Prior shape: {prior.shape}")
-    print(f"Unique bins used per plane: {[torch.unique(bins[i]).numel() for i in range(bins.shape[0])]}")
-
-    # Calculate rate using prior
-    temp = [prior[i, torch.arange(bins.shape[1]), bins[i].to(int)] for i in range(len(bins))]
-    temp = [-torch.log2(p + 1e-12).mean() for p in temp]
-    print(f"Prior rate: {sum(temp):.4f} bits/symbol")
-
 
