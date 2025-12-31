@@ -151,7 +151,8 @@ class WZQuantizerCancer:
                 end_i = min(start_i + batch_size, len(subset_dataset))
                 x_batch, si_batch = subset_dataset[start_i:end_i]
 
-                x_batch = x_batch + torch.randn_like(x_batch, device='cuda') * (1e-8 ** 0.5)
+                noise = torch.randn_like(x_batch, device='cuda') * (1e-5 * x_batch.abs().mean())
+                x_batch += noise
 
                 optimizer.zero_grad()
 

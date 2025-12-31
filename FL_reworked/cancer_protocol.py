@@ -144,7 +144,7 @@ class CancerCodec(IdentityCodec):
             train_si, target_x = None, None
 
         elif round_type == 'M': # Marginal
-            train_si, target_x = [], delta_vec
+            train_si, target_x = None, delta_vec
 
         elif round_type == 'T': # Temporal
             train_si = [item
@@ -163,8 +163,8 @@ class CancerCodec(IdentityCodec):
 
         # Create a new quantizer instance
         quantizer = self.get_new_quantizer(
-            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np,
-            bins_per_plane=round_bpp, si_size=len(train_si))
+            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
+            si_size=len(train_si) if train_si is not None else 0,)
 
         # Load pretrained weights or train the model
         if round_type != 'P':
