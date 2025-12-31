@@ -51,9 +51,9 @@ class PriorCalculator:
         bins_vec = bins_vec.to(torch.long)
         bins_per_plane = q_model.bins_per_plane
         def func(start_i, end_idx):
-            codes = [F.one_hot(b, num_classes=bins_per_plane).to('cuda', non_blocking=True)
+            codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
                      for b in bins_vec[:, start_i:end_idx]]
-            side_info_batch = side_info[start_i:end_idx].to('cuda', non_blocking=True)
+            side_info_batch = side_info[start_i:end_idx].cuda()
 
             tau = training_tau if training_mode else None
 
@@ -114,8 +114,8 @@ class PriorCalculator:
                     training_tau=tau, batch_size=batch_size)
 
                 # Move to GPU for loss computation
-                prior_batch = prior_batch.to('cuda', non_blocking=True)
-                bins_batch = bins_batch.to('cuda', non_blocking=True)
+                prior_batch = prior_batch.cuda()
+                bins_batch = bins_batch.cuda()
 
                 # Compute negative log-likelihood loss (cross-entropy)
                 loss = 0.0

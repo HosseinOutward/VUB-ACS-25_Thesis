@@ -104,7 +104,7 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, device: to
         x: torch.Tensor
         if i >= max_batches:
             break
-        x = x.to(device, non_blocking=True)
+        x = x.to(device)
         if x.ndim == 4:
             x = x.contiguous(memory_format=torch.channels_last)
         model(x)
@@ -121,8 +121,8 @@ def evaluate(model: FLModelTemplate, loader: DataLoader, device: torch.device) -
 
     with torch.inference_mode():
         for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
+            x = x.to(device)
+            y = y.to(device)
 
             use_channels_last = next(model.parameters()).is_contiguous(memory_format=torch.channels_last)
             if use_channels_last:
