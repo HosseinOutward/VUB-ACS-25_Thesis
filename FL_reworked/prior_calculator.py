@@ -62,7 +62,7 @@ class PriorCalculator:
 
             if training_mode:
                 return priors
-            return priors.to('cpu', non_blocking=True)
+            return priors.cpu()
 
         priors = WZQuantizerCancer._batch_loop(func, q_model, bins_vec.size(1), batch_size, training_mode)
 

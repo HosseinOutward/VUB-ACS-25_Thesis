@@ -226,7 +226,7 @@ class WZQuantizerCancer:
             bins_list, _ = self.coding_model.encode(x_batch)
             bins_list = torch.stack(bins_list)
             assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane ** self.coding_model.num_planes
-            return bins_list.to('cpu', non_blocking=True)
+            return bins_list.cpu()
         bins = self._batch_loop(func, self.coding_model, self.si_vec_size, batch_size)
 
         dtype = torch.uint8 if self.bins_per_plane < 2**8 else torch.uint16
@@ -254,7 +254,7 @@ class WZQuantizerCancer:
             codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins_batch]
             reconstructs_batch = self.coding_model.decode(codes, side_info_batch)[-1]
 
-            return reconstructs_batch.to('cpu', non_blocking=True)
+            return reconstructs_batch.cpu()
         all_reconstructs = self._batch_loop(func, self.coding_model, self.si_vec_size, batch_size)
 
         res = all_reconstructs.squeeze()
