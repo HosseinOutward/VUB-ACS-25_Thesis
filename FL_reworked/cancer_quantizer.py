@@ -77,7 +77,7 @@ class WZQuantizerCancer:
         return loss
 
     def get_x_data(self, x_vec: torch.Tensor) -> torch.Tensor:
-        x_vec = x_vec.cuda(non_blocking=True).unsqueeze(1).to(torch.float32).contiguous()
+        x_vec = x_vec.cuda().unsqueeze(1).to(torch.float32).contiguous()
         if self.si_vec_size is None:
             self.si_vec_size = x_vec.shape[0]
         return x_vec
@@ -85,7 +85,7 @@ class WZQuantizerCancer:
     def get_si_data(self) -> torch.Tensor:
         if self.side_info_list_used in [[], 'P']:
             self.side_info_list_used = [torch.zeros(self.si_vec_size)]
-        side_info_list = torch.stack(self.side_info_list_used).cuda(non_blocking=True).T.to(torch.float32).contiguous()
+        side_info_list = torch.stack(self.side_info_list_used).cuda().T.to(torch.float32).contiguous()
         return side_info_list
 
     def train_model(self, x_vec: torch.Tensor, side_info_list: Optional[List[torch.Tensor]],
@@ -186,7 +186,7 @@ class WZQuantizerCancer:
     @staticmethod
     def _batch_loop(func: Callable[[int, int], torch.Tensor], coding_model, input_size: int,
                     batch_size: int, training_mode: bool = False) -> torch.Tensor:
-        coding_model.to('cuda', non_blocking=True)
+        coding_model.cuda()
         coding_model.train() if training_mode else coding_model.eval()
 
         # Pre-allocate list with estimated capacity
@@ -206,7 +206,7 @@ class WZQuantizerCancer:
 
         concat_res = torch.cat(all_res, dim=1) if all_res[0].shape[1] > 1 else torch.cat(all_res, dim=0)
         if not training_mode:
-            coding_model.to('cpu')
+            coding_model.cpu()
         torch.cuda.empty_cache()
         return concat_res
 
@@ -222,7 +222,7 @@ class WZQuantizerCancer:
         assert grad_vector.shape[0] == self.si_vec_size
 
         def func(start_i, end_idx):
-            x_batch = grad_vector[start_i:end_idx].cuda(non_blocking=True)  # Move batch to GPU
+            x_batch = grad_vector[start_i:end_idx].cuda()
             bins_list, _ = self.coding_model.encode(x_batch)
             bins_list = torch.stack(bins_list)
             assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane ** self.coding_model.num_planes
@@ -248,8 +248,8 @@ class WZQuantizerCancer:
         assert bins.float().max() < b_p_p
 
         def func(start_i, end_idx):
-            bins_batch = bins[:, start_i:end_idx].to('cuda', non_blocking=True)
-            side_info_batch = side_info[start_i:end_idx].to('cuda', non_blocking=True)
+            bins_batch = bins[:, start_i:end_idx].cuda()
+            side_info_batch = side_info[start_i:end_idx].cuda()
 
             codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins_batch]
             reconstructs_batch = self.coding_model.decode(codes, side_info_batch)[-1]
@@ -289,6 +289,7 @@ class WZQuantizerCancer:
 
 
 if __name__ == "__main__":
+    import time
     from FL_reworked.cancer_protocol import CancerConfig
     from FL_reworked.cancer_preprocess_protocol import WZQuantizerCancerWithDataPrep
 
@@ -320,6 +321,8 @@ if __name__ == "__main__":
     #     print(f"MAPE: {mape:.2f}%", f"Prior rate: {rate:.4f} bits/symbol")
     #     return bins, recons, prior
 
+    t_s = time.time()
+
     print("(num_planes=3, bins_per_plane=16)")
 
     print("\nwithout side info - pretrained model (P)")
@@ -345,6 +348,9 @@ if __name__ == "__main__":
     print("\nTesting quantizer on unseen data...")
     y = base_signal + torch.from_numpy(np.random.normal(0, 0.1, 10_000_000).astype(np.float32))
     bins, recons, prior = test(quantizer)
+
+    t_e = time.time()
+    print(f"\nTotal time: {t_e - t_s:.2f} seconds")
 
     print(f"Prior shape: {prior.shape}")
     print(f"Bins shape: {bins.shape}")

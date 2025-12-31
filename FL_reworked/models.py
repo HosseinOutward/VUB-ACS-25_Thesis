@@ -75,8 +75,8 @@ class Resnet18FLModelTemplate(FLModelTemplate):
         """Single training step."""
         x, y = batch
 
-        x = x.to(device, non_blocking=True)
-        y = y.to(device, non_blocking=True)
+        x = x.to(device)
+        y = y.to(device)
 
         if cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)

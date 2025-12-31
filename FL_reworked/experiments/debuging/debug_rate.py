@@ -43,12 +43,12 @@ print(f"Final bins unique: {[torch.unique(bins[i]).tolist() for i in range(bins.
 
 # --- Rate Calculation Methods ---
 rates = {}
-quantizer.coding_model.to('cuda').eval()
+quantizer.coding_model.cuda().eval()
 
 with torch.inference_mode():
     # Prepare data on GPU
-    x_gpu = y.unsqueeze(1).to('cuda', non_blocking=True).float()
-    si_gpu = base.unsqueeze(1).to('cuda', non_blocking=True).float()
+    x_gpu = y.unsqueeze(1).cuda().float()
+    si_gpu = base.unsqueeze(1).cuda().float()
 
     # Method 1: Using _get_posterior (current implementation)
     print("\nMethod 1: _get_posterior...")
@@ -57,7 +57,7 @@ with torch.inference_mode():
 
     # Method 2: Direct forward pass (like training)
     print("Method 2: Direct forward pass...")
-    quantizer.coding_model.to('cuda').eval()
+    quantizer.coding_model.cuda().eval()
     _, bins_fwd, _, prior_probs = quantizer.coding_model.forward(x_gpu, si_gpu, tau=0.001)
     rates['Method 2 (forward pass)'] = PriorCalculator.compute_rate_from_prior_tensor(
         torch.stack(prior_probs), torch.stack(bins_fwd), NP)
@@ -77,7 +77,7 @@ with torch.inference_mode():
 
     # Method 5: Manual get_priors with encoded bins
     print("Method 5: Manual get_priors...")
-    hard_codes_manual = [F.one_hot(bins[i].long(), num_classes=BPP).float().to('cuda') for i in range(NP)]
+    hard_codes_manual = [F.one_hot(bins[i].long(), num_classes=BPP).float().cuda() for i in range(NP)]
     quantizer.coding_model.cuda()
     priors5 = quantizer.coding_model.get_priors(codes=hard_codes_manual, y=si_gpu)
     rates['Method 5 (manual get_priors)'] = PriorCalculator.compute_rate_from_prior_tensor(
