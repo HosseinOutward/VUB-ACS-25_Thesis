@@ -195,14 +195,12 @@ class CancerCodec(IdentityCodec):
 
         # add prior info to record for analysis
         prior = quantizer._get_posterior(delta_vec, encoded_data)
-        prior = [prior[i, torch.arange(prior.shape[1]), bins_vec[i].to(int)] for i in range(prior.shape[0])]
-        record.prior_rate = sum([torch.mean(-torch.log2(prior[i] + 1e-10)).item() for i in range(len(prior))])
+        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins_vec, quantizer.num_planes)
 
         # compatibility with preprocess quantizer
         m_prior = PriorCalculator.compute_marginal_prior(
             bins_vec, quantizer.bins_per_plane, quantizer.num_planes)
-        m_prior = [m_prior[i, torch.arange(m_prior.shape[1]), bins_vec[i].to(int)] for i in range(m_prior.shape[0])]
-        record.marginal_rate = sum([torch.mean(-torch.log2(m_prior[i] + 1e-10)).item() for i in range(len(m_prior))])
+        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins_vec, quantizer.num_planes)
 
         return payload
 
