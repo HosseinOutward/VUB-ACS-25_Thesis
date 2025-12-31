@@ -55,6 +55,38 @@ All communication uses `torch.distributed` primitives:
 - **Efficient dataloaders**: Configurable number of workers
 - **Minimal overhead**: Optimized communication and aggregation
 
+## Compression Codecs
+
+The framework supports pluggable compression codecs for gradient communication:
+
+### Available Codecs
+
+| Codec | Description | Use Case |
+|-------|-------------|----------|
+| `IdentityCodec` | No compression (baseline) | Debugging, benchmarking |
+| `BasicCompressionCodec` | Float16 + gzip | Simple compression |
+| `CancerCodec` | Wyner-Ziv learned compression | Production, research |
+
+### Cancer Codec (Wyner-Ziv)
+
+The Cancer codec implements learned compression using:
+- **Layered RNN quantizer**: Progressive refinement across planes
+- **Side information**: Exploits temporal/cross-client correlations
+- **Adaptive training**: Different strategies per round type (P/T/R/F)
+
+See [Quantizer System](docs/QUANTIZER_SYSTEM.md) and [Cancer Protocol](docs/CANCER_PROTOCOL.md) for details.
+
+### Validation
+
+Validate the quantizer rate-distortion performance:
+
+```bash
+cd experiments
+python quantizer_check.py              # Full validation
+python quantizer_check.py --plot-only  # Re-plot existing results
+python debug_rate.py                   # Verify rate calculations
+```
+
 ## Extending the Framework
 
 ### Adding a New Model

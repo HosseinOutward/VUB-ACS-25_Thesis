@@ -10,8 +10,8 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from tqdm import tqdm
 
-from models import FLModelTemplate, initialize_model
-from dataset import create_dataloader
+from FL_reworked.models import FLModelTemplate, initialize_model
+from FL_reworked.dataset import create_dataloader
 
 
 def create_training_progress_bar(
