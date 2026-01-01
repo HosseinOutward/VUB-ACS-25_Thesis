@@ -196,12 +196,18 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
         return IdentityCodec()
     elif codec_name == "basic":
         return BasicCompressionCodec()
-    elif codec_name == "cancer":
+    elif codec_name == "cancer_raw":
         from FL_reworked.cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg)
-    elif codec_name == "cancer_data_prep":
-        from FL_reworked.cancer_preprocess_protocol import CancerDataPrepCodec
-        return CancerDataPrepCodec(fl_cfg, sd_manager.get_slices())
+
+    vec_slice = sd_manager.get_slices() if sd_manager is not None else None
+
+    if codec_name == "cancer":
+        from FL_reworked.cancer_protocol import CancerCodec
+        return CancerCodec(fl_cfg, vec_slices=vec_slice, enable_outlier_handling=True)
+    elif codec_name == "cancer_only_normalize":
+        from FL_reworked.cancer_protocol import CancerCodec
+        return CancerCodec(fl_cfg, vec_slices=vec_slice)
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 

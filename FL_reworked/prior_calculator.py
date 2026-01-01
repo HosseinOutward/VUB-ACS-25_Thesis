@@ -67,19 +67,21 @@ class PriorCalculator:
         priors = WZQuantizerCancer._batch_loop(func, q_model, bins_vec.size(1), batch_size, training_mode)
 
         # Add small epsilon to actual bins and renormalize
-        for i in range(priors.shape[0]):
-            priors[i, torch.arange(priors.shape[1]), bins_vec[i]] += 1e-5
-            priors[i] /= priors[i].sum(dim=-1, keepdim=True)
+        if not training_mode:
+            for i in range(priors.shape[0]):
+                priors[i, torch.arange(priors.shape[1]), bins_vec[i]] += 1e-6
+                priors[i] /= priors[i].sum(dim=-1, keepdim=True)
 
         return priors
 
     @staticmethod
-    def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
-                          c_cfg = None,
+    def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane, c_cfg = None,
                           train_sample_size=3e5, batch_size=500_000) -> EncoderDecoderLayeredRNN:
         from FL_reworked.cancer_protocol import CancerConfig
         if c_cfg is None:
             c_cfg = CancerConfig()
+
+        assert bins_vec.size(0) == num_planes, "bins_vec first dimension must match num_planes"
 
         prior_model = EncoderDecoderLayeredRNN(
             num_planes=num_planes, bins_per_plane=bins_per_plane, side_info_size=side_info.size(1),
@@ -105,6 +107,8 @@ class PriorCalculator:
                 end_i = min(start_i + batch_size, total_samples)
                 bins_batch, si_batch = bins_subset[:, start_i:end_i], si_subset[start_i:end_i]
 
+                si_batch += torch.randn_like(si_batch) * (1e-4 * si_batch.abs().mean())
+
                 training_prog = epoch / (c_cfg.train_epochs + 1)
                 tau = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
@@ -121,9 +125,8 @@ class PriorCalculator:
                 loss = 0.0
                 for i in range(num_planes):
                     # Log-likelihood of actual bins under the predicted distribution
-                    prior_slice = prior_batch[i, torch.arange(prior_batch.shape[1]), bins_batch[i].to(int)]
-                    log_probs = torch.log(prior_slice + 1e-12)
-                    loss = loss - log_probs.mean()
+                    prior_slice = prior_batch[i][torch.arange(prior_batch[i].shape[0]), bins_batch[i].to(torch.long)]
+                    loss += -torch.log(prior_slice + 1e-12).mean()
 
                 loss = loss / num_planes
                 epoch_loss += loss.item()
