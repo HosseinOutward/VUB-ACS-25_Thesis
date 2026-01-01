@@ -107,11 +107,15 @@ class CancerRecord(CompressionRecord):
 # Cancer Codec Implementation
 # ============================================================================
 class CancerCodec(IdentityCodec):
-    def __init__(self, fl_cfg:FLConfig):
+    def __init__(self, fl_cfg: FLConfig, vec_slices: List[slice] = None, enable_outlier_handling: bool = False):
         super().__init__()
         self.fl_cfg = fl_cfg
         self.num_clients = fl_cfg.num_clients
         self.c_cfg = CancerConfig()
+
+        # Quantizer preprocessing parameters (passed to quantizers)
+        self.vec_slices = vec_slices
+        self.enable_outlier_handling = enable_outlier_handling
 
         # Per-client reconstruction histories
         self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
@@ -121,7 +125,8 @@ class CancerCodec(IdentityCodec):
         self.frozen_quantizers: List[Optional[WZQuantizerCancer]] = [None] * self.num_clients
 
     def get_new_quantizer(self, **kargs) -> WZQuantizerCancer:
-        return WZQuantizerCancer(**kargs)
+        return WZQuantizerCancer(
+            vec_slices=self.vec_slices, enable_outlier_handling=self.enable_outlier_handling, **kargs)
 
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
@@ -185,22 +190,19 @@ class CancerCodec(IdentityCodec):
 
         # Encode using current quantizer
         quantizer = self.frozen_quantizers[record.client_id]
-        encoded_data = quantizer.encoding_process(delta_vec)
+        bins, prep_metadata = quantizer.encoding_process(delta_vec)
 
         # Build payload
-        payload = self._build_payload(encoded_data, quantizer, record)
+        payload = self._build_payload((bins, prep_metadata), quantizer, record)
 
-        bins_vec = payload['payload_content'] \
-            if not isinstance(payload['payload_content'], tuple) else payload['payload_content'][0]
+        # Add prior info to record for analysis
+        prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
+        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins, quantizer.num_planes)
 
-        # add prior info to record for analysis
-        prior = quantizer._get_posterior(delta_vec, encoded_data)
-        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins_vec, quantizer.num_planes)
-
-        # compatibility with preprocess quantizer
+        # Compute marginal prior for comparison
         m_prior = PriorCalculator.compute_marginal_prior(
-            bins_vec, quantizer.bins_per_plane, quantizer.num_planes)
-        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins_vec, quantizer.num_planes)
+            bins, quantizer.bins_per_plane, quantizer.num_planes)
+        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins, quantizer.num_planes)
 
         return payload
 
@@ -248,12 +250,17 @@ if __name__ == "__main__":
     num_rounds = 15
     vector_size = 1_000_000
 
+    # # Test with normal Cancer codec (default: no outlier handling, single slice)
+    # print('Using Cancer codec (no preprocessing)...\n')
     # codec = CancerCodec(FLConfig(num_clients=num_clients))
-    print(' Using normal Cancer prot for testing...\n')
 
-    from cancer_preprocess_protocol import CancerDataPrepCodec
-    codec = CancerDataPrepCodec(FLConfig(num_clients=num_clients), vec_slices=[slice(i, None, 3) for i in range(3)],)
-    print(' NOTE ** Using CancerDataPrepCodec for testing...\n')
+    # Uncomment to test with preprocessing
+    print('Using Cancer codec WITH vec_slices and outlier handling...\n')
+    codec = CancerCodec(
+        FLConfig(num_clients=num_clients),
+        vec_slices=[slice(i, None, 3) for i in range(3)],
+        enable_outlier_handling=True
+    )
 
     base_vector = torch.normal(0.0, 1.0, size=(vector_size,))
 

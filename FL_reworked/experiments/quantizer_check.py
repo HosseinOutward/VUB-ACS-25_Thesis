@@ -7,22 +7,18 @@ from matplotlib.lines import Line2D
 from pathlib import Path
 import sys
 
+from FL_reworked.codec import create_codec
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from FL_reworked.cancer_protocol import CancerCodec, CancerConfig
 from FL_reworked.run_fl import FLConfig
 
 # ============== CONFIG ==============
-NUM_REPEATS = 5
-DATA_SIZE = 500_000
+NUM_REPEATS = 2
+DATA_SIZE = 10_000_000
 NOISE_POWER = 0.1
 # (round_type, bins_per_plane, num_planes) - M=marginal, R=with side info
-CONFIGS = [
-    # ('M', 4, 2), ('R', 4, 2),
-    # ('M', 4, 3), ('R', 4, 3),
-    # ('M', 8, 2), ('R', 8, 2),
-    # ('M', 8, 3), ('R', 8, 3),
-    # ('M', 16, 2), ('R', 16, 2),
-]
+CONFIGS = []#('R', 4, 2),('R', 8, 3), ('R', 16, 2),]
 # ====================================
 
 def run_experiments(out_path: Path):
@@ -31,10 +27,11 @@ def run_experiments(out_path: Path):
     csv_path = out_path / "quantizer_check.csv"
 
     c_cfg = CancerConfig()
-    c_cfg.train_epochs = 80
+    c_cfg.train_epochs = 40
     c_cfg.train_sample_size = min(200_000, int(DATA_SIZE * 0.8))
 
     fl_cfg = FLConfig(num_clients=1, training_progress_bar=True, compile_mode=False)
+    fl_cfg.codec='cancer'
 
     first_write = True
     for round_type, bpp, np_ in CONFIGS:
@@ -49,7 +46,7 @@ def run_experiments(out_path: Path):
             y = base + torch.randn(DATA_SIZE) * np.sqrt(NOISE_POWER)
 
             # Setup codec
-            codec = CancerCodec(fl_cfg)
+            codec:CancerCodec = create_codec(fl_cfg, None)
             codec.c_cfg = c_cfg
             codec.c_cfg.warmup_phase = ((round_type, bpp, np_),)
 
