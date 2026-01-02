@@ -8,9 +8,9 @@ import gzip
 import torch
 import numpy as np
 
-from FL_reworked.prior_calculator import PriorCalculator
-from FL_reworked.run_fl import FLConfig
-from FL_reworked.utils import StateDictManager
+from prior_calculator import PriorCalculator
+from run_fl import FLConfig
+from utils import StateDictManager
 
 
 def get_obj_size(obj):
@@ -84,6 +84,7 @@ class CompressionRecord:
         self.basic_raw_bytes: Optional[int] = None
         self.compression_ratio: Optional[float] = None
         self.global_eval_metrics: Dict[str, float] = {}
+        self.worker_eval_metrics: Dict[str, Dict[str, float]] = {}
         self.entropy_real_rate: Optional[float] = None
         self.mse: Optional[float] = None
         self.mape: Optional[float] = None
@@ -108,6 +109,12 @@ class CompressionRecord:
         # Add global eval metrics with prefix
         for key, value in self.global_eval_metrics.items():
             result[f'global_eval_{key}'] = value
+
+        # Add worker eval metrics with split prefix (e.g., train_loss, test_acc)
+        for split, metrics in self.worker_eval_metrics.items():
+            for metric_key, metric_value in metrics.items():
+                result[f'{split}_{metric_key}'] = metric_value
+
         return result
 
     def save_to_csv(self, save_dir: str | None = None) -> None:
@@ -197,33 +204,37 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     elif codec_name == "basic":
         return BasicCompressionCodec()
     elif codec_name == "cancer_raw":
-        from FL_reworked.cancer_protocol import CancerCodec
+        from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg)
 
     vec_slice = sd_manager.get_slices() if sd_manager is not None else None
 
     if codec_name == "cancer":
-        from FL_reworked.cancer_protocol import CancerCodec
+        from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, vec_slices=vec_slice, enable_outlier_handling=True)
     elif codec_name == "cancer_only_normalize":
-        from FL_reworked.cancer_protocol import CancerCodec
+        from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, vec_slices=vec_slice)
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
 
 def simulate_compression(
-    codec: IdentityCodec,
-    delta_vec: torch.Tensor,
-    client_id: int,
-    round_id: int,
-    eval_metrics: Dict[str, float],
-    save_dir: str | None = "compression_logs",
-    model_size: int|None = None,
-) -> torch.Tensor:
+    codec: IdentityCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
+    model_size: int | None = None, save_dir: str | None = "compression_logs",
+    server_eval_metrics: Dict[str, float] = None, worker_eval_metrics: list[float] | None = None,
+    metric_keys: list[str] | None = None) -> torch.Tensor:
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
     record.model_size = model_size
+    record.global_eval_metrics = server_eval_metrics
+
+    # Restructure worker metrics to match server metrics structure
+    if worker_eval_metrics and metric_keys:
+        num_metrics = len(metric_keys)
+        train_metrics = {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)}
+        test_metrics = {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)}
+        record.worker_eval_metrics = {'train': train_metrics, 'test': test_metrics}
 
     # Encode (client-side simulation)
     payload = codec.encode(delta_vec, record)

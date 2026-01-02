@@ -4,7 +4,7 @@ import torch
 import torch.nn.functional as F
 
 from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
-from FL_reworked.utils import create_training_progress_bar
+from utils import create_training_progress_bar
 
 class PriorCalculator:
     @staticmethod
@@ -44,7 +44,7 @@ class PriorCalculator:
 
     @staticmethod
     def _compute_prior_from_network(q_model, bins_vec, side_info, training_tau=False, batch_size=500_000):
-        from FL_reworked.cancer_quantizer import WZQuantizerCancer
+        from cancer_quantizer import WZQuantizerCancer
 
         training_mode = training_tau is not False
 
@@ -77,7 +77,7 @@ class PriorCalculator:
     @staticmethod
     def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane, c_cfg = None,
                           train_sample_size=3e5, batch_size=500_000) -> EncoderDecoderLayeredRNN:
-        from FL_reworked.cancer_protocol import CancerConfig
+        from cancer_protocol import CancerConfig
         if c_cfg is None:
             c_cfg = CancerConfig()
 

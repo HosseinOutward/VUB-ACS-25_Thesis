@@ -74,9 +74,15 @@ def run_federated_client(
         delta = sd_manager.compute_delta(post_train_state, pre_train_state)
         delta_vec = sd_manager.flatten(delta).cpu().contiguous()
 
+        # Flatten worker eval metrics (train first, then test)
+        metric_keys = list(train_metrics.keys())
+        worker_metrics_list = [train_metrics[k] for k in metric_keys] + [test_metrics[k] for k in metric_keys]
+        worker_metrics_vec = torch.tensor(worker_metrics_list, dtype=torch.float32)
+
         dist.send(torch.tensor([client_id, curr_rnd_i], dtype=torch.long), dst=0)
         dist.send(torch.tensor([len(train_loader.dataset)], dtype=torch.long), dst=0)
         dist.send(delta_vec, dst=0)
+        dist.send(worker_metrics_vec, dst=0)
 
         print(f"[Client {client_id}] Broadcast complete for round {srvr_rnd}")
         curr_rnd_i += 1
