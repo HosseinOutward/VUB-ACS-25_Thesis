@@ -7,6 +7,11 @@ from matplotlib.lines import Line2D
 from pathlib import Path
 import sys
 
+# Add project root to path (works both in PyCharm and terminal)
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
+sys.path.insert(0, str(project_root))
+
 from FL_reworked.codec import create_codec
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -14,11 +19,12 @@ from FL_reworked.cancer_protocol import CancerCodec, CancerConfig
 from FL_reworked.run_fl import FLConfig
 
 # ============== CONFIG ==============
-NUM_REPEATS = 2
+NUM_REPEATS = 5
 DATA_SIZE = 10_000_000
 NOISE_POWER = 0.1
 # (round_type, bins_per_plane, num_planes) - M=marginal, R=with side info
-CONFIGS = []#('R', 4, 2),('R', 8, 3), ('R', 16, 2),]
+CONFIGS = [('R', 4, 2),('R', 4, 3),('R', 8, 3),('M', 8, 3), ('R', 16, 2), ('R', 32, 3),]
+CONFIGS = []
 # ====================================
 
 def run_experiments(out_path: Path):
@@ -59,7 +65,8 @@ def run_experiments(out_path: Path):
             compressed = codec.encode(y, record)
             _ = codec.decode(compressed, record)
 
-            print(f"  [{rep+1}/{NUM_REPEATS}] MSE={record.mse:.6f} Prior={record.prior_rate:.3f} Marginal={record.marginal_rate:.3f}")
+            print(f"  [{rep+1}/{NUM_REPEATS}] MSE={record.mse:.6f} Prior={record.prior_rate:.3f} "
+                  f"Marginal={record.marginal_rate:.3f}")
 
             # Save incrementally
             row = record.to_dict()

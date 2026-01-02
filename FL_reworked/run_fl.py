@@ -10,14 +10,14 @@ class FLConfig:
     """Federated learning configuration."""
     codec: str = "cancer" # "identity", "basic", "cancer", "cancer_raw", "cancer_only_normalize"
 
-    num_clients: int = 2#5
+    num_clients: int = 5
     num_loader_workers: int = 2
     num_classes: int = 10
-    data_folder: str = "../data"
+    data_folder: str = "data"
     dataset_name: str = "SVHN"
-    rounds: int = 20#80
-    local_epochs: int = 20
-    batch_size: int = 500#5000
+    rounds: int = 120
+    local_epochs: int = 10
+    batch_size: int = 5000 # 500 for every 10GB
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 43
@@ -33,11 +33,11 @@ class FLConfig:
     mixed_precision: bool = True  # AMP
     compile_mode: str | bool = False  # linux only; False for no compiling
 
-    training_progress_bar: bool = True
+    training_progress_bar: bool = False
     records_dir: str | None = f"records"  # Directory to save records, None to disable
-    dataset_fraction: float = 0.1  # Fraction of dataset to use or None for full dataset
+    dataset_fraction: float = None  # Fraction of dataset to use or None for full dataset
 
-    backend: str = "gloo" # "gloo" or "nccl" for GPU/Linux
+    backend: str = "gloo" # "gloo" only, "nccl" for GPU/Linux and doesn't support cpu
     master_addr: str = "localhost"
     master_port: str = "29500"
 

@@ -87,7 +87,7 @@ def create_dataloader(
         # Testing: use full dataset, no shuffle, larger batch
         return DataLoader(
             dataset,
-            batch_size=cfg.batch_size*4,
+            batch_size=cfg.batch_size,
             shuffle=False,
             pin_memory=(device.type == "cuda"),
             num_workers=0

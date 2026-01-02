@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from prior_calculator import PriorCalculator
 from run_fl import FLConfig
 from utils import create_training_progress_bar
-from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
+from brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
     from cancer_protocol import CancerConfig
