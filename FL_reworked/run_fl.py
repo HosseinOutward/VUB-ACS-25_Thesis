@@ -34,7 +34,7 @@ class FLConfig:
     compile_mode: str | bool = False  # linux only; False for no compiling
 
     training_progress_bar: bool = True
-    records_dir: str | None = None  # Directory to save records, None to disable
+    records_dir: str | None = f"records"  # Directory to save records, None to disable
     dataset_fraction: float = 0.1  # Fraction of dataset to use or None for full dataset
 
     backend: str = "gloo" # "gloo" or "nccl" for GPU/Linux
@@ -97,6 +97,35 @@ if __name__ == "__main__":
     # Initialize configuration
     cfg = FLConfig()
 
+    # Auto-create run folder with incremented number
+    if cfg.records_dir:
+        from pathlib import Path
+        import json
+        base_dir = Path(cfg.records_dir)
+        base_dir.mkdir(exist_ok=True, parents=True)
+
+        # Find next run number
+        run_num = 1
+        while (base_dir / f"run{run_num}").exists():
+            run_num += 1
+
+        run_dir = base_dir / f"run{run_num}"
+        run_dir.mkdir()
+        cfg.records_dir = str(run_dir)
+
+        # Save FL config
+        fl_config_dict = {k: v for k, v in cfg.__dict__.items()}
+        with open(run_dir / "fl_config.json", 'w') as f:
+            json.dump(fl_config_dict, f, indent=2)
+
+        # Save codec config if cancer codec
+        if "cancer" in cfg.codec.lower():
+            from cancer_protocol import CancerConfig
+            c_cfg = CancerConfig()
+            codec_config_dict = {k: v for k, v in c_cfg.__dict__.items()}
+            with open(run_dir / "codec_config.json", 'w') as f:
+                json.dump(codec_config_dict, f, indent=2, default=str)
+
     # Set environment variables for address and port
     os.environ['MASTER_ADDR'] = cfg.master_addr
     os.environ['MASTER_PORT'] = cfg.master_port
@@ -118,3 +147,4 @@ if __name__ == "__main__":
         nprocs=cfg.num_clients + 1,
         join=True
     )
+

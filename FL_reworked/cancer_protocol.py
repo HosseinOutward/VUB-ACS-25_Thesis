@@ -48,10 +48,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 import torch
 
-from FL_reworked.cancer_quantizer import WZQuantizerCancer
-from FL_reworked.codec import IdentityCodec, CompressionRecord, get_obj_size
-from FL_reworked.prior_calculator import PriorCalculator
-from FL_reworked.run_fl import FLConfig
+from cancer_quantizer import WZQuantizerCancer
+from codec import IdentityCodec, CompressionRecord, get_obj_size
+from prior_calculator import PriorCalculator
+from run_fl import FLConfig
 
 
 # ============================================================================

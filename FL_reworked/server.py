@@ -36,6 +36,7 @@ def run_federated_server(
             recalibrate_batchnorm(model, test_loader, device, cfg.bn_recalib_batches)
 
         metrics = evaluate(model, test_loader, device)
+        metric_keys = list(metrics.keys())
         ending_round = (rnd_i == cfg.rounds)
         label = 'Final' if ending_round else f'Start of Round {rnd_i:03d}'
         print(f"[Server] {label} - {format_metrics(metrics)}")
@@ -71,12 +72,17 @@ def run_federated_server(
             delta_vec = torch.zeros(sd_manager.param_count, dtype=torch.float32)
             dist.recv(delta_vec, src=client_rank + 1)
 
+            # Receive worker eval metrics (train + test, dynamically sized)
+            num_metrics = len(metric_keys)
+            worker_metrics_vec = torch.zeros(num_metrics * 2, dtype=torch.float32)
+            dist.recv(worker_metrics_vec, src=client_rank + 1)
+
             # Simulate compression and reconstruct
             # recon_delta_vec = delta_vec
             recon_delta_vec = simulate_compression(
-                codec, delta_vec, rcvd_client_id, rnd_i,
-                eval_metrics=metrics, save_dir=cfg.records_dir,
-                model_size=sd_manager.param_count)
+               codec, delta_vec, rcvd_client_id, rnd_i,
+               model_size=sd_manager.param_count, save_dir=cfg.records_dir, server_eval_metrics=metrics,
+               worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=metric_keys)
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))
 
