@@ -187,7 +187,7 @@ class StateDictManager:
         flat_list = []
         for key in self.keys:
             param = state_dict[key]
-            flat_list.append(param.detach().reshape(-1))
+            flat_list.append(param.cpu().detach().reshape(-1))
         return torch.cat(flat_list, out=None)
 
     def unflatten(self, flat_vector: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
@@ -210,7 +210,7 @@ class StateDictManager:
         return slices
 
     def clone_trainable(self, state_dict: dict) -> OrderedDict[str, torch.Tensor]:
-        return OrderedDict((k, state_dict[k].detach().clone()) for k in self.keys)
+        return OrderedDict((k, state_dict[k].cpu().detach().clone()) for k in self.keys)
 
     def compute_delta(self, new_state: dict, old_state: dict) -> OrderedDict[str, torch.Tensor]:
         return OrderedDict((k, new_state[k] - old_state[k]) for k in self.keys)

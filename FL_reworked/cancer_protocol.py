@@ -64,7 +64,7 @@ class CancerConfig:
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 16, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: Tuple[str] = (('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 5
     max_side_info_count: int = 5
-    pretrain_pth_dir: str = r'../data/pre_trained_pth/' # ignored if train_marginal=True
+    pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
 
     train_epochs: int = 60
     reconst_ld: float = 400.0

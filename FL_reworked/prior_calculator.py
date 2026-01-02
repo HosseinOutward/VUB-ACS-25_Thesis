@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from components.other_utilities.brent_wz_models import EncoderDecoderLayeredRNN
+from brent_wz_models import EncoderDecoderLayeredRNN
 from utils import create_training_progress_bar
 
 class PriorCalculator:
@@ -30,7 +30,7 @@ class PriorCalculator:
         probs_per_plane = []
         for b_vec in bins_vec:
             counts = torch.bincount(b_vec, minlength=bins_per_plane)
-            probs = counts / counts.sum()
+            probs = counts / vec_size
             probs_per_plane.append(probs)
 
         # Broadcast probabilities to all positions: (num_planes, N, bins_per_plane)

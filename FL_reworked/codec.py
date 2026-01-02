@@ -8,7 +8,6 @@ import gzip
 import torch
 import numpy as np
 
-from prior_calculator import PriorCalculator
 from run_fl import FLConfig
 from utils import StateDictManager
 
@@ -192,8 +191,7 @@ class BasicCompressionCodec(IdentityCodec):
         return delta_fp16
     
     def _decompress(self, payload_content: bytes, record: CompressionRecord) -> torch.Tensor:
-        decompressed = decompress_data_list(payload_content)
-        return decompressed.to(torch.float32)
+        return torch.tensor(payload_content, dtype=torch.float16).to(torch.float32)
 
 
 def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
