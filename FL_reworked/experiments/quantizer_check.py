@@ -21,10 +21,11 @@ from FL_reworked.run_fl import FLConfig
 # ============== CONFIG ==============
 NUM_REPEATS = 5
 DATA_SIZE = 10_000_000
-NOISE_POWER = 0.1
-# (round_type, bins_per_plane, num_planes) - M=marginal, R=with side info
-CONFIGS = [('R', 4, 2),('R', 4, 3),('R', 8, 3),('M', 8, 3), ('R', 16, 2), ('R', 32, 3),]
-CONFIGS = []
+NOISE_POWER = 0.01
+# (round_type, bins_per_plane, num_planes) - M=marginal, T=with side info
+CONFIGS = [('T', 4, 2),('T', 4, 3),('T', 8, 3), ('T', 16, 2), ('T', 32, 3),]
+CONFIGS = [('M', 4, 2),('M', 8, 3)]
+# CONFIGS = []
 # ====================================
 
 def run_experiments(out_path: Path):
@@ -56,7 +57,7 @@ def run_experiments(out_path: Path):
             codec.c_cfg = c_cfg
             codec.c_cfg.warmup_phase = ((round_type, bpp, np_),)
 
-            if round_type == 'R':
+            if round_type != 'M':
                 codec.client_past_reconst[0] = [base.clone().to(torch.float16)]
 
             # Run compression
@@ -100,6 +101,7 @@ def plot_results(csv_path: Path):
     mse_range = np.linspace(1e-6, cond_var * 0.999, 500)
     bound_rate = 0.5 * np.log2(cond_var / mse_range)
     bound_dist = 10 * np.log10(mse_range)
+    ptp_bound = 0.5 * np.log2((1+NOISE_POWER) / mse_range)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     axes = axes.flatten()
@@ -111,6 +113,7 @@ def plot_results(csv_path: Path):
     for ax, rate_attr, title in zip(axes[:3], rate_attrs, titles):
         ax.plot(bound_rate, bound_dist, 'k-', lw=2, label='WZ Bound')
         ax.plot(bound_rate, bound_dist + 1.53, 'k:', lw=2, label='+ Lattice')
+        ax.plot(ptp_bound, bound_dist, 'g--', lw=1, label='PTP Bound')
 
         for r in records:
             rate = r[rate_attr]
@@ -130,6 +133,7 @@ def plot_results(csv_path: Path):
     ax_all = axes[3]
     ax_all.plot(bound_rate, bound_dist, 'k-', lw=2, label='WZ Bound')
     ax_all.plot(bound_rate, bound_dist + 1.53, 'k:', lw=2, label='+ Lattice')
+    ax_all.plot(ptp_bound, bound_dist, 'g--', lw=1, label='PTP Bound')
 
     markers = {'prior_rate': 'o', 'marginal_rate': 's', 'entropy_real_rate': '^'}
     for r in records:
