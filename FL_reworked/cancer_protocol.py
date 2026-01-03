@@ -151,7 +151,7 @@ class CancerCodec(IdentityCodec):
         elif round_type == 'M': # Marginal
             train_si, target_x = None, delta_vec
 
-        elif round_type == 'T': # Temporal
+        elif round_type == 'R': # Retrain
             train_si = [item
                         for cid, reconst_list in enumerate(self.srvr_past_reconst)
                         for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
@@ -159,8 +159,10 @@ class CancerCodec(IdentityCodec):
             assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,
                                         self.c_cfg.max_side_info_count * self.num_clients - 1)
 
-        elif round_type == 'R': # Retrain
-            train_si = [item for reconst_list in self.client_past_reconst for item in reconst_list]
+        elif round_type == 'T': # Temporal
+            train_si = [item
+                        for reconst_list in self.client_past_reconst
+                        for item in reconst_list]
             target_x = delta_vec
 
         else:
