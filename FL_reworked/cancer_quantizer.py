@@ -52,7 +52,8 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
 class WZQuantizerCancer:
     def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int,
                  bins_per_plane: int, si_size: int, vec_slices: List[slice] = None,
-                 enable_outlier_handling: bool = False, outlier_threshold: float = 1.6) -> None:
+                 enable_outlier_handling: bool = False, outlier_threshold: float = 1.6,
+                 force_marginal_loss=False) -> None:
         self.si_vec_size: Optional[int] = None
         self.c_cfg: 'CancerConfig' = c_cfg
         self.fl_cfg: FLConfig = fl_cfg
@@ -65,7 +66,7 @@ class WZQuantizerCancer:
         self.coding_model: EncoderDecoderLayeredRNN = EncoderDecoderLayeredRNN(
             num_planes=num_planes, bins_per_plane=bins_per_plane,
             side_info_size=max(1, si_size), input_dim=1,
-            layers=3, hidden_dim=100, marginal=(si_size==0))
+            layers=3, hidden_dim=100, marginal=(si_size==0) or force_marginal_loss,)
 
         self.side_info_list_used: List[torch.Tensor] | str | None
         if si_size==0:
@@ -134,8 +135,8 @@ class WZQuantizerCancer:
         if self.side_info_list_used in [[], 'P']:
             self.side_info_list_used = [torch.zeros(self.si_vec_size)]
 
-        # si_trans = [self._apply_pre_process(si, False)[0] for si in self.side_info_list_used]
-        si_trans = self.side_info_list_used
+        si_trans = [self._apply_pre_process(si, False)[0] for si in self.side_info_list_used]
+        # si_trans = self.side_info_list_used
 
         si_trans = torch.stack(si_trans).cuda().T.to(torch.float32).contiguous()
         return si_trans

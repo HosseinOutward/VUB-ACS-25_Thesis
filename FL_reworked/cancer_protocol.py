@@ -144,6 +144,12 @@ class CancerCodec(IdentityCodec):
         round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
         client_idx = record.client_id
 
+        force_marginal_loss = False
+        if len(round_type) != 1:
+            assert round_type[1] == "M" and round_type[0] in ['T', 'R']
+            force_marginal_loss = True
+            round_type = round_type[0]
+
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
             train_si, target_x = None, None
@@ -171,7 +177,7 @@ class CancerCodec(IdentityCodec):
         # Create a new quantizer instance
         quantizer = self.get_new_quantizer(
             c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-            si_size=len(train_si) if train_si is not None else 0,)
+            si_size=len(train_si) if train_si is not None else 0, force_marginal_loss=force_marginal_loss)
 
         # Load pretrained weights or train the model
         if round_type != 'P':
