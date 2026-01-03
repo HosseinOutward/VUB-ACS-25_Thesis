@@ -23,9 +23,9 @@ NUM_REPEATS = 5
 DATA_SIZE = 10_000_000
 NOISE_POWER = 0.01
 # (round_type, bins_per_plane, num_planes) - M=marginal, T=with side info
-CONFIGS = [('T', 4, 2),('T', 4, 3),('T', 8, 3), ('T', 16, 2), ('T', 32, 3),]
-CONFIGS = [('M', 4, 2),('M', 8, 3)]
-# CONFIGS = []
+CONFIGS = []
+CONFIGS += [('T', 4, 2),('T', 4, 3),('T', 8, 3), ('T', 16, 2), ('T', 32, 3),]
+CONFIGS += [('TM', 4, 2),('TM', 8, 3)]
 # ====================================
 
 def run_experiments(out_path: Path):
@@ -57,8 +57,7 @@ def run_experiments(out_path: Path):
             codec.c_cfg = c_cfg
             codec.c_cfg.warmup_phase = ((round_type, bpp, np_),)
 
-            if round_type != 'M':
-                codec.client_past_reconst[0] = [base.clone().to(torch.float16)]
+            codec.client_past_reconst[0] = [base.clone().to(torch.float16)]
 
             # Run compression
             record = codec.create_record(round_id=0, client_id=0)
