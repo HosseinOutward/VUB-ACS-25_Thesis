@@ -89,7 +89,6 @@ class Resnet18FLModelTemplate(FLModelTemplate):
         return loss
 
 
-
 def initialize_model(cfg, device: torch.device) -> FLModelTemplate:
     """Initialize model with optimizations."""
     model = Resnet18FLModelTemplate(cfg)
