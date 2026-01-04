@@ -1,3 +1,4 @@
+import argparse
 import os
 from dataclasses import dataclass
 import torch
@@ -8,15 +9,16 @@ import torch.distributed as dist
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    codec: str = "cancer_only_normalize" # "identity", "basic", "cancer", "cancer_raw", "cancer_only_normalize"
+    # Codec to use: identity, basic, cancer_binary, cancer, cancer_with_outlier_handling, cancer_raw
+    codec: str = "identity"
 
     num_clients: int = 5
     num_loader_workers: int = 2
     num_classes: int = 10
     data_folder: str = "data"
     dataset_name: str = "SVHN"
-    rounds: int = 120
-    local_epochs: int = 10
+    rounds: int = 80
+    local_epochs: int = 5
     batch_size: int = 5000 # 500 for every 10GB
     lr: float = 1e-3
     weight_decay: float = 1e-4
@@ -87,15 +89,18 @@ def _worker(
 
 
 if __name__ == "__main__":
-    # ap = argparse.ArgumentParser()
-    # ap.add_argument("--codec", type=str, default=def_cfg.codec, choices=["identity"])
-    # args = ap.parse_args()
-    # cfg = FLConfig(
-    #     codec=args.codec,
-    # )
-
-    # Initialize configuration
     cfg = FLConfig()
+    choices = ['identity', 'basic', 'cancer_binary' , 'cancer',  'cancer_with_outlier_handling', 'cancer_raw']
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--codec", type=str,
+                    default=cfg.codec, choices=choices)
+    ap.add_argument("--master-port",  type=str,
+                    default=cfg.master_port, help="Port for master node communication")
+    args = ap.parse_args()
+    cfg = FLConfig(
+        codec=args.codec,
+        master_port = args.master_port
+    )
 
     # Auto-create run folder with incremented number
     if cfg.records_dir:

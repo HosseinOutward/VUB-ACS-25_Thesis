@@ -341,21 +341,20 @@ class WZQuantizerCancer:
         data_hash_str = PriorCalculator.get_hash(x_raw)
         hash_exists = data_hash_str in self.cached_priors_dict
         use_coding_model = hash_exists and self.cached_priors_dict[data_hash_str][0] == 'flag_no_retrain'
+
+        # comment out to force training prior model every time
         if hash_exists and not use_coding_model:
             return self.cached_priors_dict[data_hash_str]
 
         bins_vec = self.encoding_process(x_raw)[0] if bins_vec_save_compute is None else bins_vec_save_compute
 
-        if self.no_si:
-            prior = PriorCalculator.compute_marginal_prior(bins_vec, self.bins_per_plane, self.num_planes)
-        else:
-            si_trans = self.get_si_data()
-            q_model = self.coding_model
-            if not use_coding_model:
-                q_model = PriorCalculator.train_prior_model(
-                    bins_vec, si_trans, self.num_planes, self.bins_per_plane,)
+        si_trans = self.get_si_data()
+        q_model = self.coding_model
+        if not use_coding_model:
+            q_model = PriorCalculator.train_prior_model(
+                bins_vec, si_trans, self.num_planes, self.bins_per_plane,)
 
-            prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
+        prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
 
         self.cached_priors_dict[data_hash_str] = prior.to(torch.float16)
         return self.cached_priors_dict[data_hash_str]
