@@ -8,24 +8,21 @@ from pathlib import Path
 import sys
 
 # Add project root to path (works both in PyCharm and terminal)
-script_dir = Path(__file__).resolve().parent
-project_root = script_dir.parent
-sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from FL_reworked.codec import create_codec
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from FL_reworked.cancer_protocol import CancerCodec, CancerConfig
 from FL_reworked.run_fl import FLConfig
 
 # ============== CONFIG ==============
-NUM_REPEATS = 5
-DATA_SIZE = 10_000_000
-NOISE_POWER = 0.01
-# (round_type, bins_per_plane, num_planes) - M=marginal, T=with side info
+NUM_REPEATS = 2
+DATA_SIZE = 2_000_000
+NOISE_POWER = 0.1
+# (round_type, bins_per_plane, num_planes) - M=marginal, T=with side info, TM=with side info + marginal prior
 CONFIGS = []
-CONFIGS += [('T', 4, 2),('T', 4, 3),('T', 8, 3), ('T', 16, 2), ('T', 32, 3),]
-CONFIGS += [('TM', 4, 2),('TM', 8, 3)]
+# CONFIGS += [('T', 4, 2),('T', 4, 3),('T', 16, 2),]
+# CONFIGS += [('TM', 4, 2),('TM', 4, 3),]
 # ====================================
 
 def run_experiments(out_path: Path):
@@ -34,11 +31,10 @@ def run_experiments(out_path: Path):
     csv_path = out_path / "quantizer_check.csv"
 
     c_cfg = CancerConfig()
-    c_cfg.train_epochs = 40
-    c_cfg.train_sample_size = min(200_000, int(DATA_SIZE * 0.8))
 
     fl_cfg = FLConfig(num_clients=1, training_progress_bar=True, compile_mode=False)
-    fl_cfg.codec='cancer'
+    # "identity", "basic", "cancer", "cancer_raw", "cancer_only_normalize"
+    fl_cfg.codec='cancer_only_normalize'
 
     first_write = True
     for round_type, bpp, np_ in CONFIGS:
@@ -61,6 +57,7 @@ def run_experiments(out_path: Path):
 
             # Run compression
             record = codec.create_record(round_id=0, client_id=0)
+            record.method = fl_cfg.codec
             record.model_size = DATA_SIZE
             compressed = codec.encode(y, record)
             _ = codec.decode(compressed, record)
@@ -91,11 +88,86 @@ def load_records(csv_path: Path):
                  for k, v in row.items()} for row in reader]
 
 
+def plot_bounds(ax, bound_rate, bound_dist, ptp_bound):
+    """Helper to plot theoretical bounds."""
+    ax.plot(bound_rate, bound_dist, 'k-', lw=2, label='WZ Bound')
+    ax.plot(bound_rate, bound_dist + 1.53, 'k:', lw=2, label='+ Lattice')
+    ax.plot(ptp_bound, bound_dist, 'g--', lw=1, label='PTP Bound')
+
+
+def setup_axis(ax, title=None):
+    """Configure axis with common settings."""
+    ax.set_xlabel('Rate (bits/symbol)')
+    ax.set_ylabel('Distortion (dB)')
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-0.1, 8)
+    ax.set_ylim(-30, -10)
+    if title:
+        ax.set_title(title)
+
+
+def plot_scatter(ax, records, rate_attrs, rate_styles=None, combined=False):
+    """Plot scatter points with appropriate styling."""
+    rate_attrs = [rate_attrs] if isinstance(rate_attrs, str) else rate_attrs
+
+    for r in records:
+        mse_db = 10 * np.log10(r['mse'])
+        is_marginal = 'M' in r['round_type']
+
+        for rate_attr in rate_attrs:
+            rate = r[rate_attr]
+
+            if combined and rate_styles:
+                # Combined plot: distinct markers per rate type
+                style = rate_styles[rate_attr]
+                fill_color = 'darkred' if is_marginal else 'darkblue'
+                edge_color = 'orangered' if is_marginal else 'navy'
+                is_filled = (rate_attr == 'prior_rate')
+
+                ax.scatter(rate, mse_db, marker=style['marker'], s=style['size'],
+                          facecolors=fill_color if is_filled else 'none',
+                          edgecolors=edge_color, linewidths=style['edge_width'],
+                          alpha=0.8 if is_filled else 0.9, zorder=3)
+            else:
+                # Simple plot: basic markers
+                color, marker = ('red', 'x') if is_marginal else ('blue', 'o')
+                ax.scatter(rate, mse_db, c=color, marker=marker, s=50, alpha=0.7)
+
+
+def create_legend(ax, combined=False):
+    """Create legend with appropriate entries."""
+    base_handles = [
+        Line2D([0], [0], color='k', lw=2, label='WZ Bound'),
+        Line2D([0], [0], color='k', lw=2, ls=':', label='+ Lattice'),
+    ]
+
+    if combined:
+        base_handles += [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='darkblue',
+                   markeredgecolor='navy', markeredgewidth=2, ms=10, label='With SI (R)', ls=''),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred',
+                   markeredgecolor='orangered', markeredgewidth=2, ms=10, label='Marginal (M)', ls=''),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray',
+                   markeredgecolor='gray', markeredgewidth=2, ms=9, label='Prior Rate', ls=''),
+            Line2D([0], [0], marker='s', color='w', markerfacecolor='none',
+                   markeredgecolor='gray', markeredgewidth=2, ms=8, label='Marginal Rate', ls=''),
+            Line2D([0], [0], marker='^', color='w', markerfacecolor='none',
+                   markeredgecolor='gray', markeredgewidth=2, ms=9, label='Real Rate', ls='')
+        ]
+    else:
+        base_handles += [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', ms=8, label='With SI (R)'),
+            Line2D([0], [0], marker='x', color='red', ms=8, ls='', label='Marginal (M)'),
+        ]
+
+    ax.legend(handles=base_handles, fontsize=8 if not combined else 9, loc='best')
+
+
 def plot_results(csv_path: Path):
     """Plot rate-distortion curves."""
     records = load_records(csv_path)
 
-    # WZ bound
+    # Calculate WZ bounds
     cond_var = NOISE_POWER / (NOISE_POWER + 1.0)
     mse_range = np.linspace(1e-6, cond_var * 0.999, 500)
     bound_rate = 0.5 * np.log2(cond_var / mse_range)
@@ -110,66 +182,23 @@ def plot_results(csv_path: Path):
 
     # Plot individual rate types
     for ax, rate_attr, title in zip(axes[:3], rate_attrs, titles):
-        ax.plot(bound_rate, bound_dist, 'k-', lw=2, label='WZ Bound')
-        ax.plot(bound_rate, bound_dist + 1.53, 'k:', lw=2, label='+ Lattice')
-        ax.plot(ptp_bound, bound_dist, 'g--', lw=1, label='PTP Bound')
+        plot_bounds(ax, bound_rate, bound_dist, ptp_bound)
+        plot_scatter(ax, records, rate_attr)
+        setup_axis(ax, title)
 
-        for r in records:
-            rate = r[rate_attr]
-            mse_db = 10 * np.log10(r['mse'])
-            is_marginal = r['round_type'] == 'M'
-            color, marker = ('red', 'x') if is_marginal else ('blue', 'o')
-            ax.scatter(rate, mse_db, c=color, marker=marker, s=40, alpha=0.6)
+    # Combined plot with distinct markers
+    rate_styles = {
+        'prior_rate': {'marker': 'o', 'size': 100, 'edge_width': 2},
+        'marginal_rate': {'marker': 's', 'size': 80, 'edge_width': 2},
+        'entropy_real_rate': {'marker': '^', 'size': 90, 'edge_width': 2}
+    }
 
-        ax.set_xlabel('Rate (bits/symbol)')
-        ax.set_ylabel('Distortion (dB)')
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(-0.1, 12)
-        ax.set_ylim(-30, 12)
+    plot_bounds(axes[3], bound_rate, bound_dist, ptp_bound)
+    plot_scatter(axes[3], records, rate_attrs, rate_styles, combined=True)
+    setup_axis(axes[3], 'All Rates Combined')
 
-    # Combined plot
-    ax_all = axes[3]
-    ax_all.plot(bound_rate, bound_dist, 'k-', lw=2, label='WZ Bound')
-    ax_all.plot(bound_rate, bound_dist + 1.53, 'k:', lw=2, label='+ Lattice')
-    ax_all.plot(ptp_bound, bound_dist, 'g--', lw=1, label='PTP Bound')
-
-    markers = {'prior_rate': 'o', 'marginal_rate': 's', 'entropy_real_rate': '^'}
-    for r in records:
-        mse_db = 10 * np.log10(r['mse'])
-        is_marginal = r['round_type'] == 'M'
-        color = 'red' if is_marginal else 'blue'
-
-        for rate_attr in rate_attrs:
-            rate = r[rate_attr]
-            facecolor = color if rate_attr == 'prior_rate' else 'none'
-            ax_all.scatter(rate, mse_db, c=color, marker=markers[rate_attr],
-                          s=40, alpha=0.6, facecolors=facecolor)
-
-    ax_all.set_title('All Rates Combined')
-    ax_all.set_xlabel('Rate (bits/symbol)')
-    ax_all.set_ylabel('Distortion (dB)')
-    ax_all.grid(True, alpha=0.3)
-    ax_all.set_xlim(-0.1, 12)
-    ax_all.set_ylim(-30, 12)
-
-    # Legends
-    axes[0].legend(handles=[
-        Line2D([0], [0], color='k', lw=2, label='WZ Bound'),
-        Line2D([0], [0], color='k', lw=2, ls=':', label='+ Lattice'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', ms=8, label='With SI (R)'),
-        Line2D([0], [0], marker='x', color='red', ms=8, ls='', label='Marginal (M)'),
-    ], fontsize=8)
-
-    ax_all.legend(handles=[
-        Line2D([0], [0], color='k', lw=2, label='WZ Bound'),
-        Line2D([0], [0], color='k', lw=2, ls=':', label='+ Lattice'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', ms=8, label='With SI (R)'),
-        Line2D([0], [0], marker='x', color='red', ms=8, ls='', label='Marginal (M)'),
-        Line2D([0], [0], marker='o', color='gray', ms=6, ls='', label='Prior Rate'),
-        Line2D([0], [0], marker='s', color='gray', ms=6, ls='', label='Marginal Rate', fillstyle='none'),
-        Line2D([0], [0], marker='^', color='gray', ms=6, ls='', label='Real Rate', fillstyle='none')
-    ], fontsize=8)
+    create_legend(axes[0])
+    create_legend(axes[3], combined=True)
 
     plt.tight_layout()
     plt.show()

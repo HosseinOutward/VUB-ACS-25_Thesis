@@ -63,16 +63,20 @@ class CancerConfig:
     # Phase info, (phase type, bins per plane (not bits), num planes)
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 16, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: Tuple[str] = (('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 5
+
+    # warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 16, 3), ('T', 8, 3)) + (('R', 4, 3),) * 2 + (('R', 2, 2),)
+    # routine_phase: Tuple[str] = (('T', 2, 1), ('R', 2, 1)) + (('F', 2, 1),) * 5
+
     max_side_info_count: int = 5
     pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
 
-    train_epochs: int = 60
-    reconst_ld: float = 400.0
+    train_epochs: int = 70
+    reconst_ld: float = 300.0
     train_sample_size: int = 300_000
     lr: float = 1e-3
-    lr_step: int = 40
-    tau_rate: float = 10.0
+    lr_step: int = 35
     tau: float = 1.3
+    tau_rate: float = 10.0
 
 
 class CancerRecord(CompressionRecord):
@@ -107,15 +111,15 @@ class CancerRecord(CompressionRecord):
 # Cancer Codec Implementation
 # ============================================================================
 class CancerCodec(IdentityCodec):
-    def __init__(self, fl_cfg: FLConfig, vec_slices: List[slice] = None, enable_outlier_handling: bool = False):
+    def __init__(self, fl_cfg: FLConfig, quantizer_kwargs=None):
         super().__init__()
+        if quantizer_kwargs is None:
+            quantizer_kwargs = {'norm_slices': False, 'outlier_threshold': False}
+
         self.fl_cfg = fl_cfg
         self.num_clients = fl_cfg.num_clients
         self.c_cfg = CancerConfig()
-
-        # Quantizer preprocessing parameters (passed to quantizers)
-        self.vec_slices = vec_slices
-        self.enable_outlier_handling = enable_outlier_handling
+        self.quantizer_kwargs = quantizer_kwargs
 
         # Per-client reconstruction histories
         self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
@@ -123,10 +127,6 @@ class CancerCodec(IdentityCodec):
 
         # Frozen state for frozen phase
         self.frozen_quantizers: List[Optional[WZQuantizerCancer]] = [None] * self.num_clients
-
-    def get_new_quantizer(self, **kargs) -> WZQuantizerCancer:
-        return WZQuantizerCancer(
-            vec_slices=self.vec_slices, enable_outlier_handling=self.enable_outlier_handling, **kargs)
 
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
@@ -149,6 +149,7 @@ class CancerCodec(IdentityCodec):
             assert round_type[1] == "M" and round_type[0] in ['T', 'R']
             force_marginal_loss = True
             round_type = round_type[0]
+            assert round_type not in ['P', 'M']
 
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
@@ -175,9 +176,10 @@ class CancerCodec(IdentityCodec):
             raise ValueError(f"Invalid round type for training: {round_type}")
 
         # Create a new quantizer instance
-        quantizer = self.get_new_quantizer(
+        quantizer = WZQuantizerCancer(
             c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-            si_size=len(train_si) if train_si is not None else 0, force_marginal_loss=force_marginal_loss)
+            si_size=len(train_si) if train_si is not None else 0,
+            marginal_loss=force_marginal_loss, **self.quantizer_kwargs)
 
         # Load pretrained weights or train the model
         if round_type != 'P':
@@ -266,8 +268,7 @@ if __name__ == "__main__":
     print('Using Cancer codec WITH vec_slices and outlier handling...\n')
     codec = CancerCodec(
         FLConfig(num_clients=num_clients),
-        vec_slices=[slice(i, None, 3) for i in range(3)],
-        enable_outlier_handling=True
+        quantizer_kwargs = {'norm_slices': [slice(i, None, 3) for i in range(3)], 'outlier_threshold': True}
     )
 
     base_vector = torch.normal(0.0, 1.0, size=(vector_size,))

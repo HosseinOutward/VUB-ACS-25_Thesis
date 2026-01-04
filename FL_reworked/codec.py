@@ -39,7 +39,7 @@ def make_seriable(item):
     elif isinstance(item, (int, float, str, bytes)):
         return item
     elif isinstance(item, torch.Tensor):
-        return item.cpu().numpy()
+        return item.cpu()
     elif isinstance(item, OrderedDict):
         return OrderedDict({k: make_seriable(v) for k, v in item.items()})
     elif isinstance(item, Dict):
@@ -190,7 +190,7 @@ class BasicCompressionCodec(IdentityCodec):
         delta_fp16 = delta_vec.to(torch.float16)
         return delta_fp16
     
-    def _decompress(self, payload_content: bytes, record: CompressionRecord) -> torch.Tensor:
+    def _decompress(self, payload_content: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
         return torch.tensor(payload_content, dtype=torch.float16).to(torch.float32)
 
 
@@ -206,13 +206,12 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
         return CancerCodec(fl_cfg)
 
     vec_slice = sd_manager.get_slices() if sd_manager is not None else None
-
     if codec_name == "cancer":
         from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, vec_slices=vec_slice, enable_outlier_handling=True)
+        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.4})
     elif codec_name == "cancer_only_normalize":
         from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, vec_slices=vec_slice)
+        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
