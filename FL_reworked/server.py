@@ -81,7 +81,8 @@ def run_federated_server(
             # recon_delta_vec = delta_vec
             recon_delta_vec = simulate_compression(
                codec, delta_vec, rcvd_client_id, rnd_i,
-               model_size=sd_manager.param_count, save_dir=cfg.records_dir, server_eval_metrics=metrics,
+               model_size=sd_manager.param_count,
+               save_dir=cfg.records_dir, server_eval_metrics=metrics,
                worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=metric_keys)
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))

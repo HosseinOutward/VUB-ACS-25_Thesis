@@ -69,7 +69,9 @@ class Resnet18FLModelTemplate(FLModelTemplate):
     def configure_optimizer(self, device: torch.device) -> optim.Optimizer:
         """Configure optimizer."""
         fused = self.cfg.fused_optimizer
-        return optim.AdamW(self.parameters(), lr=self.cfg.lr, weight_decay=self.cfg.weight_decay, fused=fused)
+        # Add momentum to stabilize federated learning
+        return optim.SGD(self.parameters(), lr=self.cfg.lr,
+                         weight_decay=self.cfg.weight_decay, fused=fused)
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], device: torch.device, cfg) -> torch.Tensor:
         """Single training step."""

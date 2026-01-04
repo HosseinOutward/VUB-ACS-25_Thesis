@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 import torch
 import torch.distributed as dist
 
@@ -50,6 +51,9 @@ def run_federated_client(
         vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
         dist.broadcast(vec_srvr_sd, src=0)
         model.load_state_dict(sd_manager.unflatten(vec_srvr_sd), strict=False)
+
+        # Reset optimizer state after loading new parameters from server (optional)
+        # optimizer.state = defaultdict(dict)
 
         if cfg.recalibrate_bn:
             recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)

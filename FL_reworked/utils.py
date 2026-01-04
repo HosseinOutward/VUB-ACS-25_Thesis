@@ -8,7 +8,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from models import FLModelTemplate, initialize_model
 from dataset import create_dataloader
@@ -24,13 +24,16 @@ def create_training_progress_bar(
     common_config = {
         'disable': disable,
         'desc': desc,
-        'file': sys.stderr,  # PyCharm handles stderr better for dynamic updates
-        'bar_format': '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}',
         'leave': leave,
         'position': position
     }
 
-    # Check if we got a total (int) or an iterable
+    try:
+        ipython = get_ipython()  # type: ignore
+    except NameError:
+        common_config['file'] = sys.stderr
+        common_config['bar_format'] = '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}'
+
     return tqdm(total=iterable_or_total, **common_config)
 
 

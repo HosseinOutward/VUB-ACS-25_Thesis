@@ -78,7 +78,7 @@ class CompressionRecord:
     def __init__(self, round_id: int, client_id: int, method: str = "identity"):
         self.round_id: int = round_id
         self.client_id: int = client_id
-        self.method = method
+        self.codec_class_used:str = method
         self.compressed_bytes: Optional[int] = None
         self.basic_raw_bytes: Optional[int] = None
         self.compression_ratio: Optional[float] = None
@@ -95,7 +95,7 @@ class CompressionRecord:
         result = {
             'round_id': self.round_id,
             'client_id': self.client_id,
-            'method': self.method,
+            'codec_class_used': self.codec_class_used,
             'compressed_bytes': self.compressed_bytes,
             'basic_raw_bytes': self.basic_raw_bytes,
             'compression_ratio': self.compression_ratio,
@@ -206,12 +206,15 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
         return CancerCodec(fl_cfg)
 
     vec_slice = sd_manager.get_slices() if sd_manager is not None else None
-    if codec_name == "cancer":
+    if codec_name == "cancer_with_outlier_handling":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.4})
-    elif codec_name == "cancer_only_normalize":
+    elif codec_name == "cancer":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
+    elif codec_name == "cancer_binary":
+        from cancer_protocol import CancerCodec
+        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice}, binary_prot=True)
     else:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 

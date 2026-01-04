@@ -11,8 +11,11 @@ class PriorCalculator:
     def compute_rate_from_prior_tensor(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> float:
         """Compute rate from prior probabilities for given bins."""
         n_samples = bins.shape[1]
+        # Convert to float32 and clamp to avoid log(0) issues from float16 rounding
+        prior = prior.float()
+        min_prob = 1e-8  # Safe minimum for float32
         return sum(
-            -torch.log2(prior[i, torch.arange(n_samples), bins[i].long()] + 1e-10).mean().item()
+            -torch.log2(prior[i, torch.arange(n_samples), bins[i].long()].clamp(min=min_prob)).mean().item()
             for i in range(num_planes)
         )
 
@@ -29,16 +32,16 @@ class PriorCalculator:
         vec_size = bins_vec.size(1)
         probs_per_plane = []
         for b_vec in bins_vec:
-            counts = torch.bincount(b_vec, minlength=bins_per_plane)
+            counts = torch.bincount(b_vec.long(), minlength=bins_per_plane).float()
             probs = counts / vec_size
             probs_per_plane.append(probs)
 
         # Broadcast probabilities to all positions: (num_planes, N, bins_per_plane)
-        probs_array = torch.stack(probs_per_plane).to(torch.float16)  # (num_planes, bins_per_plane)
+        probs_array = torch.stack(probs_per_plane)  # (num_planes, bins_per_plane)
         prior = torch.broadcast_to(
             probs_array[:, torch.newaxis, :],
             (num_planes, vec_size, bins_per_plane)
-        )
+        ).to(torch.float16)
 
         return prior
 
@@ -66,12 +69,6 @@ class PriorCalculator:
 
         priors = WZQuantizerCancer._batch_loop(func, q_model, bins_vec.size(1), batch_size, training_mode)
 
-        # Add small epsilon to actual bins and renormalize
-        if not training_mode:
-            for i in range(priors.shape[0]):
-                priors[i, torch.arange(priors.shape[1]), bins_vec[i]] += 1e-6
-                priors[i] /= priors[i].sum(dim=-1, keepdim=True)
-
         return priors
 
     @staticmethod
@@ -98,6 +95,8 @@ class PriorCalculator:
         pbar = create_training_progress_bar(
             c_cfg.train_epochs * num_batches,
             desc="Prior Model")
+
+        epoch_loss: float = 0.0
         for epoch in range(c_cfg.train_epochs):
             indices = torch.randint(0, vec_size, (total_samples,), dtype=torch.long)
             bins_subset, si_subset = bins_vec[:, indices], side_info[indices]
@@ -112,10 +111,12 @@ class PriorCalculator:
                 training_prog = epoch / (c_cfg.train_epochs + 1)
                 tau = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
-                # Get prior predictions
-                prior_batch = PriorCalculator._compute_prior_from_network(
-                    prior_model, bins_batch, si_batch,
-                    training_tau=tau, batch_size=batch_size)
+                codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
+                            for b in bins_vec[:, start_i:end_i]]
+                side_info_batch = side_info[start_i:end_i].cuda()
+
+                prior_batch = prior_model.get_priors(codes=codes, y=side_info_batch, tau=tau)
+                prior_batch = torch.stack(prior_batch)
 
                 # Move to GPU for loss computation
                 prior_batch = prior_batch.cuda()
@@ -138,10 +139,9 @@ class PriorCalculator:
                 pbar.set_postfix({'loss': f'{loss.item():.4f}'})
                 pbar.update(1)
 
-
         pbar.close()
 
         prior_model.cpu().eval()
         torch.cuda.empty_cache()
 
-        return prior_model
+        return prior_model, epoch_loss if return_loss else prior_model

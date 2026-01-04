@@ -45,7 +45,7 @@ All communication uses `torch.distributed` primitives:
 
 ### Compute
 - **Automatic Mixed Precision (AMP)**: Enabled on CUDA devices
-- **Fused optimizers**: Uses fused AdamW on CUDA
+- **Fused optimizers**: Uses fused Adam on CUDA
 - **TF32**: Enabled on Ampere+ GPUs
 - **Pin memory**: Faster CPU→GPU transfers
 - **Persistent workers**: DataLoader workers stay alive across epochs
