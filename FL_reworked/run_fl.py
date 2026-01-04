@@ -8,7 +8,7 @@ import torch.distributed as dist
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    codec: str = "cancer" # "identity", "basic", "cancer", "cancer_raw", "cancer_only_normalize"
+    codec: str = "cancer_only_normalize" # "identity", "basic", "cancer", "cancer_raw", "cancer_only_normalize"
 
     num_clients: int = 5
     num_loader_workers: int = 2
