@@ -19,7 +19,8 @@ class FLConfig:
     dataset_name: str = "SVHN"
     rounds: int = 80
     local_epochs: int = 5
-    batch_size: int = 5000 # 500 for every 10GB
+    batch_size: int = 1000 # 500 for every 10GB
+    single_batch_accum_grad_steps: int = 1 # chop down the above batch into smaller pieces and combine grads.
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 43

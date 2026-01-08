@@ -74,10 +74,8 @@ class WZQuantizerCancer:
 
         self.no_si: bool = (si_size == 0)
         marginal_loss = marginal_loss or self.no_si
-        self.coding_model: EncoderDecoderLayeredRNN = EncoderDecoderLayeredRNN(
-            num_planes=num_planes, bins_per_plane=bins_per_plane,
-            side_info_size=max(1, si_size), input_dim=1,
-            layers=3, hidden_dim=100, marginal=marginal_loss,)
+        self.coding_model: EncoderDecoderLayeredRNN = self.get_new_RNN_model(
+            num_planes, bins_per_plane, si_size, marginal_loss)
 
         # default assume that its pretrained marginal model if si_size==0 unless trained otherwise
         self.side_info_list_used: List[torch.Tensor] | str | None
@@ -99,19 +97,28 @@ class WZQuantizerCancer:
     def bin_count(self) -> int:
         return self.coding_model.bin_count
 
-    def compute_loss(self, x_vec: torch.Tensor, side_info: torch.Tensor, current_epoch: int) -> torch.Tensor:
-        training_prog = current_epoch / (self.c_cfg.train_epochs + 1)
-        tau_t = self.c_cfg.tau * np.exp(training_prog * np.log(0.1 / self.c_cfg.tau))
+    @staticmethod
+    def get_new_RNN_model(num_planes, bins_per_plane, si_size, marginal_loss, ) -> EncoderDecoderLayeredRNN:
+        return EncoderDecoderLayeredRNN(
+            num_planes=num_planes, bins_per_plane=bins_per_plane,
+            side_info_size=max(1, si_size), input_dim=1,
+            layers=3, hidden_dim=100, marginal=marginal_loss,)
+
+    @staticmethod
+    def compute_loss(rnn_model, x_vec: torch.Tensor, side_info: torch.Tensor,
+                     current_epoch: int, c_cfg, num_planes, mspe_denom) -> torch.Tensor:
+        training_prog = current_epoch / (c_cfg.train_epochs + 1)
+        tau_t = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
         reconstruct, bins_no, soft_codes, prior_probs = \
-            self.coding_model.forward(x_vec, side_info, tau=tau_t)
+            rnn_model.forward(x_vec, side_info, tau=tau_t)
 
         loss = 0.0
-        pu_vec = [None for _ in range(self.num_planes)]
-        for i in range(self.num_planes):
+        pu_vec = [None for _ in range(num_planes)]
+        for i in range(num_planes):
             # reconstruction component of the loss
-            dist = F.mse_loss(reconstruct[i]/self.mspe_denom, x_vec/self.mspe_denom)
-            loss = loss + self.c_cfg.reconst_ld * dist
+            dist = F.mse_loss(reconstruct[i]/mspe_denom, x_vec/mspe_denom)
+            loss = loss + c_cfg.reconst_ld * dist
 
             # rate component of the loss
             temp = torch.arange(soft_codes[i].size(0))
@@ -120,12 +127,12 @@ class WZQuantizerCancer:
             pu_vec[i] = p_u.detach()
             rate_loss = torch.mean(torch.log((p_ux + 1e-12) / (p_u + 1e-12)))
 
-            # rate_weight = lambda x: (((x - 1) + np.exp(x * np.log(abs(self.c_cfg.tau_rate))))
-            #                          / abs(self.c_cfg.tau_rate) * 1.25)
-            # rate_weight = rate_weight(training_prog) if self.c_cfg.tau_rate <= 0 else 1 - rate_weight(1 - training_prog)
+            # rate_weight = lambda x: (((x - 1) + np.exp(x * np.log(abs(c_cfg.tau_rate))))
+            #                          / abs(c_cfg.tau_rate) * 1.25)
+            # rate_weight = rate_weight(training_prog) if c_cfg.tau_rate <= 0 else 1 - rate_weight(1 - training_prog)
 
             loss = loss + rate_loss #* max(rate_weight, 0.2)
-        loss = loss / self.num_planes
+        loss = loss / num_planes
 
         return loss
 
@@ -138,7 +145,7 @@ class WZQuantizerCancer:
         x_prep = x_prep.cuda().unsqueeze(1).to(torch.float32).contiguous()
 
         if self.vec_slices is False:
-            assert norm_factors == [1], "norm_factors should be [1] when vec_slices is False."
+            assert norm_factors.tolist() == [[1, 0]], "norm_factors should be [[1, 0]] when vec_slices is False."
         if self.outlier_threshold is False:
             assert outlier_param[0].size == 0, "No outliers should be detected when outlier_threshold is False."
 
@@ -171,51 +178,70 @@ class WZQuantizerCancer:
         self.mspe_denom: float = x_raw.abs().mean().item()/2 + 1e-8
         x_prep, _ = self.get_x_data(x_raw)
         si_trans = self.get_si_data()
-        self._train_model(x_prep, si_trans, batch_size)
+
+        # Train the model multiple times to avoid bad local minima
+        max_attempts = self.c_cfg.quantizer_train_repeats
+        num_planes, bins_per_plane, marginal_loss = \
+            self.coding_model.num_planes, self.coding_model.bins_per_plane, self.coding_model.marginal
+        model_list:List[EncoderDecoderLayeredRNN] = [
+            self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
+            for _ in range(max_attempts)
+        ]
+        model_losses:List[float] = [
+            self._train_model_single_attempt(
+                m, x_prep, si_trans, self.fl_cfg, self.c_cfg,
+                num_planes, self.mspe_denom, batch_size, return_loss=True)
+            for m in model_list
+        ]
+        best_idx = int(np.argmin(model_losses))
+        self.coding_model = model_list[best_idx]
 
         # Mark this x_prep as related to the current model to avoid retraining prior models
         self.cached_priors_dict[PriorCalculator.get_hash(x_raw)] = np.array(['flag_no_retrain'])
 
-
-    def _train_model(self, x_prep: torch.Tensor, si_trans: torch.Tensor, batch_size: int = 50_000) -> None:
+    @staticmethod
+    def _train_model_single_attempt(
+            rnn_model:EncoderDecoderLayeredRNN, x_prep: torch.Tensor, si_trans: torch.Tensor,
+            fl_cfg: FLConfig, c_cfg: 'CancerConfig', num_planes:int, mspe_denom:float, batch_size: int = 50_000,
+            return_loss=False) -> float|None:
         # Enable TF32 for faster matmul on Ampere+ GPUs
-        if self.fl_cfg.tf32:
+        if fl_cfg.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
         # Use fused AdamW for better performance
-        optimizer = torch.optim.AdamW(self.coding_model.parameters(), fused=self.fl_cfg.fused_optimizer,
-                                      lr=self.c_cfg.lr, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(rnn_model.parameters(), fused=fl_cfg.fused_optimizer,
+                                      lr=c_cfg.lr, weight_decay=1e-4)
 
         scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, step_size=int(self.c_cfg.train_epochs*np.ceil(self.c_cfg.lr_step/180)), gamma=0.3)
+            optimizer, step_size=int(c_cfg.train_epochs*np.ceil(c_cfg.lr_step/180)), gamma=0.3)
 
         train_dataset = torch.utils.data.TensorDataset(x_prep, si_trans)
 
-        self.coding_model.cuda()
+        rnn_model.cuda()
 
         # Compile model for JIT optimization (PyTorch 2.0+)
-        if self.fl_cfg.compile_mode and hasattr(torch, 'compile'):
-            compiled_model = torch.compile(self.coding_model, mode=self.fl_cfg.compile_mode)
+        if fl_cfg.compile_mode and hasattr(torch, 'compile'):
+            compiled_model = torch.compile(rnn_model, mode=fl_cfg.compile_mode)
         else:
-            compiled_model = self.coding_model
+            compiled_model = rnn_model
 
         compiled_model.train()
 
         # Mixed precision training with GradScaler
-        use_amp = self.fl_cfg.mixed_precision and torch.cuda.is_available()
+        use_amp = fl_cfg.mixed_precision and torch.cuda.is_available()
         scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
         # Single progress bar for all training
-        total_samples = min(self.c_cfg.train_sample_size, len(train_dataset))
-        total_iterations = self.c_cfg.train_epochs * ((total_samples + batch_size - 1) // batch_size)
+        total_samples = min(c_cfg.train_sample_size, len(train_dataset))
+        total_iterations = c_cfg.train_epochs * ((total_samples + batch_size - 1) // batch_size)
         pbar = create_training_progress_bar(
             total_iterations,
             desc="Training Quantizer",
-            disable=not self.fl_cfg.training_progress_bar
+            disable=not fl_cfg.training_progress_bar
         )
 
-        for epoch in range(self.c_cfg.train_epochs):
+        for epoch in range(c_cfg.train_epochs):
             indices = torch.randint(0, len(train_dataset), (total_samples,), dtype=torch.long)
             subset_dataset = torch.utils.data.Subset(train_dataset, indices)
 
@@ -230,28 +256,34 @@ class WZQuantizerCancer:
 
                 if use_amp:
                     with torch.amp.autocast('cuda'):
-                        loss = self.compute_loss(x_batch, si_batch, epoch)
+                        loss = WZQuantizerCancer.compute_loss(
+                            rnn_model, x_batch, si_batch, epoch, c_cfg, num_planes, mspe_denom)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    loss = self.compute_loss(x_batch, si_batch, epoch)
+                    loss = WZQuantizerCancer.compute_loss(
+                        rnn_model, x_batch, si_batch, epoch, c_cfg, num_planes, mspe_denom)
                     loss.backward()
                     optimizer.step()
 
-                if self.fl_cfg.training_progress_bar:
+                if fl_cfg.training_progress_bar:
                     pbar.set_postfix({
                         'loss': f'{loss.item():.2f}',
                     })
                     pbar.update(1)
             scheduler.step()
 
-        if self.fl_cfg.training_progress_bar:
+        if fl_cfg.training_progress_bar:
             pbar.close()
 
         # Move back to CPU and cleanup
-        self.coding_model.cpu()
+        rnn_model.cpu()
         torch.cuda.empty_cache()
+
+        if return_loss:
+            return loss.item()
+        return
 
     @staticmethod
     def _batch_loop(func: Callable[[int, int], torch.Tensor], coding_model, input_size: int,
@@ -352,7 +384,7 @@ class WZQuantizerCancer:
         q_model = self.coding_model
         if not use_coding_model:
             q_model = PriorCalculator.train_prior_model(
-                bins_vec, si_trans, self.num_planes, self.bins_per_plane,)
+                bins_vec, si_trans, self.num_planes, self.bins_per_plane, self.c_cfg)
 
         prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
 
@@ -416,14 +448,14 @@ if __name__ == "__main__":
     from cancer_protocol import CancerConfig
 
     base_signal = torch.from_numpy(np.random.normal(0, 1, 1_000_000).astype(np.float32))
-    y = base_signal + torch.from_numpy(np.random.normal(0, 0.1, 1_000_000).astype(np.float32))
+    y = base_signal + torch.from_numpy(np.random.normal(0, np.sqrt(0.1), 1_000_000).astype(np.float32))
     side_info = [base_signal.clone()]
 
-    pretrained_path = CancerConfig().pretrain_pth_dir+"/bpp16_np3_pretrained_wzq_rnn.pth"
+    pretrained_path = CancerConfig().pretrain_pth_dir+"/bpp8_np3_pretrained_wzq_rnn.pth"
 
     def test(quantizer):
         bins, metadata = quantizer.encoding_process(y)
-        recons = quantizer.decoding_process((bins.numpy(), metadata))
+        recons = quantizer.decoding_process((bins, metadata))
         prior = quantizer._get_posterior(y, bins_vec_save_compute = bins)
 
         mape = torch.mean(torch.abs(y - recons) / (torch.abs(y) + 1e-8)).item() * 100
@@ -438,7 +470,7 @@ if __name__ == "__main__":
     print("\n1. Without side info - pretrained model (P)")
     quantizer = WZQuantizerCancer(
         c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=0,)
+        num_planes=3, bins_per_plane=8, si_size=0,)
     quantizer.coding_model.load_state_dict(torch.load(pretrained_path), strict=False)
     test(quantizer)
 
@@ -453,7 +485,7 @@ if __name__ == "__main__":
     print("\n2.B Without side info - marginal model (M)")
     quantizer = WZQuantizerCancer(
         c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=0
+        num_planes=3, bins_per_plane=16, si_size=0,
     )
     quantizer.train_model(y, si_raw_list=None, batch_size=500_000)
     test(quantizer)
@@ -468,7 +500,7 @@ if __name__ == "__main__":
 
     # Test for unseen data
     print("\n4. Testing quantizer on unseen data...")
-    y = base_signal + torch.from_numpy(np.random.normal(0, 0.1, 1_000_000).astype(np.float32))
+    y = y + torch.from_numpy(np.random.normal(0, np.sqrt(0.1), 1_000_000).astype(np.float32))
     bins, recons, prior = test(quantizer)
 
     print("\n" + "="*70)

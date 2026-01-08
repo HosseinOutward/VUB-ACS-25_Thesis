@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from FL_reworked.run_fl import FLConfig
 from brent_wz_models import EncoderDecoderLayeredRNN
 from utils import create_training_progress_bar
 
@@ -72,12 +73,21 @@ class PriorCalculator:
         return priors
 
     @staticmethod
-    def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane, c_cfg = None,
-                          train_sample_size=3e5, batch_size=500_000) -> EncoderDecoderLayeredRNN:
-        from cancer_protocol import CancerConfig
-        if c_cfg is None:
-            c_cfg = CancerConfig()
+    def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
+                          c_cfg, train_sample_size=3e5, batch_size=500_000) -> EncoderDecoderLayeredRNN:
+        train_attempts = [
+            PriorCalculator._train_prior_model(
+                bins_vec, side_info, num_planes, bins_per_plane, c_cfg,
+                train_sample_size, batch_size, return_loss=True)
+            for _ in range(c_cfg.prior_train_repeats)
+        ]
+        q_model, lowest_trained_rate = min(train_attempts, key=lambda x: x[1])
+        return q_model
 
+    @staticmethod
+    def _train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
+                           c_cfg, train_sample_size, batch_size,
+                           return_loss=False) -> EncoderDecoderLayeredRNN|tuple[EncoderDecoderLayeredRNN, float]:
         assert bins_vec.size(0) == num_planes, "bins_vec first dimension must match num_planes"
 
         prior_model = EncoderDecoderLayeredRNN(
@@ -94,6 +104,7 @@ class PriorCalculator:
         num_batches = (total_samples + batch_size - 1) // batch_size
         pbar = create_training_progress_bar(
             c_cfg.train_epochs * num_batches,
+            disable=not FLConfig().training_progress_bar,
             desc="Prior Model")
 
         epoch_loss: float = 0.0
@@ -112,7 +123,7 @@ class PriorCalculator:
                 tau = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
                 codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
-                            for b in bins_vec[:, start_i:end_i]]
+                            for b in bins_vec[:, start_i:end_i].long()]
                 side_info_batch = side_info[start_i:end_i].cuda()
 
                 prior_batch = prior_model.get_priors(codes=codes, y=side_info_batch, tau=tau)

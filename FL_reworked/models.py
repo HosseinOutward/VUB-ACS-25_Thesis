@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Tuple
 from abc import ABC, abstractmethod
 
+import math
 import torch
 from torch import optim as optim, nn as nn
 from torchvision.models import resnet18
@@ -36,8 +37,13 @@ class FLModelTemplate(nn.Module, ABC):
         for batch in dataloader:
             optimizer.zero_grad()
 
+            loss = None
             with torch.amp.autocast("cuda", enabled=use_amp):
-                loss = self.training_step(batch, device, cfg)
+                for i in range(cfg.single_batch_accum_grad_steps):
+                    mini_batch_size = math.ceil(cfg.batch_size / cfg.single_batch_accum_grad_steps)
+                    part_of_batch = tuple(b[i*mini_batch_size:(i+1)*mini_batch_size] for b in batch)
+                    pob_loss = self.training_step(part_of_batch, device, cfg)
+                    loss = loss + pob_loss if loss is not None else pob_loss
 
             scaler.scale(loss).backward()
 

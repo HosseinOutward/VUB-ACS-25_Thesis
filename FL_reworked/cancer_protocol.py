@@ -77,6 +77,8 @@ class CancerConfig:
     lr_step: int = 35
     tau: float = 1.3
     tau_rate: float = 10.0
+    quantizer_train_repeats = 3
+    prior_train_repeats = 3
 
 
 class CancerRecord(CompressionRecord):
