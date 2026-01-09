@@ -52,9 +52,11 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
         return np.array([], dtype=int), None, torch.tensor([])
 
     outlier_sign: np.ndarray = torch.sign(grad_flat_normal[outlier_mask]).cpu().numpy()
-    outlier_max: float = float(
-        torch.quantile(torch.abs(grad_flat_normal[outlier_mask]).float() - outlier_threshold, .99)) / outlier_threshold
+
     outlier_positions: np.ndarray = np.where(outlier_mask.cpu().numpy())[0]
+
+    dist_to_tresh = torch.abs(grad_flat_normal[outlier_mask]).float() - outlier_threshold
+    outlier_max: float = torch.quantile(dist_to_tresh, .99).item() / outlier_threshold
 
     assert outlier_max != 0
 
@@ -413,13 +415,13 @@ class WZQuantizerCancer:
         outlier_positions: np.ndarray = np.array([], dtype=int)
         outlier_max: Optional[float] = None
         outlier_sign: np.ndarray = np.array([])
-        outlier_param = (outlier_positions, outlier_max, outlier_sign)
-
         if not no_outlier_handling:
             outlier_positions, outlier_max, outlier_sign = get_outlier_factor(x_prep, self.outlier_threshold)
             if len(outlier_positions) != 0:
-                temp = x_prep[outlier_positions]
-                x_prep[outlier_positions] = (torch.abs(temp) - self.outlier_threshold) * torch.sign(temp) / outlier_max
+                outlier_x = x_prep[outlier_positions]
+                x_prep[outlier_positions] = (
+                        (torch.abs(outlier_x) - self.outlier_threshold) * torch.sign(outlier_x) / outlier_max)
+        outlier_param = (outlier_positions, outlier_max, outlier_sign)
 
         return x_prep, norm_factors, outlier_param
 
@@ -433,6 +435,7 @@ class WZQuantizerCancer:
 
             assert len(np.unique(outlier_sign)) in [1, 2]
             assert outlier_sign.max() in [1, -1] and outlier_sign.min() in [1, -1]
+
             recons_prep[outlier_positions] = \
                 (torch.abs(recons_prep[outlier_positions]) * outlier_max + self.outlier_threshold) * outlier_sign
 
