@@ -74,11 +74,11 @@ class PriorCalculator:
 
     @staticmethod
     def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
-                          c_cfg, train_sample_size=3e5, batch_size=500_000) -> EncoderDecoderLayeredRNN:
+                          c_cfg, batch_size=50_000) -> EncoderDecoderLayeredRNN:
         train_attempts = [
             PriorCalculator._train_prior_model(
-                bins_vec, side_info, num_planes, bins_per_plane, c_cfg,
-                train_sample_size, batch_size, return_loss=True)
+                bins_vec, side_info, num_planes, bins_per_plane,
+                c_cfg, batch_size, return_loss=True)
             for _ in range(c_cfg.prior_train_repeats)
         ]
         q_model, lowest_trained_rate = min(train_attempts, key=lambda x: x[1])
@@ -86,8 +86,7 @@ class PriorCalculator:
 
     @staticmethod
     def _train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
-                           c_cfg, train_sample_size, batch_size,
-                           return_loss=False) -> EncoderDecoderLayeredRNN|tuple[EncoderDecoderLayeredRNN, float]:
+                           c_cfg, batch_size, return_loss=False) -> EncoderDecoderLayeredRNN|tuple[EncoderDecoderLayeredRNN, float]:
         assert bins_vec.size(0) == num_planes, "bins_vec first dimension must match num_planes"
 
         prior_model = EncoderDecoderLayeredRNN(
@@ -100,7 +99,7 @@ class PriorCalculator:
 
         # Convert to long once
         vec_size = bins_vec.size(1)
-        total_samples = int(min(train_sample_size, vec_size))
+        total_samples = int(min(c_cfg.train_sample_size, vec_size))
         num_batches = (total_samples + batch_size - 1) // batch_size
         pbar = create_training_progress_bar(
             c_cfg.train_epochs * num_batches,
@@ -112,7 +111,7 @@ class PriorCalculator:
             bins_subset, si_subset = bins_vec[:, indices], side_info[indices]
 
             epoch_loss = 0.0
-            for start_i in range(0, total_samples, batch_size):
+            for batch_idx, start_i in enumerate(range(0, total_samples, batch_size)):
                 end_i = min(start_i + batch_size, total_samples)
                 bins_batch, si_batch = bins_subset[:, start_i:end_i], si_subset[start_i:end_i]
 
@@ -123,9 +122,8 @@ class PriorCalculator:
 
                 codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
                             for b in bins_vec[:, start_i:end_i].long()]
-                side_info_batch = side_info[start_i:end_i].cuda()
 
-                prior_batch = prior_model.get_priors(codes=codes, y=side_info_batch, tau=tau)
+                prior_batch = prior_model.get_priors(codes=codes, y=si_batch, tau=tau)
                 prior_batch = torch.stack(prior_batch)
 
                 # Move to GPU for loss computation
@@ -148,6 +146,7 @@ class PriorCalculator:
 
                 pbar.set_postfix({'loss': f'{loss.item():.4f}'})
                 pbar.update(1)
+            epoch_loss /= batch_idx+1
 
         pbar.close()
 

@@ -81,18 +81,32 @@ class CancerConfig:
     prior_train_repeats = 3
 
 
-class CancerRecord(CompressionRecord):
+class BinsCodecRecord(CompressionRecord):
+    def __init__(self, round_id: int, client_id: int, bits_per_plane: int, method: str):
+        super().__init__(round_id, client_id, method)
+        self.bits_per_plane: Optional[int] = bits_per_plane
+        self.prior_rate: Optional[float] = None
+        self.marginal_rate: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update({
+            "bits_per_plane": self.bits_per_plane,
+            "prior_rate": self.prior_rate,
+            "marginal_rate": self.marginal_rate,
+        })
+        return result
+
+
+class CancerRecord(BinsCodecRecord):
     def __init__(self, round_id: int, client_id: int, method: str = "cancer",
                  phase: Optional[str] = None, round_type: Optional[str] = None,
                  bits_per_plane: Optional[int] = None, num_planes: Optional[int] = None):
         assert method == "cancer", "CancerRecord must be used by method 'cancer'"
-        super().__init__(round_id, client_id, method)
+        super().__init__(round_id, client_id, bits_per_plane, method)
         self.phase: Optional[str] = phase
         self.round_type: Optional[str] = round_type
-        self.bits_per_plane: Optional[int] = bits_per_plane
         self.num_planes: Optional[int] = num_planes
-        self.prior_rate: Optional[float] = None
-        self.marginal_rate: Optional[float] = None
         self.encoder_decoder_size: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:

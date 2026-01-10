@@ -1,0 +1,109 @@
+from typing import List, Tuple
+
+import torch
+
+try:
+    from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
+except ModuleNotFoundError:
+    import sys
+    sys.path.append('..')
+    from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
+
+from FL_code.codec import IdentityCodec
+from FL_code.prior_calculator import PriorCalculator
+
+
+class NSplitCodec(IdentityCodec):
+    def __init__(self, num_clients, split_points):
+        self.split_points = split_points
+        self.num_clients = num_clients
+        self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.si_vec_size = None
+
+    def create_record(self, round_id: int, client_id: int) -> BinsCodecRecord:
+        return BinsCodecRecord(round_id, client_id, self.split_points, method=f"{self.split_points}-split")
+
+    def get_si_data(self) -> torch.Tensor:
+        si_raw:List[torch.Tensor] = []
+        for s in self.srvr_past_reconst:
+            si_raw.extend(s)
+
+        si_raw = [s.float() for s in si_raw]
+        si_raw = [s/s.abs().quantile(0.99) for s in si_raw]
+
+        if si_raw == []:
+            si_raw = [torch.zeros(self.si_vec_size)]
+
+        si_raw:torch.Tensor = torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
+        return si_raw
+
+    def bin_f(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        perc_v = [torch.quantile(x, i/self.split_points) for i in range(1,self.split_points)]
+
+        bins_vec = torch.zeros(x.shape, dtype=torch.uint8)
+        for i, pv in enumerate(perc_v):
+            bins_vec[x>pv] = i+1
+
+        mean_v = torch.zeros(self.split_points, dtype=torch.float16)
+        for i in range(self.split_points):
+            mean_v[i] = x[bins_vec==i].mean().to(torch.float16)
+        return bins_vec.unsqueeze(0), mean_v
+
+    def un_bin_f(self, bins_vec: torch.Tensor, mean_v: torch.Tensor) -> torch.Tensor:
+        reconst = torch.zeros(bins_vec.shape[1], dtype=torch.float32)
+        for i in range(self.split_points):
+            reconst[bins_vec[0]==i] = mean_v[i]
+        return reconst
+
+    def _compress(self, delta_vec: torch.Tensor, record: BinsCodecRecord) -> tuple:
+        self.si_vec_size = len(delta_vec)
+        bins_vec, mean_v = self.bin_f(delta_vec)
+        payload = (bins_vec, mean_v)
+
+        si_trans = self.get_si_data()
+        q_model = PriorCalculator.train_prior_model(
+            bins_vec, si_trans, 1, record.bits_per_plane, CancerConfig())
+        prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
+        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins_vec, 1)
+
+        m_prior = PriorCalculator.compute_marginal_prior(bins_vec, record.bits_per_plane, 1)
+        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins_vec, 1)
+
+        return payload
+
+    def _decompress(self, payload: dict, record: BinsCodecRecord) -> torch.Tensor:
+        reconst = self.un_bin_f(*payload)
+
+        history = self.srvr_past_reconst[record.client_id]
+        history.append(reconst.to(torch.float16))
+        # history.append(payload[0].squeeze())
+        if len(history) > CancerConfig().max_side_info_count:
+            history.pop(0)
+
+        return reconst
+
+if __name__ == '__main__':
+    split_points = 3
+    num_clients = 3
+    num_rounds = 10
+    vector_size = 1_000_000
+    base_vector = torch.normal(0, 1, size=(vector_size,))
+    codec = NSplitCodec(num_clients, split_points=split_points)
+
+    for round_id in range(num_rounds):
+        base_vector = base_vector + torch.normal(0.0, 0.01, size=(vector_size,))
+        client_deltas = [base_vector + torch.normal(0.0, 0.1, size=(vector_size,)) for _ in range(num_clients)]
+
+        for ci, d_v in enumerate(client_deltas):
+            record = codec.create_record(round_id, ci)
+            record.model_size = d_v.shape[0]
+            payload = codec.encode(d_v, record)
+            reconst = codec.decode(payload, record)
+            print(record.to_dict())
+
+    # from matplotlib import pyplot as plt
+    # bins_vec, mean_v = codec._compress(base_vector, record)
+    # plt.scatter(base_vector.cpu().numpy(), bins_vec.cpu().numpy()+0.2, alpha=0.5, s=0.1, cmap='red')
+    # plt.vlines(mean_v.cpu().numpy(), 0, split_points-0.9, alpha=0.3)
+    # plt.twinx().hist(base_vector.cpu().numpy(), 200, alpha=0.3)
+    # plt.show()
