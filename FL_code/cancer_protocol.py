@@ -62,7 +62,7 @@ class CancerConfig:
     """Configuration for Cancer protocol phases and WZ model."""
     # Phase info, (phase type, bins per plane (not bits), num planes)
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
-    routine_phase: Tuple[str] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
+    routine_phase: Tuple[Tuple[str, int, int]] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
 
     warmup_phase_binary: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 2 + (('R', 2, 2),)
     routine_phase_binary: Tuple[str] = (('T', 2, 1), ('T', 2, 1), ('R', 2, 1)) + (('F', 2, 1),) * 6
@@ -165,6 +165,7 @@ class CancerCodec(IdentityCodec):
         round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
         client_idx = record.client_id
 
+        extra_si_for_prior = []
         force_marginal_loss = False
         if len(round_type) != 1:
             assert round_type[1] == "M" and round_type[0] in ['T', 'R']
@@ -184,8 +185,9 @@ class CancerCodec(IdentityCodec):
                         for cid, reconst_list in enumerate(self.srvr_past_reconst)
                         for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
             target_x = self.srvr_past_reconst[client_idx][-1]
+            extra_si_for_prior = [target_x]
             assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,
-                                        self.c_cfg.max_side_info_count * self.num_clients - 1)
+                                      self.c_cfg.max_side_info_count * self.num_clients - 1)
 
         elif round_type == 'T': # Temporal
             train_si = [item
@@ -200,7 +202,9 @@ class CancerCodec(IdentityCodec):
         quantizer = WZQuantizerCancer(
             c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
             si_size=len(train_si) if train_si is not None else 0,
-            marginal_loss=force_marginal_loss, **self.quantizer_kwargs)
+            marginal_loss=force_marginal_loss, **self.quantizer_kwargs,
+            extra_si_for_prior = extra_si_for_prior
+        )
 
         # Load pretrained weights or train the model
         if round_type != 'P':
