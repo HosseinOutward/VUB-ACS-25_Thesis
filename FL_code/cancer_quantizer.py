@@ -65,11 +65,13 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
 
 class WZQuantizerCancer:
     def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int,
-                 bins_per_plane: int, si_size: int, marginal_loss=False,
-                 norm_slices: List[slice]|bool|None = False, outlier_threshold: float|bool = False) -> None:
+                 bins_per_plane: int, si_size: int, marginal_loss=False, norm_slices: List[slice]|bool|None = False,
+                 outlier_threshold: float|bool = False, extra_si_for_prior:List[torch.Tensor]=()) -> None:
         # Data preprocessing parameters - defaults to single slice (no partitioning)
         self.vec_slices: List[slice]|bool = norm_slices if norm_slices is not None else [slice(0, None)]
         self.outlier_threshold: float|bool = outlier_threshold
+
+        self.extra_si_for_prior = extra_si_for_prior
 
         self.c_cfg: 'CancerConfig' = c_cfg
         self.fl_cfg: FLConfig = fl_cfg
@@ -151,13 +153,22 @@ class WZQuantizerCancer:
 
         return x_prep, (norm_factors, outlier_param)
 
-    def get_si_data(self) -> torch.Tensor:
+    def get_si_data(self, for_prior=False) -> torch.Tensor:
         if self.side_info_list_used in [[], 'P']:
             self.side_info_list_used = [torch.zeros(self.si_vec_size)]
 
         si_trans = self.side_info_list_used
-        if not (len(si_trans) == 1 and torch.all(si_trans[0] == 0)): # if not zeros
-            si_trans = [self._apply_pre_process(si, True)[0] for si in self.side_info_list_used]
+
+        zero_si = (len(si_trans) == 1 and torch.all(si_trans[0] == 0))
+
+        if for_prior and len(self.extra_si_for_prior)!=0:
+            if zero_si:
+                si_trans = []
+            si_trans += self.extra_si_for_prior
+            zero_si = False
+
+        if not zero_si:
+            si_trans = [self._apply_pre_process(si, True)[0] for si in si_trans]
 
         si_trans = torch.stack(si_trans).cuda().T.to(torch.float32).contiguous()
         return si_trans
@@ -376,7 +387,9 @@ class WZQuantizerCancer:
     def _get_posterior(self, x_raw: torch.Tensor, bins_vec_save_compute: torch.Tensor = None):
         data_hash_str = PriorCalculator.get_hash(x_raw)
         hash_exists = data_hash_str in self.cached_priors_dict
-        use_coding_model = hash_exists and self.cached_priors_dict[data_hash_str][0] == 'flag_no_retrain'
+        use_coding_model = (
+                (hash_exists and self.cached_priors_dict[data_hash_str][0] == 'flag_no_retrain') and \
+                len(self.extra_si_for_prior)==0)
 
         # comment out to force training prior model every time
         if hash_exists and not use_coding_model:
@@ -384,7 +397,7 @@ class WZQuantizerCancer:
 
         bins_vec = self.encoding_process(x_raw)[0] if bins_vec_save_compute is None else bins_vec_save_compute
 
-        si_trans = self.get_si_data()
+        si_trans = self.get_si_data(for_prior=True)
         q_model = self.coding_model
         if not use_coding_model:
             q_model = PriorCalculator.train_prior_model(
