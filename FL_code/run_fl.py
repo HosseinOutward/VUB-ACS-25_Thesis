@@ -9,7 +9,8 @@ import torch.distributed as dist
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    # Codec to use: identity, basic, cancer_binary, cancer, cancer_with_outlier_handling, cancer_raw
+    # Codec to use: identity, basic, cancer_binary, cancer, cancer_with_outlier_handling, cancer_raw,
+    # non_wz_learned_with_norm, ?_split_codec (2,3,...)
     codec: str = "identity"
 
     num_clients: int = 5

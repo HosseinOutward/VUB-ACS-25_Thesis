@@ -12,15 +12,15 @@ from run_fl import FLConfig
 from utils import StateDictManager
 
 
-def get_obj_size(obj):
+def get_obj_compressed_size(obj, with_compression=True):
     if isinstance(obj, torch.Tensor):
         return obj.element_size() * obj.nelement()
     elif isinstance(obj, np.ndarray):
         return obj.nbytes
     elif isinstance(obj, (list, tuple)):
-        return sum(get_obj_size(x) for x in obj)
+        return sum(get_obj_compressed_size(x, with_compression=False) for x in obj)
     elif isinstance(obj, dict):
-        return sum(get_obj_size(v) for k, v in obj.items())
+        return sum(get_obj_compressed_size(v, with_compression=False) for k, v in obj.items())
     elif hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
         return len(obj) * (obj._dtype.bitwidth // 8)
     elif isinstance(obj, bytes):
@@ -144,12 +144,12 @@ class IdentityCodec:
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
-        record.basic_raw_bytes = get_obj_size(compress_data_list(delta_vec)) / (1024 ** 2)
+        record.basic_raw_bytes = get_obj_compressed_size(compress_data_list(delta_vec), with_compression=False) / (1024 ** 2)
 
         payload_content = self._compress(delta_vec, record)
         payload = compress_data_list(payload_content)
 
-        record.compressed_bytes = get_obj_size(payload) / (1024**2)
+        record.compressed_bytes = get_obj_compressed_size(payload, with_compression=False) / (1024 ** 2)
         record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
         record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
 
@@ -204,9 +204,16 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     elif codec_name == "cancer_raw":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg)
+    elif codec_name[1:]=='_split_codec':
+        from other_protocols.n_split_protocol import NSplitCodec
+        n = int(codec_name[0:1])
+        return NSplitCodec(fl_cfg.num_clients, n)
 
     vec_slice = sd_manager.get_slices() if sd_manager is not None else None
-    if codec_name == "cancer_with_outlier_handling":
+    if codec_name == 'non_wz_learned_with_norm':
+        from other_protocols.learned_quantizer_marginal import LearnedSimpleCodec
+        return LearnedSimpleCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
+    elif codec_name == "cancer_with_outlier_handling":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.4})
     elif codec_name == "cancer":
