@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from cancer_quantizer import WZQuantizerCancer
-from codec import IdentityCodec, CompressionRecord, get_obj_size
+from codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
 from prior_calculator import PriorCalculator
 from run_fl import FLConfig
 
@@ -108,6 +108,7 @@ class CancerRecord(BinsCodecRecord):
         self.round_type: Optional[str] = round_type
         self.num_planes: Optional[int] = num_planes
         self.encoder_decoder_size: Optional[int] = None
+        self.meta_data_size: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
@@ -119,6 +120,7 @@ class CancerRecord(BinsCodecRecord):
             "prior_rate": self.prior_rate,
             "marginal_rate": self.marginal_rate,
             "encoder_decoder_size": self.encoder_decoder_size,
+            "meta_data_size": self.meta_data_size,
         })
         return result
 
@@ -228,7 +230,7 @@ class CancerCodec(IdentityCodec):
         bins, prep_metadata = quantizer.encoding_process(delta_vec)
 
         # Build payload
-        payload = self._build_payload((bins, prep_metadata), quantizer, record)
+        payload = self._build_payload(bins, prep_metadata, quantizer, record)
 
         # Add prior info to record for analysis
         prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
@@ -242,9 +244,9 @@ class CancerCodec(IdentityCodec):
         return payload
 
 
-    def _build_payload(self, encoded_data, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
-        payload = {
-            'payload_content': encoded_data,
+    def _build_payload(self, bins, prep_metadata, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
+        payload:Dict[str, Any] = {
+            'payload_content': (bins, prep_metadata),
         }
 
         # Include model states for tracking overhead size
@@ -252,10 +254,13 @@ class CancerCodec(IdentityCodec):
             # if it's a T round, clients sending the decoder state as well
             # for P rounds, decoder is sent to clients so they have reconstruction of non-side-info case
             payload['decoder_state'] = quantizer.coding_model.decoder.state_dict()
-            record.encoder_decoder_size = get_obj_size(payload['decoder_state'])/(1024**2)
+            record.encoder_decoder_size = get_obj_compressed_size(payload['decoder_state']) / (1024 ** 2)
         else:
             payload['encoder_state'] = quantizer.coding_model.encoder.state_dict()
-            record.encoder_decoder_size = get_obj_size(payload['encoder_state'])/(1024**2)
+            record.encoder_decoder_size = get_obj_compressed_size(payload['encoder_state']) / (1024 ** 2)
+
+        record.meta_data_size = get_obj_compressed_size(prep_metadata)
+
         return payload
 
     def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
