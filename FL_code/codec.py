@@ -214,12 +214,12 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     if codec_name == 'non_wz_learned_with_norm':
         from other_protocols.learned_quantizer_marginal import LearnedSimpleCodec
         return LearnedSimpleCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
-    elif codec_name == "cancer_with_outlier_handling":
-        from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.4})
-    elif codec_name == "cancer":
+    elif codec_name == "cancer_wo_outlier_handling":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
+    elif codec_name == "cancer":
+        from cancer_protocol import CancerCodec
+        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.6})
     elif codec_name == "cancer_binary":
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice}, binary_prot=True)
@@ -227,7 +227,8 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     if 'debug_' == codec_name[0:6]:
         from FL_code.experiments.rd_wz_bound_calc.rd_mspe_wz import CancerWithBoundCalc
         if codec_name[6:] == "cancerwithboundcalc":
-            return CancerWithBoundCalc(fl_cfg, codec_name, quantizer_kwargs={'norm_slices': vec_slice})
+            return CancerWithBoundCalc(
+                fl_cfg, codec_name, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.6})
 
     raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
