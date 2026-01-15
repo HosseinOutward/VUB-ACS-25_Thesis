@@ -9,8 +9,8 @@ import torch.distributed as dist
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    # Codec to use: identity, basic, cancer_binary, cancer, cancer_with_outlier_handling, cancer_raw,
-    # non_wz_learned_with_norm, ?_split_codec (2,3,...)
+    # Codec to use: identity, basic, cancer_binary, cancer, cancer_wo_outlier_handling, cancer_raw,
+    # non_wz_learned_with_norm, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
     codec: str = "identity"
 
     num_clients: int = 5
@@ -92,7 +92,7 @@ def _worker(
 
 if __name__ == "__main__":
     cfg = FLConfig()
-    choices = ['identity', 'basic', 'cancer_binary' , 'cancer',  'cancer_with_outlier_handling', 'cancer_raw']
+    choices = ['identity', 'basic', 'cancer_binary' , 'cancer',  'cancer_wo_outlier_handling', 'cancer_raw']
     ap = argparse.ArgumentParser()
     ap.add_argument("--codec", type=str,
                     default=cfg.codec, choices=choices)
