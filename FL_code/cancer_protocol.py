@@ -65,7 +65,7 @@ class CancerConfig:
     routine_phase: Tuple[Tuple[str, int, int]] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
 
     warmup_phase_binary: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 2 + (('R', 2, 2),)
-    routine_phase_binary: Tuple[str] = (('T', 2, 1), ('T', 2, 1), ('R', 2, 1)) + (('F', 2, 1),) * 6
+    routine_phase_binary: Tuple[Tuple[str, int, int]] = (('T', 2, 1), ('T', 2, 1), ('R', 2, 1)) + (('F', 2, 1),) * 6
 
     max_side_info_count: int = 5
     pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
@@ -243,7 +243,6 @@ class CancerCodec(IdentityCodec):
 
         return payload
 
-
     def _build_payload(self, bins, prep_metadata, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
         payload:Dict[str, Any] = {
             'payload_content': (bins, prep_metadata),
@@ -259,7 +258,7 @@ class CancerCodec(IdentityCodec):
             payload['encoder_state'] = quantizer.coding_model.encoder.state_dict()
             record.encoder_decoder_size = get_obj_compressed_size(payload['encoder_state']) / (1024 ** 2)
 
-        record.meta_data_size = get_obj_compressed_size(prep_metadata)
+        record.meta_data_size = get_obj_compressed_size(prep_metadata) / (1024 ** 2)
 
         return payload
 

@@ -32,7 +32,8 @@ def create_training_progress_bar(
         ipython = get_ipython()  # type: ignore
     except NameError:
         common_config['file'] = sys.stderr
-        common_config['bar_format'] = '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}'
+        common_config['bar_format'] = ('{desc}: {percentage:3.0f}%|{bar}| {n}/{total} '
+                                       '[{elapsed}<{remaining}, {rate_fmt}]{postfix}')
 
     return tqdm(total=iterable_or_total, **common_config)
 
@@ -96,7 +97,8 @@ def format_metrics(metrics: Dict[str, float], prefix: str = "") -> str:
 
 
 @torch.no_grad()
-def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, device: torch.device, max_batches: int = 50) -> None:
+def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader,
+                          device: torch.device, max_batches: int = 50) -> None:
     """Recalibrate BatchNorm running statistics (critical for FL)."""
     for m in model.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):

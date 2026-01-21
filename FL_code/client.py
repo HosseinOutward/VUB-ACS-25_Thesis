@@ -33,8 +33,6 @@ def run_federated_client(
 
     curr_rnd_i = 0
     while True:
-        print(f"[Client {client_id}] Starting round {curr_rnd_i}")
-
         # ---- Receive updated global model from server ----
         # Get current round number
         srvr_rnd = torch.zeros(1, dtype=torch.long)
@@ -46,6 +44,8 @@ def run_federated_client(
             assert curr_rnd_i == cfg.rounds, f"Client {client_id} received termination signal but at round {curr_rnd_i}"
             print(f"[Client {client_id}] Training complete. Shutting down.")
             break
+
+        print(f"[Client {client_id}] Starting round {curr_rnd_i}")
 
         # Get model state dict
         vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
