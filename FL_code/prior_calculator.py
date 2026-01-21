@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from FL_code.run_fl import FLConfig
+from run_fl import FLConfig
 from brent_wz_models import EncoderDecoderLayeredRNN
 from utils import create_training_progress_bar
 

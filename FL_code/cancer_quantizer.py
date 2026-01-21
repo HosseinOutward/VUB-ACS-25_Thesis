@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from cancer_protocol import CancerConfig
 
 
-def get_normalization_factor(y: torch.Tensor) -> float:
+def get_normalization_factor(y: torch.Tensor) -> Tuple[float,float]:
     """Calculate normalization factor based on quantiles."""
     num_samples = 5
     sample_size = min(200_000, len(y))
@@ -138,7 +138,7 @@ class WZQuantizerCancer:
 
         return loss
 
-    def get_x_data(self, x_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[List[float], Tuple]]:
+    def get_x_data(self, x_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         if self.si_vec_size is None:
             self.si_vec_size = x_raw.shape[0]
 
@@ -149,7 +149,7 @@ class WZQuantizerCancer:
         if self.vec_slices is False:
             assert norm_factors.tolist() == [[1, 0]], "norm_factors should be [[1, 0]] when vec_slices is False."
         if self.outlier_threshold is False:
-            assert outlier_param[0].size == 0, "No outliers should be detected when outlier_threshold is False."
+            assert len(outlier_param[0]) == 0, "No outliers should be detected when outlier_threshold is False."
 
         return x_prep, (norm_factors, outlier_param)
 
@@ -208,7 +208,7 @@ class WZQuantizerCancer:
         self.coding_model = model_list[best_idx]
 
         # Mark this x_prep as related to the current model to avoid retraining prior models
-        self.cached_priors_dict[PriorCalculator.get_hash(x_raw)] = np.array(['flag_no_retrain'])
+        self.cached_priors_dict[PriorCalculator.get_hash(x_raw)] = 'flag_no_retrain'
 
     @staticmethod
     def _train_model_single_attempt(
@@ -252,6 +252,7 @@ class WZQuantizerCancer:
             disable=not fl_cfg.training_progress_bar
         )
 
+        epoch_loss:float = float('inf')
         for epoch in range(c_cfg.train_epochs):
             indices = torch.randint(0, len(train_dataset), (total_samples,), dtype=torch.long)
             subset_dataset = torch.utils.data.Subset(train_dataset, indices)
@@ -327,7 +328,7 @@ class WZQuantizerCancer:
         torch.cuda.empty_cache()
         return concat_res
 
-    def encoding_process(self, grad_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[List[float], Tuple]]:
+    def encoding_process(self, grad_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         # Keep on CPU, batch processing will handle GPU transfers
         grad_prep, prep_metadata = self.get_x_data(grad_raw)
         bins = self._encoding_process(grad_prep)
@@ -353,7 +354,7 @@ class WZQuantizerCancer:
 
         return bins.to(dtype)
 
-    def decoding_process(self, payload_content: Tuple[torch.Tensor, Tuple[List[float], Tuple]],
+    def decoding_process(self, payload_content: Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]],
                          batch_size: int = 500_000) -> torch.Tensor:
         # return torch.from_numpy(quantized_data).float()/1000.0
 
@@ -387,19 +388,24 @@ class WZQuantizerCancer:
     def _get_posterior(self, x_raw: torch.Tensor, bins_vec_save_compute: torch.Tensor = None):
         data_hash_str = PriorCalculator.get_hash(x_raw)
         hash_exists = data_hash_str in self.cached_priors_dict
-        use_coding_model = (
-                (hash_exists and self.cached_priors_dict[data_hash_str][0] == 'flag_no_retrain') and \
-                len(self.extra_si_for_prior)==0)
+
+        no_retrain_flag = hash_exists and (self.cached_priors_dict[data_hash_str] == 'flag_no_retrain')
+        if no_retrain_flag:
+            hash_exists=False
 
         # comment out to force training prior model every time
-        if hash_exists and not use_coding_model:
+        if hash_exists:
             return self.cached_priors_dict[data_hash_str]
 
-        bins_vec = self.encoding_process(x_raw)[0] if bins_vec_save_compute is None else bins_vec_save_compute
+        have_new_si = len(self.extra_si_for_prior)!=0
+        if have_new_si:
+            no_retrain_flag = False
 
+        bins_vec = self.encoding_process(x_raw)[0] if bins_vec_save_compute is None else bins_vec_save_compute
         si_trans = self.get_si_data(for_prior=True)
-        q_model = self.coding_model
-        if not use_coding_model:
+        if no_retrain_flag:
+            q_model = self.coding_model
+        else:
             q_model = PriorCalculator.train_prior_model(
                 bins_vec, si_trans, self.num_planes, self.bins_per_plane, self.c_cfg)
 
@@ -425,29 +431,48 @@ class WZQuantizerCancer:
         norm_factors:torch.Tensor = torch.Tensor(norm_factors).to(torch.float16)
 
         # Outlier handling (if enabled)
-        outlier_positions: np.ndarray = np.array([], dtype=int)
-        outlier_max: Optional[float] = None
-        outlier_sign: np.ndarray = np.array([])
+        outlier_positions: List[np.ndarray] = []
+        outlier_max: Optional[np.ndarray] = None
+        outlier_sign: np.ndarray = np.array([], dtype=np.bool)
         if not no_outlier_handling:
             outlier_positions, outlier_max, outlier_sign = get_outlier_factor(x_prep, self.outlier_threshold)
+            outlier_max:float
+            outlier_positions:np.ndarray
             if len(outlier_positions) != 0:
                 outlier_x = x_prep[outlier_positions]
                 x_prep[outlier_positions] = (
                         (torch.abs(outlier_x) - self.outlier_threshold) * torch.sign(outlier_x) / outlier_max)
+
+                op_offset = 2**8
+                outlier_positions:List[np.ndarray] = [(
+                        outlier_positions[(outlier_positions>=start_i) * (outlier_positions<start_i+op_offset)]-start_i
+                    ).astype(np.uint8)
+                    for start_i in range(0, len(x_raw)+op_offset-1, op_offset)
+                ]
+
+                outlier_sign = np.array(outlier_sign==1).astype(np.bool)
+            outlier_max:np.ndarray = np.array([outlier_max]).astype(np.float16)
+
         outlier_param = (outlier_positions, outlier_max, outlier_sign)
 
         return x_prep, norm_factors, outlier_param
 
-    def _post_process(self, recons_raw: torch.Tensor, norm_factors: List[float], outlier_param: Tuple) -> torch.Tensor:
+    def _post_process(self, recons_raw: torch.Tensor, norm_factors: torch.Tensor, outlier_param: Tuple) -> torch.Tensor:
         recons_prep = recons_raw.clone()
         # Restore outliers
-        outlier_positions: np.ndarray = outlier_param[0]
-        if len(outlier_positions) != 0:
+        outlier_positions: List[np.ndarray] = outlier_param[0]
+        if len(outlier_positions):
             outlier_max: float = outlier_param[1]
-            outlier_sign: torch.Tensor = torch.from_numpy(outlier_param[2])
+            outlier_sign: torch.Tensor = torch.from_numpy(outlier_param[2]).float()*2-1
 
             assert len(np.unique(outlier_sign)) in [1, 2]
             assert outlier_sign.max() in [1, -1] and outlier_sign.min() in [1, -1]
+
+            op_offset = 2 ** 8
+            outlier_positions:np.ndarray = np.concatenate([
+                    outlier_positions[i].astype(int)+start_i
+                for i, start_i in enumerate(range(0, len(recons_raw)+op_offset-1, op_offset))
+            ])
 
             recons_prep[outlier_positions] = \
                 (torch.abs(recons_prep[outlier_positions]) * outlier_max + self.outlier_threshold) * outlier_sign
