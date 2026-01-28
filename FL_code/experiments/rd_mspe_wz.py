@@ -488,9 +488,9 @@ class CancerWithBoundCalc(CancerCodec):
         folder_path = self.fl_cfg.records_dir + '/wz_bounds/'
         os.makedirs(folder_path, exist_ok=True)
 
-        target = delta_vec.cpu().numpy()
         quantizer = self.frozen_quantizers[record.client_id]
         si = quantizer.get_si_data(for_prior=True).cpu().numpy()
+        target = delta_vec.cpu().numpy()
 
         bound_dict = wyner_ziv_bound(
             target=target, side_info=si,
@@ -498,7 +498,7 @@ class CancerWithBoundCalc(CancerCodec):
             distortion_targets=np.array([0.05, 0.4]),
             n_clusters=8, n_target_bins=56, n_reconstruction_points=56,
         )
-        np.savez_compressed(folder_path+f'bound_{record.client_id}.npz',
+        np.savez_compressed(folder_path+f'bound_cid{record.client_id}_rid{record.round_id}.npz',
             dist_v = bound_dict['D'], rate_v = bound_dict['R'])
 
         return payload
