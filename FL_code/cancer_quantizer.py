@@ -84,6 +84,7 @@ class WZQuantizerCancer:
         # default assume that its pretrained marginal model if si_size==0 unless trained otherwise
         self.side_info_list_used: List[torch.Tensor] | str | None
         self.side_info_list_used = 'P' if si_size==0 else None
+        self.si_count = max(si_size, 1)
 
         self.cached_priors_dict: Dict[str, torch.Tensor] = {}
         self.mspe_denom: float | None = None
@@ -157,7 +158,7 @@ class WZQuantizerCancer:
         if self.side_info_list_used in [[], 'P']:
             self.side_info_list_used = [torch.zeros(self.si_vec_size)]
 
-        si_trans = self.side_info_list_used
+        si_trans = [*self.side_info_list_used]
 
         zero_si = (len(si_trans) == 1 and torch.all(si_trans[0] == 0))
 
@@ -198,6 +199,10 @@ class WZQuantizerCancer:
             self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
             for _ in range(max_attempts)
         ]
+
+        assert len(si_trans) == self.si_vec_size
+        assert si_trans.shape[1] == self.si_count
+        assert x_prep.shape[0] == self.si_vec_size
         model_losses:List[float] = [
             self._train_model_single_attempt(
                 m, x_prep, si_trans, self.fl_cfg, self.c_cfg,
@@ -363,6 +368,8 @@ class WZQuantizerCancer:
 
         assert self.num_planes == bins.shape[0]
         assert bins.shape[1] == self.si_vec_size
+        assert len(si_trans) == self.si_vec_size
+        assert si_trans.shape[1] == self.si_count
         b_p_p = self.bins_per_plane
         assert bins.float().max() < b_p_p
 
@@ -492,7 +499,7 @@ if __name__ == "__main__":
 
     base_signal = torch.from_numpy(np.random.normal(0, 1, 1_000_000).astype(np.float32))
     y = base_signal + torch.from_numpy(np.random.normal(0, np.sqrt(0.1), 1_000_000).astype(np.float32))
-    side_info = [base_signal.clone()]
+    side_info = [base_signal.clone(), (y.clone()+base_signal)/2]
 
     pretrained_path = CancerConfig().pretrain_pth_dir+"/bpp8_np3_pretrained_wzq_rnn.pth"
 
@@ -520,7 +527,7 @@ if __name__ == "__main__":
     print("\n2. With side info - marginal model (M)")
     quantizer = WZQuantizerCancer(
         c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=1, marginal_loss=True
+        num_planes=3, bins_per_plane=16, si_size=len(side_info), marginal_loss=True
     )
     quantizer.train_model(y, si_raw_list=side_info, batch_size=500_000)
     test(quantizer)

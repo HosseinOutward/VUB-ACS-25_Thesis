@@ -28,12 +28,12 @@ def create_training_progress_bar(
         'position': position
     }
 
-    try:
-        ipython = get_ipython()  # type: ignore
-    except NameError:
-        common_config['file'] = sys.stderr
-        common_config['bar_format'] = ('{desc}: {percentage:3.0f}%|{bar}| {n}/{total} '
-                                       '[{elapsed}<{remaining}, {rate_fmt}]{postfix}')
+    # try:
+    #     ipython = get_ipython()  # type: ignore
+    # except NameError:
+    common_config['file'] = sys.stderr
+    common_config['bar_format'] = \
+        '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}'
 
     return tqdm(total=iterable_or_total, **common_config)
 
