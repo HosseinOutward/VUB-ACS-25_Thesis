@@ -33,9 +33,9 @@ def run_federated_server(
     for rnd_i in range(cfg.rounds + 1):
         # ---- Recalibrate then evaluate global model ----
         if cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, test_loader, device, cfg.bn_recalib_batches)
+            recalibrate_batchnorm(model, test_loader)
 
-        metrics = evaluate(model, test_loader, device)
+        metrics = evaluate(model, test_loader)
         metric_keys = list(metrics.keys())
         ending_round = (rnd_i == cfg.rounds)
         label = 'Final' if ending_round else f'Start of Round {rnd_i:03d}'

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 import torch
 import torch.distributed as dist
 
@@ -27,9 +26,8 @@ def run_federated_client(
         client_id=client_id, num_clients=world_size - 1
     )
 
-    optimizer = model.configure_optimizer(device)
-    use_amp = cfg.mixed_precision
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    optimizer = model.configure_optimizer()
+    scaler = torch.amp.GradScaler("cuda", enabled=cfg.mixed_precision)
 
     curr_rnd_i = 0
     while True:
@@ -56,7 +54,7 @@ def run_federated_client(
         # optimizer.state = defaultdict(dict)
 
         if cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, train_loader, device, cfg.bn_recalib_batches)
+            recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
 
         assert srvr_rnd == curr_rnd_i, f"Round mismatch: expected {curr_rnd_i}, got {srvr_rnd}"
 
@@ -65,13 +63,13 @@ def run_federated_client(
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
         for _ in range(cfg.local_epochs):
-            model.train_epoch(train_loader, optimizer, device, scaler, use_amp, cfg)
+            model.train_epoch(train_loader, optimizer, scaler)
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 
         # ---- Evaluate local model post-training ----
-        train_metrics = evaluate(model, train_loader, device)
-        test_metrics = evaluate(model, test_loader, device)
+        train_metrics = evaluate(model, train_loader)
+        test_metrics = evaluate(model, test_loader)
         print(f"[Client {client_id}] Post-training - {format_metrics(test_metrics, 'Test')} "
               f"| {format_metrics(train_metrics, 'Train')}")
 

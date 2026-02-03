@@ -4,7 +4,7 @@ from typing import Tuple, Optional
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
-from torchvision.datasets import SVHN
+from torchvision.datasets import SVHN, CIFAR10
 
 
 class SharedTensorDataset(Dataset):
@@ -24,38 +24,59 @@ class SharedTensorDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def precompute_svhn_to_shared(
+# Dataset configurations: (mean, std, data_loader_func)
+DATASET_CONFIG = {
+    'SVHN': {
+        'mean': [0.4377, 0.4438, 0.4728],
+        'std': [0.1980, 0.2010, 0.1970],
+    },
+    'CIFAR10': {
+        'mean': [0.4914, 0.4822, 0.4465],
+        'std': [0.2470, 0.2435, 0.2616],
+    },
+}
+
+
+def precompute_dataset_to_shared(
+    dataset_name: str,
     data_folder: str,
     split: str,
     dtype: torch.dtype = torch.float32,
     fraction: float = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Precompute SVHN preprocessing and store in shared memory."""
-    ds = SVHN(root=os.path.join(data_folder, "SVHN"), split=split, download=False, transform=None)
+    """Precompute dataset preprocessing and store in shared memory."""
+    dataset_name = dataset_name.upper()
+    if dataset_name not in DATASET_CONFIG:
+        raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_CONFIG.keys())}")
 
-    X = torch.from_numpy(ds.data).float().div_(255.0)
-    y = torch.tensor(ds.labels, dtype=torch.long)
+    is_train = (split == "train")
+    cfg = DATASET_CONFIG[dataset_name]
 
-    if split == "train":
-        # shuffle dataset
+    # Load dataset
+    if dataset_name == 'SVHN':
+        ds = SVHN(root=os.path.join(data_folder, "SVHN"), split=split, download=False)
+        X = torch.from_numpy(ds.data).float().div_(255.0)
+        y = torch.tensor(ds.labels, dtype=torch.long)
+    else:  # CIFAR10
+        ds = CIFAR10(root=os.path.join(data_folder, "CIFAR10"), train=is_train, download=True)
+        X = torch.from_numpy(ds.data).float().permute(0, 3, 1, 2).div_(255.0)
+        y = torch.tensor(ds.targets, dtype=torch.long)
+
+    # Shuffle and apply fraction for training
+    if is_train:
         perm = torch.randperm(len(y))
-        X = X[perm]
-        y = y[perm]
-
-        # Apply fraction if specified
+        X, y = X[perm], y[perm]
         if fraction:
-            n_samples = int(len(y) * fraction)
-            X = X[:n_samples]
-            y = y[:n_samples]
+            n = int(len(y) * fraction)
+            X, y = X[:n], y[:n]
 
-    mean = torch.tensor([0.4377, 0.4438, 0.4728]).view(1, 3, 1, 1)
-    std = torch.tensor([0.1980, 0.2010, 0.1970]).view(1, 3, 1, 1)
+    # Normalize
+    mean = torch.tensor(cfg['mean']).view(1, 3, 1, 1)
+    std = torch.tensor(cfg['std']).view(1, 3, 1, 1)
     X = ((X - mean) / std).to(dtype)
 
-    # Share memory to avoid duplication across processes
     X.share_memory_()
     y.share_memory_()
-
     return X, y
 
 

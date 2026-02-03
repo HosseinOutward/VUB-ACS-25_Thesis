@@ -97,8 +97,7 @@ def format_metrics(metrics: Dict[str, float], prefix: str = "") -> str:
 
 
 @torch.no_grad()
-def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader,
-                          device: torch.device, max_batches: int = 50) -> None:
+def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batches: int = 50) -> None:
     """Recalibrate BatchNorm running statistics (critical for FL)."""
     for m in model.modules():
         if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
@@ -109,13 +108,13 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader,
         x: torch.Tensor
         if i >= max_batches:
             break
-        x = x.to(device)
-        if x.ndim == 4:
+        x = x.to(model.device)
+        if x.ndim == 4 and model.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
         model(x)
 
 
-def evaluate(model: FLModelTemplate, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def evaluate(model: FLModelTemplate, loader: DataLoader) -> Dict[str, float]:
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
 
@@ -126,8 +125,8 @@ def evaluate(model: FLModelTemplate, loader: DataLoader, device: torch.device) -
 
     with torch.inference_mode():
         for x, y in loader:
-            x = x.to(device)
-            y = y.to(device)
+            x = x.to(model.device)
+            y = y.to(model.device)
 
             use_channels_last = next(model.parameters()).is_contiguous(memory_format=torch.channels_last)
             if use_channels_last:

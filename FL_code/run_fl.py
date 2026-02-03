@@ -12,12 +12,13 @@ class FLConfig:
     # Codec to use: identity, basic, cancer_binary, cancer, cancer_wo_outlier_handling, cancer_raw,
     # non_wz_learned_with_norm, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
     codec: str = "identity"
+    model_name: str = "resnet18"  # resnet18, resnet50, resnet56
+    dataset_name: str = "SVHN"    # SVHN, CIFAR10
 
     num_clients: int = 5
     num_loader_workers: int = 2
     num_classes: int = 10
     data_folder: str = "data"
-    dataset_name: str = "SVHN"
     rounds: int = 50
     local_epochs: int = 5
     batch_size: int = 500
@@ -92,17 +93,21 @@ def _worker(
 
 if __name__ == "__main__":
     cfg = FLConfig()
-    choices = ['identity', 'basic', 'cancer_binary' , 'cancer', 'debug_CancerWithBoundCalc',
-               'cancer_wo_outlier_handling', 'cancer_raw', 'non_wz_learned']
     ap = argparse.ArgumentParser()
-    ap.add_argument("--codec", type=str,
-                    default=cfg.codec, choices=choices)
-    ap.add_argument("--master-port",  type=str,
-                    default=cfg.master_port, help="Port for master node communication")
+    ap.add_argument("--codec", type=str, default=cfg.codec,
+                    choices=['identity', 'basic', 'cancer_binary', 'cancer', 'debug_CancerWithBoundCalc',
+                             'cancer_wo_outlier_handling', 'cancer_raw', 'non_wz_learned'])
+    ap.add_argument("--model", type=str, default=cfg.model_name,
+                    choices=['resnet18', 'resnet50', 'resnet56'])
+    ap.add_argument("--dataset", type=str, default=cfg.dataset_name,
+                    choices=['SVHN', 'CIFAR10'])
+    ap.add_argument("--master-port", type=str, default=cfg.master_port)
     args = ap.parse_args()
     cfg = FLConfig(
         codec=args.codec,
-        master_port = args.master_port
+        model_name=args.model,
+        dataset_name=args.dataset,
+        master_port=args.master_port
     )
 
     # Auto-create run folder with incremented number
@@ -139,12 +144,14 @@ if __name__ == "__main__":
     os.environ['MASTER_PORT'] = cfg.master_port
 
     # Precompute dataset and store in shared memory
-    from dataset import precompute_svhn_to_shared
+    from dataset import precompute_dataset_to_shared
     if cfg.dataset_fraction:
         assert 0.0 < cfg.dataset_fraction < 1.0, "dataset_fraction must be in (0.0, 1.0)"
         print(f"[Debug] Using {cfg.dataset_fraction*100:.1f}% of dataset for quick testing.")
-    X_train, y_train = precompute_svhn_to_shared(cfg.data_folder, "train", torch.float32, cfg.dataset_fraction)
-    X_test, y_test = precompute_svhn_to_shared(cfg.data_folder, "test", torch.float32, cfg.dataset_fraction)
+    X_train, y_train = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,
+                                                    "train", torch.float32, cfg.dataset_fraction)
+    X_test, y_test = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,
+                                                  "test", torch.float32, cfg.dataset_fraction)
 
     cfg.num_classes = torch.unique(y_train).numel()
 
