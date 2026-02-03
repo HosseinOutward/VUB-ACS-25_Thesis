@@ -85,10 +85,13 @@ class CompressionRecord:
         self.global_eval_metrics: Dict[str, float] = {}
         self.worker_eval_metrics: Dict[str, Dict[str, float]] = {}
         self.entropy_real_rate: Optional[float] = None
+        self.model_size: Optional[int] = None
         self.mse: Optional[float] = None
         self.mape: Optional[float] = None
         self.mspe_sqrt: Optional[float] = None
-        self.model_size: Optional[int] = None
+        self.w_mean_of_vec: Optional[float] = None
+        self.wmape: Optional[float] = None
+        self.wmspe_sqrt: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary using class attributes."""
@@ -96,14 +99,20 @@ class CompressionRecord:
             'round_id': self.round_id,
             'client_id': self.client_id,
             'codec_class_used': self.codec_class_used,
+
+            'wmape': self.wmape,
+            'wmspe_sqrt': self.wmspe_sqrt,
+            'mse': self.mse,
+            'mape': self.mape,
+            'mspe_sqrt': self.mspe_sqrt,
+
+            'w_mean_of_vec': self.w_mean_of_vec,
+            'model_size': self.model_size,
+
             'compressed_bytes': self.compressed_bytes,
             'basic_raw_bytes': self.basic_raw_bytes,
             'compression_ratio': self.compression_ratio,
             'entropy_real_rate': self.entropy_real_rate,
-            'mse': self.mse,
-            'mape': self.mape,
-            'mspe_sqrt': self.mspe_sqrt,
-            'model_size': self.model_size,
         }
         # Add global eval metrics with prefix
         for key, value in self.global_eval_metrics.items():
@@ -166,8 +175,12 @@ class IdentityCodec:
         record.mse = torch.mean((res - delta_vec) ** 2).item()
         record.mape = torch.mean(torch.abs(res - delta_vec) / (torch.abs(delta_vec) + 1e-8)).item() * 100
         record.mspe_sqrt = torch.sqrt(torch.mean(
-            (res - delta_vec) ** 2 / (delta_vec ** 2 + 1e-8)
-        )).item() * 100
+            (res - delta_vec) ** 2 / (delta_vec ** 2 + 1e-8))).item() * 100
+
+        record.w_mean_of_vec = torch.abs(delta_vec).mean().item()
+        w = record.w_mean_of_vec
+        record.wmape = torch.mean(torch.abs(res - delta_vec)).item()/w * 100
+        record.wmspe_sqrt = np.sqrt(record.mse)/w * 100
 
         return res
 
@@ -202,31 +215,26 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
         return IdentityCodec()
     elif codec_name == "basic":
         return BasicCompressionCodec()
-    elif codec_name == "cancer_raw":
-        from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg)
     elif codec_name[1:]=='_split_codec':
         from other_protocols.n_split_protocol import NSplitCodec
         n = int(codec_name[0:1])
         return NSplitCodec(fl_cfg.num_clients, n)
 
-    vec_slice = sd_manager.get_slices() if sd_manager is not None else None
-    if codec_name == 'non_wz_learned':
-        from other_protocols.learned_quantizer_marginal import LearnedSimpleCodec
-        return LearnedSimpleCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.6})
-    elif codec_name == "cancer_wo_outlier_handling":
-        from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice})
-    elif codec_name[:6] == "cancer":
-        from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.6},
-                           binary_prot='_binary' == codec_name[6:])
+    norm_slices = None if '_basic_norm' in codec_name else sd_manager.get_slices()
+    outlier_threshold = 1.6 if '_w_outlier' in codec_name else False
+    quantizer_kwargs = {'norm_slices': norm_slices, 'outlier_threshold': outlier_threshold}
+    binary_prot = '_binary' in codec_name
 
     if 'debug_' == codec_name[0:6]:
-        from experiments.rd_mspe_wz import CancerWithBoundCalc
-        if codec_name[6:] == "cancerwithboundcalc":
-            return CancerWithBoundCalc(
-                fl_cfg, codec_name, quantizer_kwargs={'norm_slices': vec_slice, 'outlier_threshold': 1.6})
+        if "cancerwithboundcalc" in codec_name[6:]:
+            from experiments.rd_mspe_wz import CancerWithBoundCalc
+            return CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
+    elif 'non_wz_learned' in codec_name:
+        from other_protocols.learned_quantizer_marginal import LearnedSimpleCodec
+        return LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
+    elif "cancer" in codec_name:
+        from cancer_protocol import CancerCodec
+        return CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
     raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
 
