@@ -5,32 +5,31 @@ from abc import ABC, abstractmethod
 import math
 import torch
 from torch import optim as optim, nn as nn
-from torchvision.models import resnet18
+from torchvision.models import resnet18, resnet50
+
+from FL_code.other_codes.resnet56 import ResNet56CIFAR
+from FL_code.run_fl import FLConfig
 
 
 class FLModelTemplate(nn.Module, ABC):
     """Minimalist base class for federated learning models."""
 
+    def __init__(self, cfg, device: torch.device):
+        super().__init__()
+        self.cfg = cfg
+        self.device = device
+
     @abstractmethod
-    def configure_optimizer(self, device: torch.device) -> optim.Optimizer:
+    def configure_optimizer(self) -> optim.Optimizer:
         """Configure and return the optimizer for this model."""
         ...
 
     @abstractmethod
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], device: torch.device, cfg) -> torch.Tensor:
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """Execute a single training step on one batch."""
         ...
 
-    def train_epoch(
-        self,
-        dataloader,
-        optimizer: optim.Optimizer,
-        device: torch.device,
-        scaler: torch.amp.GradScaler,
-        use_amp: bool,
-        cfg,
-        max_grad_norm: float = None
-    ) -> None:
+    def train_epoch(self, dataloader, optimizer: optim.Optimizer, scaler: torch.amp.GradScaler) -> None:
         """Train for one complete epoch."""
         self.train()
 
@@ -38,67 +37,68 @@ class FLModelTemplate(nn.Module, ABC):
             optimizer.zero_grad()
 
             loss = None
-            with torch.amp.autocast("cuda", enabled=use_amp):
-                for i in range(cfg.single_batch_accum_grad_steps):
-                    mini_batch_size = math.ceil(cfg.batch_size / cfg.single_batch_accum_grad_steps)
+            with torch.amp.autocast("cuda", enabled=self.cfg.mixed_precision):
+                for i in range(self.cfg.single_batch_accum_grad_steps):
+                    mini_batch_size = math.ceil(self.cfg.batch_size / self.cfg.single_batch_accum_grad_steps)
                     part_of_batch = tuple(b[i*mini_batch_size:(i+1)*mini_batch_size] for b in batch)
-                    pob_loss = self.training_step(part_of_batch, device, cfg)
+                    pob_loss = self.training_step(part_of_batch)
                     loss = loss + pob_loss if loss is not None else pob_loss
 
             scaler.scale(loss).backward()
-
-            if max_grad_norm is not None:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
 
             scaler.step(optimizer)
             scaler.update()
 
 
-class Resnet18FLModelTemplate(FLModelTemplate):
-    """ResNet18 model for federated learning."""
+class ResNetFLModel(FLModelTemplate):
+    """Unified ResNet model for federated learning."""
 
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-        backbone = resnet18(weights=None)
-        backbone.fc = nn.Linear(backbone.fc.in_features, cfg.num_classes)
-        self.model = backbone
-
+    def __init__(self, cfg: FLConfig, device: torch.device, model: nn.Module):
+        super().__init__(cfg, device)
+        self.model = model
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass."""
         return self.model(x)
 
-    def configure_optimizer(self, device: torch.device) -> optim.Optimizer:
-        """Configure optimizer."""
-        fused = self.cfg.fused_optimizer
-        # Add momentum to stabilize federated learning
-        return optim.SGD(self.parameters(), lr=self.cfg.lr,
-                         weight_decay=self.cfg.weight_decay, fused=fused)
+    def configure_optimizer(self) -> optim.Optimizer:
+        return optim.SGD(
+            self.parameters(),
+            lr=self.cfg.lr,
+            weight_decay=self.cfg.weight_decay,
+            fused=self.cfg.fused_optimizer
+        )
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], device: torch.device, cfg) -> torch.Tensor:
-        """Single training step."""
-        x, y = batch
-
-        x = x.to(device)
-        y = y.to(device)
-
-        if cfg.channels_last:
+    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        x, y = batch[0].to(self.device), batch[1].to(self.device)
+        if self.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
 
         logits = self(x)
         loss = self.loss_fn(logits, y)
-
         return loss
 
 
-def initialize_model(cfg, device: torch.device) -> FLModelTemplate:
+def _create_backbone(name: str, num_classes: int) -> nn.Module:
+    """Create model backbone by name."""
+    if name == 'resnet18':
+        m = resnet18(weights=None)
+        m.fc = nn.Linear(m.fc.in_features, num_classes)
+    elif name == 'resnet50':
+        m = resnet50(weights=None)
+        m.fc = nn.Linear(m.fc.in_features, num_classes)
+    elif name == 'resnet56':
+        m = ResNet56CIFAR(num_classes)
+    else:
+        raise ValueError(f"Unknown model: {name}. Available: resnet18, resnet50, resnet56")
+    return m
+
+
+def initialize_model(cfg: FLConfig, device: torch.device) -> FLModelTemplate:
     """Initialize model with optimizations."""
-    model = Resnet18FLModelTemplate(cfg)
-    model = model.to(device)
+    model_name = cfg.model_name.lower()
+    backbone = _create_backbone(model_name, cfg.num_classes).to(device)
+    model = ResNetFLModel(cfg, device, backbone)
 
     if device.type == "cuda":
         if cfg.channels_last:
