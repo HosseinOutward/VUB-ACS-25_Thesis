@@ -17,62 +17,70 @@ def _kmeans_clustering(
         data: np.ndarray,
         n_clusters: int,
         n_init: int = 5,
-        max_iter: int = 100,
-        rng: Optional[np.random.Generator] = None
+        max_iter: int = 50,
+        rng: Optional[np.random.Generator] = None,
+        batch_size: int = 65536,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Simple k-means clustering.
+    Simple k-means clustering, written to avoid huge (N,K,F) broadcasted temporaries.
 
-    Args:
-        data: Input data of shape (n_samples, n_features)
-        n_clusters: Number of clusters
-        n_init: Number of initializations (unused, kept for compatibility)
-        max_iter: Maximum iterations
-        rng: Random number generator
-
-    Returns:
-        centers: Cluster centers of shape (n_clusters, n_features)
-        labels: Cluster assignment for each sample
+    Uses squared Euclidean distance identity:
+        ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x·c
+    and computes assignments in batches.
     """
     if rng is None:
         rng = np.random.default_rng(42)
 
-    n_samples = data.shape[0]
+    data = np.asarray(data, dtype=np.float32)
+    if data.ndim != 2:
+        raise ValueError("data must be 2D (n_samples, n_features)")
 
-    # Initialize centers randomly
+    n_samples, n_features = data.shape
+    n_clusters = int(min(max(1, n_clusters), n_samples))
+
+    # Initialize centers
     if n_samples >= n_clusters:
         init_indices = rng.choice(n_samples, size=n_clusters, replace=False)
     else:
         init_indices = rng.integers(0, n_samples, size=n_clusters)
     centers = data[init_indices].copy()
 
-    # Initialize labels
-    distances_squared = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-    labels = distances_squared.argmin(axis=1)
+    def assign_labels(x: np.ndarray, c: np.ndarray) -> np.ndarray:
+        c_norm = (c * c).sum(axis=1)  # (K,)
+        labels_out = np.empty(x.shape[0], dtype=np.int32)
+        for start in range(0, x.shape[0], batch_size):
+            end = min(start + batch_size, x.shape[0])
+            xb = x[start:end]                 # (B,F)
+            x_norm = (xb * xb).sum(axis=1)    # (B,)
+            d2 = x_norm[:, None] + c_norm[None, :] - 2.0 * (xb @ c.T)  # (B,K)
+            labels_out[start:end] = d2.argmin(axis=1).astype(np.int32)
+        return labels_out
 
-    # Iterate until convergence
+    labels = assign_labels(data, centers)
+
     for _ in range(max_iter):
-        # Assign each sample to nearest center
-        distances_squared = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-        labels = distances_squared.argmin(axis=1)
+        counts = np.bincount(labels, minlength=n_clusters).astype(np.int64)
+        sums = np.zeros((n_clusters, n_features), dtype=np.float32)
+        np.add.at(sums, labels, data)
 
-        # Update centers
-        new_centers = np.zeros_like(centers)
-        for k in range(n_clusters):
-            mask = labels == k
-            if np.any(mask):
-                new_centers[k] = data[mask].mean(axis=0)
-            else:
-                # Reinitialize empty cluster
-                new_centers[k] = data[rng.integers(0, n_samples)]
+        new_centers = centers.copy()
+        nonempty = counts > 0
+        new_centers[nonempty] = sums[nonempty] / counts[nonempty, None]
 
-        # Check convergence
-        if np.allclose(new_centers, centers):
+        empty = np.where(~nonempty)[0]
+        if empty.size:
+            refill_idx = rng.integers(0, n_samples, size=empty.size)
+            new_centers[empty] = data[refill_idx]
+
+        if np.allclose(new_centers, centers, rtol=1e-5, atol=1e-6):
             centers = new_centers
             break
+
         centers = new_centers
+        labels = assign_labels(data, centers)
 
     return centers, labels
+
 
 
 def _quantize_target(target: np.ndarray, n_bins: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -145,7 +153,7 @@ def _compute_conditional_pmf_soft(
     n_samples, n_clusters = soft_weights.shape
 
     # Accumulate weighted counts for each (cluster, bin) pair
-    counts = np.zeros((n_clusters, n_bins), dtype=float)
+    counts = np.zeros((n_clusters, n_bins), dtype=np.float32)
     for t in range(n_samples):
         bin_idx = int(target_bin_indices[t])
         counts[:, bin_idx] += soft_weights[t, :]
@@ -341,13 +349,13 @@ def wyner_ziv_bound(
     rng = np.random.default_rng(random_seed)
 
     # Prepare target signal
-    target = np.asarray(target, dtype=float).ravel()
+    target = np.asarray(target, dtype=np.float32).ravel()
     n_samples = target.shape[0]
 
     # Set default slope grid if not provided
     if slope_grid is None:
         slope_grid = np.logspace(-3, 3, 25)
-    slope_grid = np.asarray(slope_grid, dtype=float)
+    slope_grid = np.asarray(slope_grid, dtype=np.float32)
 
     # Step 1: Quantize target signal into discrete alphabet
     target_alphabet, target_bin_indices = _quantize_target(target, n_target_bins)
@@ -361,7 +369,7 @@ def wyner_ziv_bound(
     # Step 4: Compute conditional distribution p(x|u) based on side information clustering
     if soft_weights is not None:
         # Use provided soft cluster weights
-        soft_weights = np.asarray(soft_weights, dtype=float)
+        soft_weights = np.asarray(soft_weights, dtype=np.float32)
         # Normalize rows to sum to 1
         row_sums = soft_weights.sum(axis=1, keepdims=True) + 1e-16
         soft_weights = soft_weights / row_sums
@@ -380,7 +388,7 @@ def wyner_ziv_bound(
         if side_info is None:
             raise ValueError("Must provide one of: soft_weights, hard_labels, or side_info for clustering")
 
-        side_info = np.asarray(side_info, dtype=float)
+        side_info = np.asarray(side_info, dtype=np.float32)
         if side_info.ndim == 1:
             side_info = side_info[:, None]
         assert side_info.shape[0] == n_samples, "side_info must have same length as target"
@@ -452,7 +460,7 @@ def wyner_ziv_bound(
 
     # Step 6: Interpolate rates at specific distortion targets if requested
     if distortion_targets is not None:
-        distortion_targets = np.asarray(distortion_targets, dtype=float).ravel()
+        distortion_targets = np.asarray(distortion_targets, dtype=np.float32).ravel()
 
         # Sort by distortion in descending order and remove duplicates
         sort_indices = np.argsort(distortion)[::-1]
@@ -470,7 +478,7 @@ def wyner_ziv_bound(
         R_increasing = R_unique[increasing_order]
 
         # Interpolate
-        R_at_D = np.full(distortion_targets.shape, np.nan, dtype=float)
+        R_at_D = np.full(distortion_targets.shape, np.nan, dtype=np.float32)
         if D_increasing.size >= 2:
             for i, D_target in enumerate(distortion_targets):
                 if D_increasing.min() <= D_target <= D_increasing.max():
@@ -485,21 +493,36 @@ class CancerWithBoundCalc(CancerCodec):
     def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
         payload = super()._compress(delta_vec, record)
 
+        bound_every = 3
+        if (record.round_id % bound_every) != 0:
+            return payload
+
+        max_samples = 1_000_000
         folder_path = self.fl_cfg.records_dir + '/wz_bounds/'
         os.makedirs(folder_path, exist_ok=True)
 
         quantizer = self.frozen_quantizers[record.client_id]
-        si = quantizer.get_si_data(for_prior=True).cpu().numpy()
-        target = delta_vec.cpu().numpy()
+
+        # Pull SI + target on-device, then SUBSAMPLE before moving to CPU/NumPy.
+        si_t = quantizer.get_si_data(for_prior=True).cpu()
+        target_t = delta_vec.cpu()
+
+        max_samples = min(max_samples, target_t.numel())
+
+        idx = torch.randperm(target_t.numel())[:max_samples]
+        target = target_t[idx].float().numpy()
+        si = si_t[idx].float().numpy()
 
         bound_dict = wyner_ziv_bound(
             target=target, side_info=si,
-            slope_grid=np.logspace(-3, 3, 20),
-            distortion_targets=np.array([0.05, 0.4]),
+            slope_grid=np.logspace(-3, 3, 20, dtype=np.float32),
+            distortion_targets=np.array([0.05, 0.4], dtype=np.float32),
             n_clusters=8, n_target_bins=56, n_reconstruction_points=56,
         )
-        np.savez_compressed(folder_path+f'bound_cid{record.client_id}_rid{record.round_id}.npz',
-            dist_v = bound_dict['D'], rate_v = bound_dict['R'])
+
+        np.savez_compressed(
+            folder_path + f'bound_rid{record.round_id}_cid{record.client_id}.npz',
+            dist_v=bound_dict['D'], rate_v=bound_dict['R'],)
 
         return payload
 
