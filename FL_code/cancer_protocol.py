@@ -51,7 +51,7 @@ import torch
 from cancer_quantizer import WZQuantizerCancer
 from codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
 from prior_calculator import PriorCalculator
-from run_fl import FLConfig
+from run_fl import FLConfig, _DEBUG_FLAG
 
 
 # ============================================================================
@@ -64,15 +64,12 @@ class CancerConfig:
     warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: Tuple[Tuple[str, int, int]] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
 
-    warmup_phase_binary: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 2 + (('R', 2, 2),)
-    routine_phase_binary: Tuple[Tuple[str, int, int]] = (('T', 2, 1), ('T', 2, 1), ('R', 2, 1)) + (('F', 2, 1),) * 6
-
     max_side_info_count: int = 5
     pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
 
-    train_epochs: int = 70
+    train_epochs: int = 70 if not _DEBUG_FLAG else 1
     reconst_ld: float = 300.0
-    train_sample_size: int = 300_000
+    train_sample_size: int = 300_000 if not _DEBUG_FLAG else 100_000
     lr: float = 1e-3
     lr_step: int = 35
     tau: float = 1.3
@@ -139,8 +136,7 @@ class CancerCodec(IdentityCodec):
 
         self.c_cfg = CancerConfig()
         if binary_prot:
-            self.c_cfg.warmup_phase = self.c_cfg.warmup_phase_binary
-            self.c_cfg.routine_phase = self.c_cfg.routine_phase_binary
+            self.c_cfg.routine_phase = tuple((a[0],2,1) for a in self.c_cfg.routine_phase)
 
         self.quantizer_kwargs = quantizer_kwargs
 

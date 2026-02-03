@@ -5,22 +5,26 @@ import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 
+_DEBUG_FLAG = False # True
+if _DEBUG_FLAG:
+    print('**************************************************')
+    print('*********  DEBUG MODE  **********')
 
 @dataclass
 class FLConfig:
     """Federated learning configuration."""
-    # Codec to use: identity, basic, cancer_binary, cancer, cancer_wo_outlier_handling, cancer_raw,
-    # non_wz_learned_with_norm, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
-    codec: str = "identity"
+    # Codec to use: identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
+    # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
+    codec: str = "cancer_w_outlier"
     model_name: str = "resnet18"  # resnet18, resnet50, resnet56
     dataset_name: str = "SVHN"    # SVHN, CIFAR10
 
-    num_clients: int = 5
+    num_clients: int = 5 if not _DEBUG_FLAG else 3
     num_loader_workers: int = 2
     num_classes: int = 10
     data_folder: str = "data"
     rounds: int = 50
-    local_epochs: int = 5
+    local_epochs: int = 5 if not _DEBUG_FLAG else 1
     batch_size: int = 500
     single_batch_accum_grad_steps: int = 1 # chop down the above batch into smaller pieces and combine grads.
     lr: float = 1e-3
@@ -40,7 +44,7 @@ class FLConfig:
 
     training_progress_bar: bool = False
     records_dir: str | None = f"records"  # Directory to save records, None to disable
-    dataset_fraction: float = None  # Fraction of dataset to use or None for full dataset
+    dataset_fraction: float = None if not _DEBUG_FLAG else 0.1  # Fraction of dataset to use or None for full
 
     backend: str = "gloo" # "gloo" only, "nccl" for GPU/Linux and doesn't support cpu
     master_addr: str = "localhost"
@@ -94,9 +98,7 @@ def _worker(
 if __name__ == "__main__":
     cfg = FLConfig()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--codec", type=str, default=cfg.codec,
-                    choices=['identity', 'basic', 'cancer_binary', 'cancer', 'debug_CancerWithBoundCalc',
-                             'cancer_wo_outlier_handling', 'cancer_raw', 'non_wz_learned'])
+    ap.add_argument("--codec", type=str, default=cfg.codec,)
     ap.add_argument("--model", type=str, default=cfg.model_name,
                     choices=['resnet18', 'resnet50', 'resnet56'])
     ap.add_argument("--dataset", type=str, default=cfg.dataset_name,
@@ -122,7 +124,7 @@ if __name__ == "__main__":
         while (base_dir / f"run{run_num}").exists():
             run_num += 1
 
-        run_dir = base_dir / f"run{run_num}"
+        run_dir = base_dir / f"run{run_num}_{cfg.codec}"
         run_dir.mkdir()
         cfg.records_dir = str(run_dir)
 

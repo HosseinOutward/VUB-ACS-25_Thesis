@@ -16,12 +16,9 @@ from FL_code.cancer_quantizer import WZQuantizerCancer
 class LearnedSimpleCodec(CancerCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
         super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
-        self.c_cfg = CancerConfig(
-            warmup_phase = (('P', 8, 3),),
-            routine_phase = (('M', 2, 3), ('M', 2, 3), ('M', 2, 3)) + (('F', 2, 3),) * 6
-        )
         if binary_prot:
-            self.c_cfg.routine_phase = tuple((a[0],a[1],1) for a in self.c_cfg.routine_phase)
+            self.c_cfg.warmup_phase = tuple(('M' if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
+            self.c_cfg.routine_phase = tuple(('M' if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
 
         assert [c[0] in ['P', 'F', 'M'] for c in self.c_cfg.warmup_phase]
         assert [c[0] in ['F', 'M'] for c in self.c_cfg.routine_phase]
