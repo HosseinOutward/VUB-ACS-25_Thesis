@@ -9,11 +9,11 @@ We consider standard FL setup with FedSGD algorithm With $K$ agents minimizing g
 %-----------------------------------------------------------------------
 \subsection{Wyner-Ziv Theorem}
 \label{ssec:backwz}
-Given remote source $X$, and side information $Y$ only at decoder, the Wyner-Ziv rate-distortion function~\cite{1055508} is:
+Given remote source $X$, and side information $Y$ only at decoder, the Wyner-Ziv rate-distortion function~\cite{WynerZiv1976} is:
 \begin{equation}
     R_{WZ}(D) = \min_{p(\hat{x}|x,y): \mathbb{E}[d(X,\hat{X})] \leq D} I(X;\hat{X}|Y)
 \end{equation}
-where $I(X;\hat{X}|Y)$ is conditional mutual information between $X$ and reconstruction $\hat{X}$ given $Y$. Under certain conditions, this achieves the Wyner-Ziv bound, matching rate-distortion function with side information at both encoder and decoder~\cite{1055508}.
+where $I(X;\hat{X}|Y)$ is conditional mutual information between $X$ and reconstruction $\hat{X}$ given $Y$. Under certain conditions, this achieves the Wyner-Ziv bound, matching rate-distortion function with side information at both encoder and decoder~\cite{WynerZiv1976}.
 
 %-----------------------------------------------------------------------
 \subsection{Learned WZ Quantizers + Slepian-Wolf Coding}
