@@ -173,15 +173,21 @@ class CancerCodec(IdentityCodec):
 
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
+            extra_si_for_prior = [item
+                        for reconst_list in self.client_past_reconst
+                        for item in reconst_list]
             train_si, target_x = None, None
 
         elif round_type == 'M': # Marginal
+            extra_si_for_prior = [item
+                        for reconst_list in self.client_past_reconst
+                        for item in reconst_list]
             train_si, target_x = None, delta_vec
 
         elif round_type == 'R': # Retrain
             train_si = [item
-                        for cid, reconst_list in enumerate(self.srvr_past_reconst)
-                        for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
+                    for cid, reconst_list in enumerate(self.srvr_past_reconst)
+                    for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
             target_x = self.srvr_past_reconst[client_idx][-1]
             extra_si_for_prior = [target_x]
             assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,

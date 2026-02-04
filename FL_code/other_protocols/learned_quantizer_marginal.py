@@ -16,45 +16,12 @@ from FL_code.cancer_quantizer import WZQuantizerCancer
 class LearnedSimpleCodec(CancerCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
         super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
-        if binary_prot:
-            self.c_cfg.warmup_phase = tuple(('M' if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
-            self.c_cfg.routine_phase = tuple(('M' if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
+        self.c_cfg.warmup_phase = tuple(('M' if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
+        self.c_cfg.routine_phase = tuple(('M' if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
 
         assert [c[0] in ['P', 'F', 'M'] for c in self.c_cfg.warmup_phase]
         assert [c[0] in ['F', 'M'] for c in self.c_cfg.routine_phase]
 
-    def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
-        round_bpp, round_np = record.bits_per_plane, record.num_planes
-        client_idx = record.client_id
-
-        extra_si_for_prior = [item for reconst_list in self.srvr_past_reconst for item in reconst_list]
-        quantizer = WZQuantizerCancer(
-            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-            si_size=0, **self.quantizer_kwargs, extra_si_for_prior = extra_si_for_prior
-        )
-
-        # Load pretrained weights or train the model
-        if record.round_id != 0:
-            quantizer.train_model(delta_vec, None)
-        else:
-            weight_path = self.c_cfg.pretrain_pth_dir + f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
-            quantizer.coding_model.load_state_dict(torch.load(weight_path), strict=False)
-            quantizer.side_info_list_used = []  # Pretrained models are marginal
-
-        self.frozen_quantizers[client_idx] = quantizer
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
-        client_idx = record.client_id
-        quantizer = self.frozen_quantizers[client_idx]
-        reconst = quantizer.decoding_process(payload['payload_content'])
-
-        # Update server-side history (always)
-        self._update_history(self.srvr_past_reconst[client_idx], reconst)
-
-        return reconst
 
 if __name__ == '__main__':
     num_clients = 3
