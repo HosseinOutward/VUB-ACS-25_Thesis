@@ -180,7 +180,7 @@ class IdentityCodec:
         record.w_mean_of_vec = torch.abs(delta_vec).mean().item()
         w = record.w_mean_of_vec
         record.wmape = torch.mean(torch.abs(res - delta_vec)).item()/w * 100
-        record.wmspe_sqrt = np.sqrt(record.mse)/w * 100
+        record.wmspe_sqrt = float(np.sqrt(record.mse))/w * 100
 
         return res
 

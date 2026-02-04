@@ -8,7 +8,7 @@ import torch.distributed as dist
 _DEBUG_FLAG = False # True
 if _DEBUG_FLAG:
     print('**************************************************')
-    print('*********  DEBUG MODE  **********')
+    print('******************  DEBUG MODE  ******************')
 
 @dataclass
 class FLConfig:
@@ -121,7 +121,8 @@ if __name__ == "__main__":
 
         # Find next run number
         run_num = 1
-        while (base_dir / f"run{run_num}").exists():
+        file_list = os.listdir(base_dir)
+        while any([f"run{run_num}" in f for f in file_list]):
             run_num += 1
 
         run_dir = base_dir / f"run{run_num}_{cfg.codec}"
