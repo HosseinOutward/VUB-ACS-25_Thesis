@@ -81,6 +81,8 @@ class PriorCalculator:
                 c_cfg, batch_size, return_loss=True)
             for _ in range(c_cfg.prior_train_repeats)
         ]
+        train_attempts = [(model, loss) for model, loss in train_attempts
+                          if not torch.isnan(torch.tensor(loss))]
         q_model, lowest_trained_rate = min(train_attempts, key=lambda x: x[1])
         return q_model
 
@@ -153,4 +155,4 @@ class PriorCalculator:
         prior_model.cpu().eval()
         torch.cuda.empty_cache()
 
-        return prior_model, epoch_loss if return_loss else prior_model
+        return (prior_model, epoch_loss) if return_loss else prior_model

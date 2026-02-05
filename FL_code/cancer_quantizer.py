@@ -160,7 +160,9 @@ class WZQuantizerCancer:
 
         si_trans = [*self.side_info_list_used]
 
-        zero_si = (len(si_trans) == 1 and torch.all(si_trans[0] == 0))
+        assert self.si_count == len(si_trans), f"Expected {self.si_count} side info count, but got {len(si_trans)}."
+
+        zero_si = torch.all(si_trans[0] == 0)
 
         if for_prior and len(self.extra_si_for_prior)!=0:
             if zero_si:
@@ -195,20 +197,33 @@ class WZQuantizerCancer:
         max_attempts = self.c_cfg.quantizer_train_repeats
         num_planes, bins_per_plane, marginal_loss = \
             self.coding_model.num_planes, self.coding_model.bins_per_plane, self.coding_model.marginal
-        model_list:List[EncoderDecoderLayeredRNN] = [
-            self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
-            for _ in range(max_attempts)
-        ]
 
         assert len(si_trans) == self.si_vec_size
         assert si_trans.shape[1] == self.si_count
         assert x_prep.shape[0] == self.si_vec_size
-        model_losses:List[float] = [
-            self._train_model_single_attempt(
-                m, x_prep, si_trans, self.fl_cfg, self.c_cfg,
+
+        tries = 0
+        model_losses: List[float] = []
+        model_list: List[EncoderDecoderLayeredRNN] = []
+        while len(model_losses) < max_attempts:
+            assert tries<=max_attempts*5, "Too many failed training attempts."
+            tries += 1
+
+            qz_model = self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
+            qz_loss = self._train_model_single_attempt(
+                qz_model, x_prep, si_trans, self.fl_cfg, self.c_cfg,
                 num_planes, self.mspe_denom, batch_size, return_loss=True)
-            for m in model_list
-        ]
+            if qz_loss is None or np.isnan(qz_loss) or np.isinf(qz_loss):
+                continue
+
+            qz_test_res = self.encoding_process(x_raw)
+            qz_test_res = self.decoding_process(qz_test_res)
+            if torch.isnan(qz_test_res).any() or torch.isinf(qz_test_res).any():
+                continue
+
+            model_losses.append(qz_loss)
+            model_list.append(qz_model)
+
         best_idx = int(np.argmin(model_losses))
         self.coding_model = model_list[best_idx]
 

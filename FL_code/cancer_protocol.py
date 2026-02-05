@@ -79,16 +79,16 @@ class CancerConfig:
 
 
 class BinsCodecRecord(CompressionRecord):
-    def __init__(self, round_id: int, client_id: int, bits_per_plane: int, method: str):
+    def __init__(self, round_id: int, client_id: int, bins_per_plane: int, method: str):
         super().__init__(round_id, client_id, method)
-        self.bits_per_plane: Optional[int] = bits_per_plane
+        self.bins_per_plane: Optional[int] = bins_per_plane
         self.prior_rate: Optional[float] = None
         self.marginal_rate: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result.update({
-            "bits_per_plane": self.bits_per_plane,
+            "bins_per_plane": self.bins_per_plane,
             "prior_rate": self.prior_rate,
             "marginal_rate": self.marginal_rate,
         })
@@ -112,7 +112,7 @@ class CancerRecord(BinsCodecRecord):
         result.update({
             "phase": self.phase,
             "round_type": self.round_type,
-            "bits_per_plane": self.bits_per_plane,
+            "bins_per_plane": self.bins_per_plane,
             "num_planes": self.num_planes,
             "prior_rate": self.prior_rate,
             "marginal_rate": self.marginal_rate,
@@ -160,7 +160,7 @@ class CancerCodec(IdentityCodec):
 
     def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
         """Train new quantizer or load pretrained if needed (P, T, R rounds)."""
-        round_type, round_bpp, round_np = record.round_type, record.bits_per_plane, record.num_planes
+        round_type, round_bpp, round_np = record.round_type, record.bins_per_plane, record.num_planes
         client_idx = record.client_id
 
         extra_si_for_prior = []
@@ -174,14 +174,14 @@ class CancerCodec(IdentityCodec):
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
             extra_si_for_prior = [item
-                        for reconst_list in self.client_past_reconst
-                        for item in reconst_list]
+                            for reconst_list in self.srvr_past_reconst
+                            for item in reconst_list]
             train_si, target_x = None, None
 
         elif round_type == 'M': # Marginal
             extra_si_for_prior = [item
-                        for reconst_list in self.client_past_reconst
-                        for item in reconst_list]
+                            for reconst_list in self.srvr_past_reconst
+                            for item in reconst_list]
             train_si, target_x = None, delta_vec
 
         elif round_type == 'R': # Retrain
@@ -194,9 +194,11 @@ class CancerCodec(IdentityCodec):
                                       self.c_cfg.max_side_info_count * self.num_clients - 1)
 
         elif round_type == 'T': # Temporal
-            train_si = [item
-                        for reconst_list in self.client_past_reconst
-                        for item in reconst_list]
+            train_si = [*self.client_past_reconst[client_idx]]
+            is_tensor_in_list = lambda tensor, lst: any(torch.equal(tensor, item) for item in lst)
+            extra_si_for_prior = [item
+                            for reconst_list in self.srvr_past_reconst
+                            for item in reconst_list if not is_tensor_in_list(item, train_si)]
             target_x = delta_vec
 
         else:
@@ -358,7 +360,7 @@ if __name__ == "__main__":
 
         # Print round summary using first client's record for phase info
         r = round_records[0]
-        print(f"\nR{round_id:2d} [{r.phase[0]}|{r.round_type}|{r.bits_per_plane}bpp|{r.num_planes}p]")
+        print(f"\nR{round_id:2d} [{r.phase[0]}|{r.round_type}|{r.bins_per_plane}bpp|{r.num_planes}p]")
         print(f"  MAPE={avg_mape:5.2f}% | MSPE_sqrt={avg_mspe_sqrt:5.2f}% | Comp_ratio={avg_comp_ratio:.2f}x")
         print(f"  Prior_rate={avg_prior_rate:.3f}bpp | Marginal_rate={avg_marginal_rate:.3f}bpp | Entropy_real_rate={avg_entropy_real_rate:.3f}bpp")
 
@@ -368,6 +370,4 @@ if __name__ == "__main__":
     print(f"  Comp_ratio={np.mean(comp_ratio_list):.2f}x")
     print(f"  Prior_rate={np.mean(prior_rate_list):.3f}bpp | Marginal_rate={np.mean(marginal_rate_list):.3f}bpp | Entropy_real_rate={np.mean(entropy_real_rate_list):.3f}bpp")
     print(f"{'='*70}")
-
-
 

@@ -92,6 +92,7 @@ class CompressionRecord:
         self.w_mean_of_vec: Optional[float] = None
         self.wmape: Optional[float] = None
         self.wmspe_sqrt: Optional[float] = None
+        self._og_delta_vec = None  # Original delta vector for reference
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert record to dictionary using class attributes."""
@@ -162,7 +163,7 @@ class IdentityCodec:
         record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
         record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
 
-        record.mse = delta_vec # temporary placeholder for post decompression mse calculation
+        record._og_delta_vec = delta_vec.clone()
 
         return payload
 
@@ -171,7 +172,9 @@ class IdentityCodec:
         res = self._decompress(payload_content, record)
         assert res.dtype == torch.float32 and res.device == torch.device('cpu')
 
-        delta_vec = record.mse
+        delta_vec = record._og_delta_vec
+        record._og_delta_vec = None
+
         record.mse = torch.mean((res - delta_vec) ** 2).item()
         record.mape = torch.mean(torch.abs(res - delta_vec) / (torch.abs(delta_vec) + 1e-8)).item() * 100
         record.mspe_sqrt = torch.sqrt(torch.mean(
@@ -232,6 +235,9 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     elif 'non_wz_learned' in codec_name:
         from other_protocols.learned_quantizer_marginal import LearnedSimpleCodec
         return LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
+    elif 'temporal_only' in codec_name:
+        from other_protocols.temporal_wz import TemporalCodec
+        return TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
     elif "cancer" in codec_name:
         from cancer_protocol import CancerCodec
         return CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)

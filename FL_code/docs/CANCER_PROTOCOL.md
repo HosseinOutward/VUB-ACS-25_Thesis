@@ -172,7 +172,7 @@ if round_type == 'F':
 | `round_id` | Current round number |
 | `client_id` | Client identifier |
 | `round_type` | P, T, R, or F |
-| `bits_per_plane` | Quantization bins per plane |
+| `bins_per_plane` | Quantization bins per plane |
 | `num_planes` | Number of quantization planes |
 | `compressed_bytes` | Compressed payload size (MB) |
 | `basic_raw_bytes` | Uncompressed size (MB) |

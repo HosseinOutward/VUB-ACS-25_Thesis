@@ -1,4 +1,3 @@
-import gc
 import torch
 
 
@@ -9,8 +8,7 @@ except ModuleNotFoundError:
     sys.path.append('..')
     from FL_code.cancer_protocol import CancerConfig
 from FL_code.run_fl import FLConfig
-from FL_code.cancer_protocol import CancerConfig, CancerCodec, CancerRecord
-from FL_code.cancer_quantizer import WZQuantizerCancer
+from FL_code.cancer_protocol import CancerCodec
 
 
 class LearnedSimpleCodec(CancerCodec):
