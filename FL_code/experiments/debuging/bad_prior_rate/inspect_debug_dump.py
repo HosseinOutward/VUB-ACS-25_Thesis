@@ -37,7 +37,7 @@ class DebugInspector:
         print("DEBUG DUMP SUMMARY")
         print("="*70)
         print(f"Round: {d['round_id']}, Client: {d['client_id']}, Type: {d['round_type']}, Phase: {d['phase']}")
-        print(f"Bits per plane: {d['bits_per_plane']}, Num planes: {d['num_planes']}")
+        print(f"Bits per plane: {d['bins_per_plane']}, Num planes: {d['num_planes']}")
         print(f"\n>>> Prior rate: {d['prior_rate']:.4f} bpp")
         print(f">>> Marginal rate: {d['marginal_rate']:.4f} bpp")
         print(f">>> Difference: {d['prior_rate'] - d['marginal_rate']:.4f} (should be negative!)")
@@ -90,7 +90,7 @@ class DebugInspector:
             print(f"  Rate contribution: {rate:.4f} bpp")
 
             # Marginal rate for this plane
-            bin_counts = torch.bincount(plane_bins.long(), minlength=d['bits_per_plane']).float()
+            bin_counts = torch.bincount(plane_bins.long(), minlength=d['bins_per_plane']).float()
             marginal_probs = bin_counts / len(plane_bins)
             marginal_rate = -torch.log2(marginal_probs[plane_bins.long()].clamp(min=1e-8)).mean().item()
             print(f"  Marginal rate: {marginal_rate:.4f} bpp")
@@ -100,7 +100,7 @@ class DebugInspector:
         """Analyze the marginal (bin count) distribution."""
         d = self.data
         bins = d['bins']
-        bins_per_plane = d['bits_per_plane']
+        bins_per_plane = d['bins_per_plane']
 
         print("\n" + "="*70)
         print("MARGINAL (BIN COUNT) DISTRIBUTION")

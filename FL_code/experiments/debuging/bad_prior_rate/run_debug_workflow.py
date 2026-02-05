@@ -45,7 +45,7 @@ def run_workflow():
             diff = record.prior_rate - record.marginal_rate
             status = "✓" if diff < 0.1 else "❌"
 
-            print(f"R{round_id:2d}C{client_id} [{record.phase[0]}|{record.round_type:2s}|{record.bits_per_plane}bpp] "
+            print(f"R{round_id:2d}C{client_id} [{record.phase[0]}|{record.round_type:2s}|{record.bins_per_plane}bpp] "
                   f"prior={record.prior_rate:.3f} marg={record.marginal_rate:.3f} diff={diff:+.3f} {status}")
 
         base_gradient = base_gradient + torch.randn(n) * 0.01

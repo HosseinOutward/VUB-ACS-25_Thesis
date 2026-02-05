@@ -62,11 +62,11 @@ class NSplitCodec(IdentityCodec):
 
         si_trans = self.get_si_data()
         q_model = PriorCalculator.train_prior_model(
-            bins_vec, si_trans, 1, record.bits_per_plane, CancerConfig())
+            bins_vec, si_trans, 1, record.bins_per_plane, CancerConfig())
         prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
         record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins_vec, 1)
 
-        m_prior = PriorCalculator.compute_marginal_prior(bins_vec, record.bits_per_plane, 1)
+        m_prior = PriorCalculator.compute_marginal_prior(bins_vec, record.bins_per_plane, 1)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins_vec, 1)
 
         return payload

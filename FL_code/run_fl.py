@@ -14,7 +14,7 @@ if _DEBUG_FLAG:
 class FLConfig:
     """Federated learning configuration."""
     # Codec to use: identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
-    # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
+    # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary), temporal_only
     codec: str = "cancer_w_outlier"
     model_name: str = "resnet18"  # resnet18, resnet50, resnet56
     dataset_name: str = "SVHN"    # SVHN, CIFAR10
@@ -157,6 +157,8 @@ if __name__ == "__main__":
                                                   "test", torch.float32, cfg.dataset_fraction)
 
     cfg.num_classes = torch.unique(y_train).numel()
+
+    print(f'[MAIN] {cfg.codec}')
 
     # Spawn distributed processes
     mp.spawn(

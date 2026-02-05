@@ -11,14 +11,14 @@ from FL_code.run_fl import FLConfig
 from FL_code.cancer_protocol import CancerCodec
 
 
-class LearnedSimpleCodec(CancerCodec):
+class TemporalCodec(CancerCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
         super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
-        self.c_cfg.warmup_phase = tuple(('M' if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
-        self.c_cfg.routine_phase = tuple(('M' if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
+        self.c_cfg.warmup_phase = tuple(('T' if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
+        self.c_cfg.routine_phase = tuple(('T' if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
 
-        assert [c[0] in ['P', 'F', 'M'] for c in self.c_cfg.warmup_phase]
-        assert [c[0] in ['F', 'M'] for c in self.c_cfg.routine_phase]
+        assert [c[0] in ['P', 'F', 'T'] for c in self.c_cfg.warmup_phase]
+        assert [c[0] in ['F', 'T'] for c in self.c_cfg.routine_phase]
 
 
 if __name__ == '__main__':
@@ -26,7 +26,7 @@ if __name__ == '__main__':
     num_rounds = 10
     vector_size = 1_000_000
     base_vector = torch.normal(0, 1, size=(vector_size,))
-    codec = LearnedSimpleCodec(FLConfig())
+    codec = TemporalCodec(FLConfig())
     codec.c_cfg.pretrain_pth_dir = r'../data/pre_trained_pth/'
 
     # base_vector = base_vector + torch.normal(0.0, 0.01, size=(vector_size,))

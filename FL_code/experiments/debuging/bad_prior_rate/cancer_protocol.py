@@ -55,7 +55,7 @@ class CancerRecord(CompressionRecord):
             'client_id': record.client_id,
             'round_type': record.round_type,
             'phase': record.phase,
-            'bits_per_plane': record.bits_per_plane,
+            'bins_per_plane': record.bins_per_plane,
             'num_planes': record.num_planes,
             'prior_rate': record.prior_rate,
             'marginal_rate': record.marginal_rate,
