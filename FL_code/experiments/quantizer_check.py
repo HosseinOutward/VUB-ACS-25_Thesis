@@ -55,7 +55,7 @@ NOISE_POWER = 0.1
 CODEC_NAMES = []
 CODEC_NAMES += ['cancer_basic_norm']
 MODEL_TYPES = []
-MODEL_TYPES += ['M','TM','T','R']
+MODEL_TYPES += ['M','TM','T','R','RM']
 QUANTIZER_SETTINGS = []
 # QUANTIZER_SETTINGS += [(2,1)]
 # QUANTIZER_SETTINGS += [(2, 2), (4, 3)]
@@ -105,6 +105,7 @@ def get_plot_styles_from_data(records: List[dict]) -> Dict[str, PlotStyle]:
         'TM': 'x',
         'R': 's',
         'M': '^',
+        'RM': 'v',
     }
 
     styles = {}
@@ -153,8 +154,8 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
                       training_progress_bar=True, compile_mode=False)
 
     codec: CancerCodec = create_codec(fl_cfg, None)
-    if isinstance(codec, CancerCodec):
-        codec.c_cfg.warmup_phase = ((config.model_type, config.bins_per_plane, config.num_planes),)
+
+    codec.c_cfg.warmup_phase = ((config.model_type, config.bins_per_plane, config.num_planes),)
 
     record = codec.create_record(round_id=0, client_id=0)
 
@@ -162,7 +163,7 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     possible_si = [side_info.clone().to(torch.float16), temp]
     if config.model_type in ['T', 'TM']:
         codec.client_past_reconst[0] = [possible_si[0]]
-    elif config.model_type == 'R':
+    elif config.model_type in ['R', 'RM']:
         codec.srvr_past_reconst[0] = possible_si
         record.round_id = 2
     elif config.model_type == 'M':
@@ -174,9 +175,9 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     record.model_size = DATA_SIZE
     compressed_payload = codec.encode(signal, record)
     _ = codec.decode(compressed_payload, record)
-    if isinstance(codec, CancerCodec):
-        print(f'used si count: {len(codec.frozen_quantizers[0].side_info_list_used)}, '
-              f'extra si count: {len(codec.frozen_quantizers[0].extra_si_for_prior)}')
+
+    print(f'used si count: {len(codec.frozen_quantizers[0].side_info_list_used)}, '
+          f'extra si count: {len(codec.frozen_quantizers[0].extra_si_for_prior)}')
 
     result = record.to_dict()
     result['trial_number'] = trial_idx
