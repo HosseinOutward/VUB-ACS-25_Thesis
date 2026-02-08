@@ -77,7 +77,7 @@ class CancerRecord(CompressionRecord):
                 'no_si': quantizer.no_si,
                 'vec_slices': quantizer.vec_slices,
                 'outlier_threshold': quantizer.outlier_threshold,
-                'mspe_denom': quantizer.mspe_denom,
+                'wmspe_denom': quantizer.wmspe_denom,
                 'si_vec_size': quantizer.si_vec_size,
             },
             'side_info_list_used': [si.cpu() if isinstance(si, torch.Tensor) else si

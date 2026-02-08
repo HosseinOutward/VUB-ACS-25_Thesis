@@ -149,10 +149,19 @@ class CompressionRecord:
 
 # --- Compression Codecs --- #
 class IdentityCodec:
+    def __init__(self, save_delta_vec=False):
+        self.save_delta_vec = save_delta_vec
+
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         return CompressionRecord(round_id, client_id, method="identity")
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+        if self.save_delta_vec:
+            debug_folder = Path('experiments/debuging/debugging_data')
+            delta_data_path = debug_folder / 'delta_vec_data' / f'round_{record.round_id}_client_{record.client_id}.pt'
+            delta_data_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(delta_vec, delta_data_path)
+
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
         record.basic_raw_bytes = get_obj_compressed_size(compress_data_list(delta_vec), with_compression=False) / (1024 ** 2)
 
@@ -214,8 +223,9 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     """Create codec instance."""
     codec_name = fl_cfg.codec.lower()
 
-    if codec_name == "identity":
-        return IdentityCodec()
+    if codec_name[:8] == "identity":
+        save_delta_vec = '_debug_save_delta' in codec_name
+        return IdentityCodec(save_delta_vec=save_delta_vec)
     elif codec_name == "basic":
         return BasicCompressionCodec()
     elif codec_name[1:]=='_split_codec':
@@ -236,10 +246,10 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
         from other_protocols.SingleTypeCodecs import LearnedSimpleCodec
         return LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
     elif 'temporal_only' in codec_name:
-        from FL_code.other_protocols.SingleTypeCodecs import TemporalCodec
+        from other_protocols.SingleTypeCodecs import TemporalCodec
         return TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
     elif 'marginal_temporal' in codec_name:
-        from FL_code.other_protocols.SingleTypeCodecs import TemporalMarginalCodec
+        from other_protocols.SingleTypeCodecs import TemporalMarginalCodec
         return TemporalMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
     elif 'marginal_cancer' in codec_name:
         from other_protocols.SingleTypeCodecs import CancerSemiMarginal

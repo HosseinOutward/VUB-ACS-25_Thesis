@@ -87,7 +87,7 @@ class WZQuantizerCancer:
         self.si_count = max(si_size, 1)
 
         self.cached_priors_dict: Dict[str, torch.Tensor] = {}
-        self.mspe_denom: float | None = None
+        self.wmspe_denom: float | None = None
         self.si_vec_size: Optional[int] = None
 
     @property
@@ -111,7 +111,7 @@ class WZQuantizerCancer:
 
     @staticmethod
     def compute_loss(rnn_model, x_vec: torch.Tensor, side_info: torch.Tensor,
-                     current_epoch: int, c_cfg, num_planes, mspe_denom) -> torch.Tensor:
+                     current_epoch: int, c_cfg, num_planes, wmspe_denom) -> torch.Tensor:
         training_prog = current_epoch / (c_cfg.train_epochs + 1)
         tau_t = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
@@ -121,7 +121,7 @@ class WZQuantizerCancer:
         loss = 0.0
         for i in range(num_planes):
             # reconstruction component of the loss
-            dist = F.mse_loss(reconstruct[i]/mspe_denom, x_vec/mspe_denom)
+            dist = F.mse_loss(reconstruct[i], x_vec)/wmspe_denom
             loss = loss + c_cfg.reconst_ld * dist
 
             # rate component of the loss
@@ -189,7 +189,7 @@ class WZQuantizerCancer:
         self.side_info_list_used = si_raw_list
 
         # Convert to model format (preprocessing applied)
-        self.mspe_denom: float = x_raw.abs().mean().item()/2 + 1e-8
+        self.wmspe_denom: float = (x_raw ** 2).mean().item() / 2 + 1e-8
         x_prep, _ = self.get_x_data(x_raw)
         si_trans = self.get_si_data()
 
@@ -212,7 +212,7 @@ class WZQuantizerCancer:
             qz_model = self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
             qz_loss = self._train_model_single_attempt(
                 qz_model, x_prep, si_trans, self.fl_cfg, self.c_cfg,
-                num_planes, self.mspe_denom, batch_size, return_loss=True)
+                num_planes, self.wmspe_denom, batch_size, return_loss=True)
             if qz_loss is None or np.isnan(qz_loss) or np.isinf(qz_loss):
                 continue
 
