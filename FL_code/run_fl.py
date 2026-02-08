@@ -51,8 +51,10 @@ class FLConfig:
     master_addr: str = "localhost"
     master_port: str = "29500"
 
-    debug_folder:Path | bool = Path('experiments/debuging/debugging_data') # false to disable all debug saving
+    debug_save_train_data: bool = False
+    debug_data_folder: Path = Path('experiments/debuging/debugging_data')
     debug_save_deltas:str = 'delta_vec_data'
+    debug_load_from_saved_data:bool = False
 
 
 def _worker(

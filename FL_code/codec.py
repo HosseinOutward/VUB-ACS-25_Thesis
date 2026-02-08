@@ -156,12 +156,6 @@ class IdentityCodec:
         return CompressionRecord(round_id, client_id, method="identity")
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        if self.fl_cfg.debug_folder is not False:
-            delta_data_path = self.fl_cfg.debug_folder / self.fl_cfg.debug_save_deltas
-            assert delta_data_path.exists()
-            delta_data_path = delta_data_path / f'round_{record.round_id}_client_{record.client_id}.pt'
-            torch.save(delta_vec, delta_data_path)
-
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
         record.basic_raw_bytes = get_obj_compressed_size(compress_data_list(delta_vec), with_compression=False) / (1024 ** 2)
 
@@ -224,8 +218,7 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
     codec_name = fl_cfg.codec.lower()
 
     if codec_name[:8] == "identity":
-        save_delta_vec = '_debug_save_delta' in codec_name
-        return IdentityCodec(fl_cfg, save_delta_vec=save_delta_vec)
+        return IdentityCodec(fl_cfg)
     elif codec_name == "basic":
         return BasicCompressionCodec(fl_cfg)
     elif codec_name[1:]=='_split_codec':
