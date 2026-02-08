@@ -26,12 +26,15 @@ LOG_DIR="sbatch/sbatch_log"
 # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
 JOBS=(
 #  "5_split_codec 29505"
-#  "temporal_only 29560"
-  "cancer 29580"
-#  "marginal_cancer_binary 29605"
-#  "cancer_basic_norm 29620"
-#  "non_wz_learned_w_outlier 29640"
+#  "temporal_only 29520"
+#  "cancer 29540"
+#  "marginal_cancer_binary 29560"
+#  "cancer_basic_norm 29580"
+#  "non_wz_learned_w_outlier 29605"
+#  "marginal_cancer 29620"
+#  "marginal_cancer 29640"
 #  "marginal_cancer 29660"
+#  "marginal_cancer 29680"
 )
 
 # ---------- Safety checks ----------

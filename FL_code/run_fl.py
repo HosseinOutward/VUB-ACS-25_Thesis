@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
+from pathlib import Path
 
 _DEBUG_FLAG = False # True
 if _DEBUG_FLAG:
@@ -49,6 +50,9 @@ class FLConfig:
     backend: str = "gloo" # "gloo" only, "nccl" for GPU/Linux and doesn't support cpu
     master_addr: str = "localhost"
     master_port: str = "29500"
+
+    debug_folder:Path | bool = Path('experiments/debuging/debugging_data') # false to disable all debug saving
+    debug_save_deltas:str = 'delta_vec_data'
 
 
 def _worker(
@@ -132,7 +136,10 @@ if __name__ == "__main__":
         # Save FL config
         fl_config_dict = {k: v for k, v in cfg.__dict__.items()}
         with open(run_dir / "fl_config.json", 'w') as f:
-            json.dump(fl_config_dict, f, indent=2)
+            def json_default(obj):
+                if isinstance(obj, Path): return str(obj)
+                raise TypeError(f"{obj.__class__.__name__} is not JSON serializable")
+            json.dump(fl_config_dict, f, indent=2, default=json_default)
 
         # Save codec config if cancer codec
         if "cancer" in cfg.codec.lower():

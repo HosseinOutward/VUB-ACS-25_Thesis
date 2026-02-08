@@ -14,9 +14,10 @@ from FL_code.prior_calculator import PriorCalculator
 
 
 class NSplitCodec(IdentityCodec):
-    def __init__(self, num_clients, split_points):
+    def __init__(self, fl_cfg, split_points):
+        super().__init__(fl_cfg)
         self.split_points = split_points
-        self.num_clients = num_clients
+        self.num_clients = fl_cfg.num_clients
         self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
         self.si_vec_size = None
 

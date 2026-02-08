@@ -26,6 +26,12 @@ def run_federated_server(
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
 
+    if cfg.debug_folder is not False:
+        delta_data_path = cfg.debug_folder / cfg.debug_save_deltas
+        delta_data_path = delta_data_path / f'_initial_model.pt'
+        delta_data_path.parent.mkdir(parents=True)
+        torch.save(model.state_dict(), delta_data_path)
+
     codec = create_codec(cfg, sd_manager)
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using codec: {codec.__class__.__name__}")

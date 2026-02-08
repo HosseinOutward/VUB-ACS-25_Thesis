@@ -149,17 +149,17 @@ class CompressionRecord:
 
 # --- Compression Codecs --- #
 class IdentityCodec:
-    def __init__(self, save_delta_vec=False):
-        self.save_delta_vec = save_delta_vec
+    def __init__(self, fl_cfg: FLConfig):
+        self.fl_cfg = fl_cfg
 
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         return CompressionRecord(round_id, client_id, method="identity")
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        if self.save_delta_vec:
-            debug_folder = Path('experiments/debuging/debugging_data')
-            delta_data_path = debug_folder / 'delta_vec_data' / f'round_{record.round_id}_client_{record.client_id}.pt'
-            delta_data_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.fl_cfg.debug_folder is not False:
+            delta_data_path = self.fl_cfg.debug_folder / self.fl_cfg.debug_save_deltas
+            assert delta_data_path.exists()
+            delta_data_path = delta_data_path / f'round_{record.round_id}_client_{record.client_id}.pt'
             torch.save(delta_vec, delta_data_path)
 
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
@@ -225,13 +225,13 @@ def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
 
     if codec_name[:8] == "identity":
         save_delta_vec = '_debug_save_delta' in codec_name
-        return IdentityCodec(save_delta_vec=save_delta_vec)
+        return IdentityCodec(fl_cfg, save_delta_vec=save_delta_vec)
     elif codec_name == "basic":
-        return BasicCompressionCodec()
+        return BasicCompressionCodec(fl_cfg)
     elif codec_name[1:]=='_split_codec':
         from other_protocols.n_split_protocol import NSplitCodec
         n = int(codec_name[0:1])
-        return NSplitCodec(fl_cfg.num_clients, n)
+        return NSplitCodec(fl_cfg, n)
 
     norm_slices = None if '_basic_norm' in codec_name else sd_manager.get_slices()
     outlier_threshold = 1.6 if '_w_outlier' in codec_name else False
