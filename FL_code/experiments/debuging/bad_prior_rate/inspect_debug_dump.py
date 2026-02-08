@@ -184,7 +184,7 @@ class DebugInspector:
 
         # Load model state
         quantizer.coding_model.load_state_dict(d['quantizer_state_dict'])
-        quantizer.mspe_denom = cfg['mspe_denom']
+        quantizer.wmspe_denom = cfg['wmspe_denom']
         quantizer.si_vec_size = cfg['si_vec_size']
         quantizer.side_info_list_used = si_list
 

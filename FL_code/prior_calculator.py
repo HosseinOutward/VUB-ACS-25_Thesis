@@ -75,14 +75,19 @@ class PriorCalculator:
     @staticmethod
     def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
                           c_cfg, batch_size=50_000) -> EncoderDecoderLayeredRNN:
-        train_attempts = [
-            PriorCalculator._train_prior_model(
+        train_attempts = []
+        tries = 0
+        while len(train_attempts) < c_cfg.prior_train_repeats:
+            assert tries < c_cfg.prior_train_repeats * 5
+            tries += 1
+
+            q_model, q_loss = PriorCalculator._train_prior_model(
                 bins_vec, side_info, num_planes, bins_per_plane,
                 c_cfg, batch_size, return_loss=True)
-            for _ in range(c_cfg.prior_train_repeats)
-        ]
-        train_attempts = [(model, loss) for model, loss in train_attempts
-                          if not torch.isnan(torch.tensor(loss))]
+            if torch.isnan(torch.tensor(q_loss)):
+                continue
+            train_attempts.append((q_model, q_loss))
+
         q_model, lowest_trained_rate = min(train_attempts, key=lambda x: x[1])
         return q_model
 
