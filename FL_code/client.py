@@ -62,8 +62,19 @@ def run_federated_client(
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
-        for _ in range(cfg.local_epochs):
-            model.train_epoch(train_loader, optimizer, scaler)
+        if not cfg.debug_load_from_saved_data:
+            for _ in range(cfg.local_epochs):
+                model.train_epoch(train_loader, optimizer, scaler)
+        else:
+            print(f"[Client {client_id}] Debug mode: Skipping actual training and using pre-trained model state")
+            assert not cfg.debug_save_train_data
+            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
+            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
+            loaded_state_dict = sd_manager.unflatten(-torch.load(delta_data_path))
+            loaded_state_dict = sd_manager.compute_delta(pre_train_state, loaded_state_dict)
+            model.load_state_dict(loaded_state_dict, strict=False)
+            if cfg.recalibrate_bn:
+                recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 
@@ -88,4 +99,13 @@ def run_federated_client(
         dist.send(worker_metrics_vec, dst=0)
 
         print(f"[Client {client_id}] Broadcast complete for round {srvr_rnd}")
+
+        if cfg.debug_save_train_data:
+            print(f"[Client {client_id}] Debug mode: Saving delta vector for round {curr_rnd_i}")
+            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
+            assert delta_data_path.exists()
+            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
+            torch.save(delta_vec, delta_data_path)
+
         curr_rnd_i += 1
+

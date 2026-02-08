@@ -26,11 +26,15 @@ def run_federated_server(
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
 
-    if cfg.debug_folder is not False:
-        delta_data_path = cfg.debug_folder / cfg.debug_save_deltas
-        delta_data_path = delta_data_path / f'_initial_model.pt'
+    if cfg.debug_save_train_data:
+        delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas / f'_initial_model.pt'
         delta_data_path.parent.mkdir(parents=True)
         torch.save(model.state_dict(), delta_data_path)
+    if cfg.debug_load_from_saved_data:
+        delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas / f'_initial_model.pt'
+        assert not cfg.debug_save_train_data
+        loaded_state_dict = torch.load(delta_data_path)
+        model.load_state_dict(loaded_state_dict)
 
     codec = create_codec(cfg, sd_manager)
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")

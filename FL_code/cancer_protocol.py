@@ -78,6 +78,7 @@ class CancerConfig:
     prior_train_repeats = 3
 
     debug_save_codec_state:str = 'quantizer_state'
+    debug_load_state: bool = False
 
 
 class BinsCodecRecord(CompressionRecord):
@@ -215,7 +216,9 @@ class CancerCodec(IdentityCodec):
         )
 
         # Load pretrained weights or train the model
-        if round_type != 'P':
+        if self.c_cfg.debug_load_state:
+            quantizer.coding_model.eval()
+        elif round_type != 'P':
             quantizer.train_model(target_x, train_si)
         else:
             weight_path = self.c_cfg.pretrain_pth_dir + f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
@@ -231,15 +234,28 @@ class CancerCodec(IdentityCodec):
         if record.round_type != 'F':
             self._train_quantizer_or_load(delta_vec, record)
 
-        # Encode using current quantizer
         quantizer = self.frozen_quantizers[record.client_id]
+
+        if self.c_cfg.debug_load_state:
+            print(f"Debug load state for R{record.round_id}C{record.client_id} -- loading quantizer state from disk")
+            assert not self.fl_cfg.debug_save_train_data
+            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
+            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
+            q_state = torch.load(codec_state_path)
+
+            quantizer.coding_model.load_state_dict(q_state['coding_model'])
+            quantizer.side_info_list_used = q_state['side_info_list_used']
+            quantizer.extra_si_for_prior = q_state['extra_si_for_prior']
+            prior = q_state['prior']
+
         bins, prep_metadata = quantizer.encoding_process(delta_vec)
 
         # Build payload
         payload = self._build_payload(bins, prep_metadata, quantizer, record)
 
         # Add prior info to record for analysis
-        prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
+        if not self.c_cfg.debug_load_state:
+            prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
         record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins, quantizer.num_planes)
 
         # Compute marginal prior for comparison
@@ -247,14 +263,13 @@ class CancerCodec(IdentityCodec):
             bins, quantizer.bins_per_plane, quantizer.num_planes)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins, quantizer.num_planes)
 
-        if self.fl_cfg.debug_folder is not False:
-            codec_state_path = self.fl_cfg.debug_folder / self.c_cfg.debug_save_codec_state
+        if self.fl_cfg.debug_save_train_data:
+            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
             assert not codec_state_path.exists() or len(list(codec_state_path.iterdir())) != 0
             codec_state_path.mkdir(parents=True, exist_ok=True)
             codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
             q_state = {
-                'encoder_state': quantizer.coding_model.encoder.state_dict(),
-                'decoder_state': quantizer.coding_model.decoder.state_dict(),
+                'coding_model': quantizer.coding_model.state_dict(),
                 'side_info_list_used': quantizer.side_info_list_used,
                 'extra_si_for_prior': quantizer.extra_si_for_prior,
                 'prior': prior,
