@@ -77,6 +77,8 @@ class CancerConfig:
     quantizer_train_repeats = 3
     prior_train_repeats = 3
 
+    debug_save_codec_state:str = 'quantizer_state'
+
 
 class BinsCodecRecord(CompressionRecord):
     def __init__(self, round_id: int, client_id: int, bins_per_plane: int, method: str):
@@ -127,7 +129,7 @@ class CancerRecord(BinsCodecRecord):
 # ============================================================================
 class CancerCodec(IdentityCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
-        super().__init__()
+        super().__init__(fl_cfg)
         if quantizer_kwargs is None:
             quantizer_kwargs = {'norm_slices': False, 'outlier_threshold': False}
 
@@ -244,6 +246,20 @@ class CancerCodec(IdentityCodec):
         m_prior = PriorCalculator.compute_marginal_prior(
             bins, quantizer.bins_per_plane, quantizer.num_planes)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins, quantizer.num_planes)
+
+        if self.fl_cfg.debug_folder is not False:
+            codec_state_path = self.fl_cfg.debug_folder / self.c_cfg.debug_save_codec_state
+            assert not codec_state_path.exists() or len(list(codec_state_path.iterdir())) != 0
+            codec_state_path.mkdir(parents=True, exist_ok=True)
+            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
+            q_state = {
+                'encoder_state': quantizer.coding_model.encoder.state_dict(),
+                'decoder_state': quantizer.coding_model.decoder.state_dict(),
+                'side_info_list_used': quantizer.side_info_list_used,
+                'extra_si_for_prior': quantizer.extra_si_for_prior,
+                'prior': prior,
+            }
+            torch.save(q_state, codec_state_path)
 
         return payload
 
