@@ -213,45 +213,52 @@ class BasicCompressionCodec(IdentityCodec):
         return torch.tensor(payload_content, dtype=torch.float16).to(torch.float32)
 
 
-def create_codec(fl_cfg:FLConfig, sd_manager:StateDictManager) -> IdentityCodec:
+def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCodec:
     """Create codec instance."""
     codec_name = fl_cfg.codec.lower()
 
+    codec = None  # <-- create the variable we'll return at the end
+
     if codec_name[:8] == "identity":
-        return IdentityCodec(fl_cfg)
+        codec = IdentityCodec(fl_cfg)
     elif codec_name == "basic":
-        return BasicCompressionCodec(fl_cfg)
-    elif codec_name[1:]=='_split_codec':
+        codec = BasicCompressionCodec(fl_cfg)
+    elif codec_name[1:] == "_split_codec":
         from other_protocols.n_split_protocol import NSplitCodec
         n = int(codec_name[0:1])
-        return NSplitCodec(fl_cfg, n)
+        codec = NSplitCodec(fl_cfg, n)
+    else:
+        norm_slices = None if "_basic_norm" in codec_name else sd_manager.get_slices()
+        outlier_threshold = 1.6 if "_w_outlier" in codec_name else False
+        quantizer_kwargs = {"norm_slices": norm_slices, "outlier_threshold": outlier_threshold}
+        binary_prot = "_binary" in codec_name
 
-    norm_slices = None if '_basic_norm' in codec_name else sd_manager.get_slices()
-    outlier_threshold = 1.6 if '_w_outlier' in codec_name else False
-    quantizer_kwargs = {'norm_slices': norm_slices, 'outlier_threshold': outlier_threshold}
-    binary_prot = '_binary' in codec_name
+        if codec_name[:6] == "debug_":
+            if "cancerwithboundcalc" in codec_name[6:]:
+                from experiments.rd_mspe_wz import CancerWithBoundCalc
+                codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "non_wz_learned" in codec_name:
+            from other_protocols.SingleTypeCodecs import LearnedSimpleCodec
+            codec = LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "temporal_only" in codec_name:
+            from other_protocols.SingleTypeCodecs import TemporalCodec
+            codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "marginal_temporal" in codec_name:
+            from other_protocols.SingleTypeCodecs import TemporalMarginalCodec
+            codec = TemporalMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "marginal_cancer" in codec_name:
+            from other_protocols.SingleTypeCodecs import CancerSemiMarginal
+            codec = CancerSemiMarginal(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "cancer" in codec_name:
+            from cancer_protocol import CancerCodec
+            codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
-    if 'debug_' == codec_name[0:6]:
-        if "cancerwithboundcalc" in codec_name[6:]:
-            from experiments.rd_mspe_wz import CancerWithBoundCalc
-            return CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
-    elif 'non_wz_learned' in codec_name:
-        from other_protocols.SingleTypeCodecs import LearnedSimpleCodec
-        return LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
-    elif 'temporal_only' in codec_name:
-        from other_protocols.SingleTypeCodecs import TemporalCodec
-        return TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-    elif 'marginal_temporal' in codec_name:
-        from other_protocols.SingleTypeCodecs import TemporalMarginalCodec
-        return TemporalMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-    elif 'marginal_cancer' in codec_name:
-        from other_protocols.SingleTypeCodecs import CancerSemiMarginal
-        return CancerSemiMarginal(fl_cfg, binary_prot, quantizer_kwargs)
-    elif "cancer" in codec_name:
-        from cancer_protocol import CancerCodec
-        return CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
+        codec.c_cfg.debug_load_state = "_load_state" in codec_name
 
-    raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
+    if codec is None:
+        raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
+
+    return codec
 
 
 def simulate_compression(
