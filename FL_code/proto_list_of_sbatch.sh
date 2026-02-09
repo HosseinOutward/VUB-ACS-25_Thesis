@@ -6,7 +6,7 @@ set -euo pipefail
 
 # ---------- Config you might tweak ----------
 PARTITION="COOP"
-NODELIST="ETROCOOP02"
+NODELIST="ETROCOOP01"
 CPUS_PER_TASK="12"
 MEM="45000M"
 GRES="gpu:4090:1"
@@ -25,16 +25,17 @@ LOG_DIR="sbatch/sbatch_log"
 # identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
 # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
 JOBS=(
-#  "5_split_codec 29505"
-#  "temporal_only 29520"
-#  "cancer 29540"
-#  "marginal_cancer_binary 29560"
-#  "cancer_basic_norm 29580"
-#  "non_wz_learned_w_outlier 29605"
-#  "marginal_cancer 29620"
-#  "marginal_cancer 29640"
-#  "marginal_cancer 29660"
-#  "marginal_cancer 29680"
+  "temporal_only 29505"
+  "temporal_only_binary 29520"
+  "cancer_saved_state 29540"
+  "cancer_binary 29560"
+  "cancer_basic_norm 29580"
+
+#  "non_wz_learned 29605"
+#  "non_wz_learned_binary 29620"
+#  "retrain_only 29640"
+#  "retrain_only_binary 29660"
+#  "cancer_w_outlier 29680"
 )
 
 # ---------- Safety checks ----------

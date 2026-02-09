@@ -237,18 +237,17 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
             if "cancerwithboundcalc" in codec_name[6:]:
                 from experiments.rd_mspe_wz import CancerWithBoundCalc
                 codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
+
         elif "non_wz_learned" in codec_name:
-            from other_protocols.SingleTypeCodecs import LearnedSimpleCodec
-            codec = LearnedSimpleCodec(fl_cfg, binary_prot, quantizer_kwargs)
+            from other_protocols.SingleTypeCodecs import LearnedMarginalCodec
+            codec = LearnedMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
         elif "temporal_only" in codec_name:
             from other_protocols.SingleTypeCodecs import TemporalCodec
             codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-        elif "marginal_temporal" in codec_name:
-            from other_protocols.SingleTypeCodecs import TemporalMarginalCodec
-            codec = TemporalMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-        elif "marginal_cancer" in codec_name:
-            from other_protocols.SingleTypeCodecs import CancerSemiMarginal
-            codec = CancerSemiMarginal(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "retrain_only" in codec_name:
+            from other_protocols.SingleTypeCodecs import RetrainCodec
+            codec = RetrainCodec(fl_cfg, binary_prot, quantizer_kwargs)
+
         elif "cancer" in codec_name:
             from cancer_protocol import CancerCodec
             codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
