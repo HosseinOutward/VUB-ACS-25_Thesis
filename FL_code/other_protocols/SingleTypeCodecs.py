@@ -31,20 +31,20 @@ class TemporalCodec(SingleTypeCodec):
         super().__init__('T', fl_cfg, binary_prot, quantizer_kwargs)
 
 
-class TemporalMarginalCodec(SingleTypeCodec):
+class RetrainCodec(SingleTypeCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
-        super().__init__('TM', fl_cfg, binary_prot, quantizer_kwargs)
+        super().__init__('R', fl_cfg, binary_prot, quantizer_kwargs)
 
 
-class CancerSemiMarginal(CancerCodec):
-    def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
-        super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
-        replace_marg = lambda x: x+'M' if x in ['R', 'T'] else x
-        self.c_cfg.warmup_phase =  tuple((replace_marg(a[0]),a[1],a[2]) for a in self.c_cfg.warmup_phase)
-        self.c_cfg.routine_phase = tuple((replace_marg(a[0]),a[1],a[2]) for a in self.c_cfg.routine_phase)
-
-        assert [c[0] in ['P', 'F', 'RM', 'TM'] for c in self.c_cfg.warmup_phase]
-        assert [c[0] in ['F', 'RM', 'TM'] for c in self.c_cfg.routine_phase]
+# class CancerSemiMarginal(CancerCodec):
+#     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
+#         super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
+#         replace_marg = lambda x: x+'M' if x in ['R', 'T'] else x
+#         self.c_cfg.warmup_phase =  tuple((replace_marg(a[0]),a[1],a[2]) for a in self.c_cfg.warmup_phase)
+#         self.c_cfg.routine_phase = tuple((replace_marg(a[0]),a[1],a[2]) for a in self.c_cfg.routine_phase)
+#
+#         assert [c[0] in ['P', 'F', 'RM', 'TM'] for c in self.c_cfg.warmup_phase]
+#         assert [c[0] in ['F', 'RM', 'TM'] for c in self.c_cfg.routine_phase]
 
 
 if __name__ == '__main__':
