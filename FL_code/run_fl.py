@@ -169,6 +169,12 @@ if __name__ == "__main__":
 
     print(f'[MAIN] {cfg.codec}')
 
+    if '_saved_state' in cfg.codec:
+        cfg.debug_save_train_data = True
+    if '_load_state' in cfg.codec:
+        cfg.debug_load_from_saved_data = True
+    assert not (cfg.debug_save_train_data and cfg.debug_load_from_saved_data)
+
     # Spawn distributed processes
     mp.spawn(
         _worker,
