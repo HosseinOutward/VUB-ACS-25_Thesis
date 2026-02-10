@@ -238,9 +238,13 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
                 from experiments.rd_mspe_wz import CancerWithBoundCalc
                 codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
 
-        elif "non_wz_learned" in codec_name:
-            from other_protocols.SingleTypeCodecs import LearnedMarginalCodec
-            codec = LearnedMarginalCodec(fl_cfg, binary_prot, quantizer_kwargs)
+        elif "non_wz_learned_worker" in codec_name:
+            from other_protocols.SingleTypeCodecs import SingleTypeCodec
+            codec = SingleTypeCodec('TMM', fl_cfg, binary_prot, quantizer_kwargs)
+        elif "non_wz_learned_server" in codec_name:
+            from other_protocols.SingleTypeCodecs import SingleTypeCodec
+            codec = SingleTypeCodec('RMM', fl_cfg, binary_prot, quantizer_kwargs)
+
         elif "temporal_only" in codec_name:
             from other_protocols.SingleTypeCodecs import TemporalCodec
             codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)

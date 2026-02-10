@@ -68,7 +68,7 @@ class CancerConfig:
     pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
 
     train_epochs: int = 70 if not _DEBUG_FLAG else 1
-    reconst_ld: float = 300.0
+    reconst_ld: float = 200.0
     train_sample_size: int = 300_000 if not _DEBUG_FLAG else 100_000
     lr: float = 1e-3
     lr_step: int = 35
@@ -140,6 +140,8 @@ class CancerCodec(IdentityCodec):
         self.c_cfg = CancerConfig()
         if binary_prot:
             self.c_cfg.routine_phase = tuple((a[0],2,1) for a in self.c_cfg.routine_phase)
+        if '_mid' in fl_cfg.codec:
+            self.c_cfg.routine_phase = tuple((a[0],2,2) for a in self.c_cfg.routine_phase)
 
         self.quantizer_kwargs = quantizer_kwargs
 
@@ -167,12 +169,15 @@ class CancerCodec(IdentityCodec):
         client_idx = record.client_id
 
         extra_si_for_prior = []
-        force_marginal_loss = False
-        if len(round_type) != 1:
+
+        # Marginal loss with conditional decoder is XM
+        # Full marginal (no conditional decoder) will be XMM
+        remove_si = len(round_type)==3
+        assert not remove_si or (round_type[2] == 'M')
+        force_marginal_loss = len(round_type) != 1
+        if force_marginal_loss:
             assert round_type[1] == "M" and round_type[0] in ['T', 'R']
-            force_marginal_loss = True
             round_type = round_type[0]
-            assert round_type not in ['P', 'M']
 
         # Determine training side info and target based on round type
         if round_type == 'P': # Pretrained
@@ -180,12 +185,6 @@ class CancerCodec(IdentityCodec):
                             for reconst_list in self.srvr_past_reconst
                             for item in reconst_list]
             train_si, target_x = None, None
-
-        elif round_type == 'M': # Marginal
-            extra_si_for_prior = [item
-                            for reconst_list in self.srvr_past_reconst
-                            for item in reconst_list]
-            train_si, target_x = None, delta_vec
 
         elif round_type == 'R': # Retrain
             train_si = [item
@@ -198,14 +197,14 @@ class CancerCodec(IdentityCodec):
 
         elif round_type == 'T': # Temporal
             train_si = [*self.client_past_reconst[client_idx]]
-            is_tensor_in_list = lambda tensor, lst: any(torch.equal(tensor, item) for item in lst)
-            extra_si_for_prior = [item
-                            for reconst_list in self.srvr_past_reconst
-                            for item in reconst_list if not is_tensor_in_list(item, train_si)]
+            extra_si_for_prior = [*train_si]
             target_x = delta_vec
 
         else:
             raise ValueError(f"Invalid round type for training: {round_type}")
+
+        if remove_si:
+            extra_si_for_prior += train_si
 
         # Create a new quantizer instance
         quantizer = WZQuantizerCancer(
@@ -231,6 +230,14 @@ class CancerCodec(IdentityCodec):
         torch.cuda.empty_cache()
 
     def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
+        if self.c_cfg.debug_load_state:
+            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
+            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
+            if '_continue' in self.fl_cfg.codec and not codec_state_path.exists():
+                self.c_cfg.debug_load_state = False
+                if '_continue_then_save' in self.fl_cfg.codec:
+                    self.fl_cfg.codec.debug_save_train_data = True
+
         if record.round_type != 'F':
             self._train_quantizer_or_load(delta_vec, record)
 
@@ -239,8 +246,6 @@ class CancerCodec(IdentityCodec):
         if self.c_cfg.debug_load_state:
             print(f"Debug load state for R{record.round_id}C{record.client_id} -- loading quantizer state from disk")
             assert not self.fl_cfg.debug_save_train_data
-            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
-            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
             q_state = torch.load(codec_state_path)
 
             quantizer.coding_model.load_state_dict(q_state['coding_model'])

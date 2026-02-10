@@ -25,17 +25,18 @@ LOG_DIR="sbatch/sbatch_log"
 # identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
 # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
 JOBS=(
-  "temporal_only 29505"
-  "temporal_only_binary 29520"
-  "cancer_saved_state 29540"
-  "cancer_binary 29560"
-  "cancer_basic_norm 29580"
+  "retrain_only 29580"
+  "retrain_only_binary 29605"
+  "cancer_basic_norm 29620"
+  "cancer_w_outlier 29640"
 
-#  "non_wz_learned 29605"
-#  "non_wz_learned_binary 29620"
-#  "retrain_only 29640"
-#  "retrain_only_binary 29660"
-#  "cancer_w_outlier 29680"
+#  "temporal_only 29505"
+#  "temporal_only_binary 29520"
+#  "cancer_save 29540"
+#  "cancer_binary 29560"
+
+#  "non_wz_learned 29660"
+#  "non_wz_learned_binary 29680"
 )
 
 # ---------- Safety checks ----------

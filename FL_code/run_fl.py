@@ -1,6 +1,8 @@
 import argparse
 import os
 from dataclasses import dataclass
+from datetime import timedelta
+
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -71,7 +73,8 @@ def _worker(
     import traceback as tb
 
     # Set up process group
-    dist.init_process_group(backend=cfg.backend, init_method='env://', world_size=world_size, rank=rank)
+    dist.init_process_group(backend=cfg.backend, init_method='env://',
+            timeout=timedelta(minutes=75), world_size=world_size, rank=rank)
 
     role = "Server" if rank == 0 else f"Client {rank - 1}"
 

@@ -1,5 +1,5 @@
 {
-  "codec": "cancer",
+  "codec": "cancer_mid_rate",
   "model_name": "resnet18",
   "dataset_name": "SVHN",
   "num_clients": 5,
@@ -22,7 +22,7 @@
   "mixed_precision": true,
   "compile_mode": false,
   "training_progress_bar": false,
-  "records_dir": "records/run10_cancer_save",
+  "records_dir": "records/run15_cancer_mid_rate",
   "dataset_fraction": null,
   "backend": "gloo",
   "master_addr": "localhost",
