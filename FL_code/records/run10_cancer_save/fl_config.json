@@ -1,5 +1,5 @@
 {
-  "codec": "cancer_save",
+  "codec": "cancer",
   "model_name": "resnet18",
   "dataset_name": "SVHN",
   "num_clients": 5,

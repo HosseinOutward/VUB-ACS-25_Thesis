@@ -21,11 +21,6 @@ class SingleTypeCodec(CancerCodec):
         assert [c[0] in ['F', single_letter] for c in self.c_cfg.routine_phase]
 
 
-class LearnedMarginalCodec(SingleTypeCodec):
-    def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
-        super().__init__('M', fl_cfg, binary_prot, quantizer_kwargs)
-
-
 class TemporalCodec(SingleTypeCodec):
     def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
         super().__init__('T', fl_cfg, binary_prot, quantizer_kwargs)

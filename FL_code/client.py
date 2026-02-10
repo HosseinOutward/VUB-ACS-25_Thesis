@@ -62,14 +62,20 @@ def run_federated_client(
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
+        if cfg.debug_load_from_saved_data:
+            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
+            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
+            if '_continue' in cfg.codec and not delta_data_path.exists():
+                cfg.debug_load_from_saved_data = False
+                if '_continue_then_save' in cfg.codec:
+                    cfg.debug_save_train_data = True
+
         if not cfg.debug_load_from_saved_data:
             for _ in range(cfg.local_epochs):
                 model.train_epoch(train_loader, optimizer, scaler)
         else:
             print(f"[Client {client_id}] Debug mode: Skipping actual training and using pre-trained model state")
             assert not cfg.debug_save_train_data
-            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
-            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
             loaded_state_dict = sd_manager.unflatten(-torch.load(delta_data_path))
             loaded_state_dict = sd_manager.compute_delta(pre_train_state, loaded_state_dict)
             model.load_state_dict(loaded_state_dict, strict=False)
