@@ -198,10 +198,7 @@ class CancerCodec(IdentityCodec):
 
         elif round_type == 'T': # Temporal
             train_si = [*self.client_past_reconst[client_idx]]
-            is_tensor_in_list = lambda tensor, lst: any(torch.equal(tensor, item) for item in lst)
-            extra_si_for_prior = [item
-                            for reconst_list in self.srvr_past_reconst
-                            for item in reconst_list if not is_tensor_in_list(item, train_si)]
+            extra_si_for_prior = [*train_si]
             target_x = delta_vec
 
         else:
@@ -231,6 +228,14 @@ class CancerCodec(IdentityCodec):
         torch.cuda.empty_cache()
 
     def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
+        if self.c_cfg.debug_load_state:
+            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
+            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
+            if '_continue' in self.fl_cfg.codec and not codec_state_path.exists():
+                self.c_cfg.debug_load_state = False
+                if '_continue_then_save' in self.fl_cfg.codec:
+                    self.fl_cfg.codec.debug_save_train_data = True
+
         if record.round_type != 'F':
             self._train_quantizer_or_load(delta_vec, record)
 
@@ -239,8 +244,6 @@ class CancerCodec(IdentityCodec):
         if self.c_cfg.debug_load_state:
             print(f"Debug load state for R{record.round_id}C{record.client_id} -- loading quantizer state from disk")
             assert not self.fl_cfg.debug_save_train_data
-            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
-            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
             q_state = torch.load(codec_state_path)
 
             quantizer.coding_model.load_state_dict(q_state['coding_model'])
