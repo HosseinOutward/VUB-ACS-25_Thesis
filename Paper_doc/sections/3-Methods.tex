@@ -3,7 +3,8 @@
 
 \begin{figure}[t]
     \includegraphics[width=0.5\textwidth]{sections/figure/calc correlationpng}
-    \caption{Correlation between individual gradient parameters of 2 workers. Made by comparing accumulated gradients per each training step.}
+    \caption{Per-parameter correlation between gradients of two workers. The per-step summed gradients, destined for aggregation, are compared via Pearson correlation over a sliding window (1.2× round)}
+%more info: Correlation of accumulated local gradients between two FL workers. At each local optimizer step, each worker’s accumulated gradient vector (the quantity eventually sent to the server for FedAvg, reset to zero at the start of each round and updated by summation over local steps) is flattened across all parameters. For every parameter coordinate, we compute the Pearson correlation between worker 0 and worker 1 across a sliding window of recent steps (minimum window size 10; capped at ≈1.2× the number of local steps per round). The plotted value is the mean absolute correlation across coordinates, excluding undefined correlations (NaNs; typically caused by zero variance over the window). The x-axis uses a fractional round index to reflect within-round progress.
     \label{fig:grad_corr}
 \end{figure}
 
@@ -18,7 +19,7 @@
       \input{sections/figure/WZ coder block diagram}
       \centerline{(b)}\medskip
     \end{minipage}
-    \caption{In both, \(X\) is the pre-processed gradient. a) Overall quantization process. b) Detailes on the learned WZQ and how SW coding is integrated.}
+    \caption{In both, all elements are defined for round \(r\) and client \(k\) a) Overall quantization process. b) Details on the learned WZQ and how SW coding is integrated ~\cite{BorisLayeredWZ}.}
     \label{fig:block}
 \end{figure}
 
@@ -28,47 +29,60 @@
     \label{fig:protocols_timeline}
 \end{figure}
 
-We present our framework exploiting multi-terminal approach on correlated gradients. This correlation is observed in prior works~\cite{ZhangTao2022, Abrahamyan2022LGC} and confirmed for per-coordinate correlation coefficients in~\ref{fig:grad_corr}.
-The distribution shift was investigated and shown to be small assuming scale normalization.
-These enable the use of DSC methods, like a WZ quantizer.
+We present our framework which exploits multi-terminal approach on correlated gradients. This correlation has been observed in prior works~\cite{ZhangTao2022, Abrahamyan2022LGC} and confirmed for per-coordinate level in~\ref{fig:grad_corr}. The distribution shift was investigated and shown to be small, assuming scales are normalized. These facts enable us to use DSC methods, like learned WZ quantizer from works such as~\cite{BorisLayeredWZ, OzywzRecoverBinning}.
 
-\subsection{Learned Successive Multi-terminal Wyner--Ziv Quantization (WZQ)}
-\label{subsec:method-lsmtwzq}
-At round \(r\), worker \(k\in\{1,\ldots,K\}\) holds flattened gradient \(G_{k,r}\in\mathbb{R}^n\), preprocessed to \(X_{k,r}\). Each element is quantized to symbols \(u_{k,r,i,j}\) (spatial index \(i\), refinement stage \(j\)). Symbol lists \(U_{k,r,j}\) are further compressed to bitstreams \(O_{k,r}\) using SW coder paired with learned conditional prior estimating \(p(u_{k,r}|{Y}_{k,r})\).
 
-Server decodes using SW decoder and side information (\textbf{SI}) to recover \(U_{k,r,j}\), then dequantized using the SI into \(\hat X_{k,r}\) to finally be post-processed into \(\hat G_{k,r}\). Figure~\ref{fig:block} illustrates the process.
-
-\textbf{Pre-/Post-processing:} Layer normalization aids training stability as some layers have very small scale. Outliers are separately encoded as they are few in number.
-
-%-----------------------------------------------------------------------
-\subsubsection{Training Quantizers and SI variants}
-Each worker has independent quantizer instances. Decoder transmission is negligible (100KBs decoder vs 11 million parameters in resnet-18).
-We consider two variants of the quantization process which are defined by where the quantizer is trained and what is included in the SI.
-
-\textbf{All-SI quantization process:}
-Our main process as it exploits inter-node correlation.
-Trained on the server, it uses all workers' past reconstructions as SI except for one; the most recent reconstruction (for the worker in question) is excluded and used as the training target. This leverages both inter-node and temporal correlation but introduces a train--inference distribution mismatch, which we observe is usually the dominant cause of higher rate--distortion cost. Another issue is that the resulting higher distortions degrade the reconstructions used on the next training phases, leading to multi-round error accumulation---an issue we address with the next quantization process.
-
-\textbf{Temporal-only quantization process}
-SI consists only of the same worker's past reconstructions produced by this quantization process. Training occurs on the worker side, so the true gradient to be transmitted can be used as the training target, minimizing train--inference mismatch. Because the decoder is available at both ends, the server and worker can maintain an identical list of reconstructions. The benefit of low train--inference mismatch comes at the cost of exploiting only temporal (not inter-node) correlation, so this variant is used periodically to realign reconstructions to the true gradients and mitigate error accumulation. In our experiments, it is very powerful, but we do not pursue it further because it cannot exploit inter-node correlation.
-
-%-----------------------------------------------------------------------
 \subsection{Proposed Protocol leveraging WZQ}
 \label{subsec:method-protocols}
-To maximize inter-node redundancy via the all-SI quantization process, we use the five-phase protocol.: \emph{Initialization}, \emph{Warm-up}, \emph{Realignment}, \emph{Retraining}, and \emph{Freeze}. Fig.~\ref{fig:protocols_timeline} shows the overall protocol.
+The proposed protocol is composed of a sequence of \emph{Round Types} and maximum rate for each round \(r\). This will determine how the multi-stage quantizer  \(Q_{k,r} = (E_{k,r}, D_{k,r})\) (based on ~\cite{BorisLayeredWZ,OzywzRecoverBinning}) is trained for each worker \(k\), by defining the training target \(T_{k,r}\), and where training occurs (server or worker), number of output symbols \(B_{r}\), number of stage \(J_{r}\) and lastly, the side information (\textbf{SI}).
 
-\noindent\textbf{1) Initialization.}
-Round 1 uses a pre-trained non-WZQ quantizer (no SI), trained on a Laplacian source without SI; its decoder is sent to workers so each can form a first local reconstruction, used by both temporal-only and all-SI.
+The SI is denoted as \(S_{k,r,i} \triangleq \{\hat g_{q,p,i}\}_{(q,p)\in \mathcal{I}_{k,r}}\) where \(\hat g_{q,p,i}\) is the reconstructed gradient of worker \(q\) at round \(p\), and $\mathcal{I}_{k,r}$ is a round-type–dependent index set selecting a subset of previously available reconstructions (possibly from other workers) for coordinate $i$. The SI used for training of \(Q_{k,r}\) is also used for inference and is unchanged until the next round with training.
+
+Now we will first describe the quantization process itself, and then the different round types and their sequence in the protocol timeline.
+
+%-----------------------------------------------------------------------
+\subsection{Learned Successive Multi-terminal Wyner--Ziv Quantization (WZQ)}
+\label{subsec:method-lsmtwzq}
+At round \(r\), worker \(k\) holds flattened accumulated gradient \(G_{k,r}\in\mathbb{R}^n\), preprocessed to \(X_{k,r}\) by normalizing per layer.
+Using a multi-level WZ quantizer encoder \(E_{k,r}\) with \(J\) stages, we quantize each element of \(X_{k,r}\) into a list of symbols \[\{u_{k,r,i,j}\}_{j}.\], with spatial index \(i\) indicating the parameter and \(j\) showing quantizer refinement stage.
+Information on training said quantizer is in Sec.~\ref{subsec:method-protocols}.
+
+For each refinement stage \(j\), we aggregate the symbols \(\{u_{k,r,i,j}\}_{i}\) across all parameters into \(U_{k,r,j}\), which can then be further compressed into bitstreams \(O_{k,r}\) using an additional lossless DSC method like SW coding. This will be transmitted to the server, and with the help of the SW decoder and the SI for all parameters, \(U_{k,r,j}\) can be recovered, and reorganized into \(\{u_{k,r,i,j}\}_{i}\) for each parameter.
+
+Using the quantizer decoder \(D_{k,r}\) combined with SI, we reconstruct \(\hat X_{k,r}\), which is finally to be post-processed into \(\hat G_{k,r}\). Figure~\ref{fig:block} illustrates the process.
+
+Note that for post-processing, we need the scale factors, one per layer, used in pre-processing, which can be transmitted with negligible cost. Also, since the quantizer is trained on one node, we also share the decoder parameters, which also has negligible cost compared to the quantization bitstream.
 
 
-\noindent\textbf{2) Warm-up.}
-With one reconstruction per worker available, train an all-SI quantizer progressively: in round 2, training for agent 2 uses agent 1's fresh reconstruction as SI; continue for \(S-3\) rounds, where \(S\) is the max number of stored reconstructions per worker.
+There are two distinct gains from our approach, one from \(G_{k,r}\) to \[\{u_{k,r,i,j}\}_{j}.\] and another when going to \(O_{k,r}\). We call them \emph{Binning gain} and \emph{Context Gain} respectively. These two gains will compete, i.e. improving one can reduce the other. Therefore, we need to apply both sequentially to get the full picture of the rate gains. But for our experiments, we do not use SW coding due to implementation complexity, and instead estimate the rate gains by computing the entropy of \(U_{k,r,j}\) conditioned on the SI (i.e. \(H(U_{k,r,j}|S_{k,r})\)). This is done by fitting a neural network to predict the distribution of \(U_{k,r,j}\) with only the SI as input. (note to author: also maybe use a conditional entropy coder like rANS to get a more accurate estimate of the lower bound).
 
-\noindent\textbf{3) Realignment.}
-Obtain two high-quality reconstructions---one to augment the SI pool and one to serve as the training target for all-SI in retraining. While high-rate all-SI could produce these, at high rates temporal-only shows better rate--distortion; thus, per round, train a worker-side temporal-only quantizer in parallel and use it.
+\subsection{Training Quantizers and SI variants}
+We consider two main round types, \emph{All-SI} and \emph{Temporal-only} and two additional round types, \emph{Pretrained} and \emph{Freeze} which are selected per round by the protocols round type sequence.
 
-\noindent\textbf{4) Retraining.}
-Using these high-quality (but high-rate) reconstructions, train an all-SI quantizer for all workers in parallel on the server.
+\textbf{All-SI round:}
+Trained on the server, SI consists of all and any workers' past reconstructions except for one; the most recent reconstruction (for the worker in question) is excluded and used as the training target. This leverages both inter-node and temporal correlation but introduces a train--inference distribution mismatch, which we observe is usually the dominant cause of higher rate--distortion cost. Another issue is that the resulting higher distortions degrade the reconstructions used on the next training phases, leading to multi-round error accumulation---an issue we address with the next round type.
+The SI used for computing the conditional prior for context gain estimation is the same as the SI plus the training target.
 
-\noindent\textbf{5) Freeze.}
-Freeze the retrained quantizer and the SI list used to train it, and use this fixed pair for the next \(S-3\) rounds; phases 3--5 then repeat thereafter.
+\textbf{Temporal-only round:}
+Trained on the worker, with SI consisting of only the same worker's past reconstructions from other temporal-only rounds. Training target is the true gradient to be transmitted, minimizing train--inference mismatch. Because the decoder is available at both ends, the server and worker can maintain an identical list of reconstructions. The benefit of low train--inference mismatch comes at the cost of exploiting only temporal (not inter-node) correlation, so this round type is used periodically to realign reconstructions to the true gradients and mitigate error accumulation.
+
+\textbf{Pretrained round and Freeze rounds:}
+Pretrained round is the first round of the protocol, where a non-WZQ quantizer is trained on a Laplacian source without SI. Importantly, since it doesn't use SI, by also sending the decoders to the workers, we can use the resulting reconstructions as SI similar to the temporal-only round.
+
+Freeze rounds are will use the most recently trained quantizer from the last round with training (either all-SI or temporal-only).
+
+
+\subsection{Protocols timeline}
+The protocol defines the sequence of round types and maximum rate for each round \(r\) which are organized into two phases: an initial warm-up phase done only once at the start of training, and a main phase which is repeated. Fig.~\ref{fig:protocols_timeline} illustrates an example of a protocol timeline.
+
+We will show protocols by listing the sequence of round types and their maximum rates used for each phase. We use abbreviations \(P\), \(A\), \(T\) and \(F\) for Pretrained, All-SI, Temporal-only and Freeze round types respectively, with the first 3 having a subscript indicating the allocated symbols and stage count for the WZQ. For example, \(A_8,3\) means an All-SI round with a WZQ of 3 stages and 8 symbols per stage.
+
+Our main protocol is as follows, which we will refer to as \textbf{Combined Protocol with \(J\) stages} with \(J\) being and int between 1 and 3 depending on out rate budget.
+\begin{align*}
+    &\text{Warmup phase: } \(P_{8,J}, T_{8,J}, R_{4,J} * 3\) \\
+    &\text{Routine phase: } \(T_{2,J}, T_{2,J}, R_{2,J}, F_{2,J} * 6\)
+\end{align*}
+
+This particular sequence of using two temporal-only rounds (or pretrained round) is because we can be sure to have two low-distortion reconstructions which can be used to make a high quality SI and training target for the next all-SI round.
+
+There are 2 other protocols we will compare to, which are ablations of the main protocol, one using only temporal-only rounds and the other using only all-SI rounds, called \textbf{Temporal-only Protocol with \(J\) stages} and \textbf{All-SI Protocol with \(J\) stages} respectively.

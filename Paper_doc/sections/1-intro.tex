@@ -8,9 +8,9 @@ More advanced methods improve rate by exploiting the link between gradients acro
 
 DSC methods, based on Slepian-Wolf~\cite{SlepianWolf1973} and Wyner-Ziv~\cite{WynerZiv1976} principles, enables workers to independently compress correlated gradients while the parameter server acts as joint decoder, using other workers' gradients as side information. This exploits inter-node redundancy to reduce communication rate to joint entropy boundary without direct worker communication.
 
-Conventional DSC methods rely on rigid algorithms unsuited for large-scale gradient compression as explained in . Recent works~\cite{OzyilkanRecoverBinning} propose learned Wyner-Ziv quantizers for Gaussian sources which are adaptable to gradient distributions and multi-terminal settings. They train end-to-end models with learned non-uniform quantizers, and dequantizers that jointly process codes and side information for lower rates.
+Conventional DSC methods rely on rigid algorithms unsuited for large-scale gradient compression as explained in . Recent works~\cite{OzywzRecoverBinning} propose learned Wyner-Ziv quantizers for Gaussian sources which are adaptable to gradient distributions and multi-terminal settings. They train end-to-end models with learned non-uniform quantizers, and dequantizers that jointly process codes and side information for lower rates.
 
-This framework extends to successive refinement~\cite{JoukovskyLayeredWZ}, sending base layers followed by optional residual layers, offering better rate-distortion tradeoffs and bandwidth adaptation flexibility.
+This framework extends to successive refinement~\cite{BorisLayeredWZ}, sending base layers followed by optional residual layers, offering better rate-distortion tradeoffs and bandwidth adaptation flexibility.
 
 In multi-terminal scenarios, multiple side information aids decoding. The server sequentially decodes updates from each agent, adding them to side information lists, enabling progressively reduced rates for subsequent workers.
 
