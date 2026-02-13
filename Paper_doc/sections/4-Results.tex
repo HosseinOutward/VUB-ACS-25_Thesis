@@ -4,31 +4,26 @@
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.5\textwidth]{sections/figure/rate-dist}
-    \caption{Rate-Distortion performance of different communication protocols. The WZ boundary is computed with Blahut--Arimoto using SI from round 25.}
+    \caption{Rate-Distortion performance of different communication protocols. (note to author: get the WZ boundary with Blahut--Arimoto using SI used for context gain)}
     \label{fig:rate_distortion}
 \end{figure}
 
 \begin{figure}[t]
     \centering
     \includegraphics[width=0.5\textwidth]{sections/figure/auc}
-    \caption{FL performance of different communication protocols.}
+    \caption{FL accuracy performance of different communication protocols with bold lines showing the eval on global model, and thin lines showing the eval on local models.}
     \label{fig:fl_performance}
 \end{figure}
 
 \noindent\textbf{Experimental setup.}
-We train a ResNet-18 on SVHN in a 5-worker FL setting for 80 rounds using FedSGD aggregation and 20 local epochs per client. Optimization is SGD (learning rate \(10^{-3}\), batch size \(5000\)). The learned Wyner--Ziv quantizer (WZQ) uses 3 stages with progressively fewer symbols per stage (down to 2). For warmup/initialization we use a non-WZ quantizer with 2 stages and 16 symbols per stage. We retain at most 10 past reconstructions per worker as side information. Quantizers are trained with Adam (learning rate \(10^{-3}\), weight decay \(10^{-4}\)) and a step scheduler (step size \(45\), \(\gamma=0.3\)); batch size \(10{,}000\); for 60 epochs, each epoch sampling a random subset of \(300{,}000\) examples. The initial Gumbel--Softmax temperature is \(1.3\), and the reconstruction-loss weight is \(\lambda=400\).
-
-Note that the nominal symbol \emph{capacity} need not equal the symbols actually used; e.g., the initialization quantizer has capacity \(256\) symbols yet activates only 20.
-
-For coding complexity, we replace the explicit Slepian--Wolf (SW) stage with a joint entropy coder that, given \(p(u\,|\,y)\), closely approximates SW performance~\cite{rANS}.
+We train a ResNet-18 on SVHN in a 5-worker FL setting for 50 rounds using FedAvg aggregation and 5 local epochs per client. Optimization is SGD (learning rate \(10^{-3}\), batch size \(500\)). The learned Wyner--Ziv quantizer (WZQ) will retain at most 5 past reconstructions per worker as side information to save on memory. Quantizers are trained with Adam (learning rate \(10^{-3}\), weight decay \(10^{-4}\)) and a step scheduler (step size \(35\), \(\gamma=0.3\)); batch size \(50{,}000\); for 70 epochs, each epoch sampling a random subset of \(300{,}000\) examples. The initial Gumbel--Softmax temperature is \(1.3\), and the reconstruction-loss weight is \(\lambda=300\).
+Note that the nominal \emph{capacity} of WZQ, i.e. number of possible output bins, need not equal the amount actually used; e.g., the initialization quantizer has capacity \(256\) symbols yet activates only 20 for any input values.
 
 \subsection{Rate--Distortion Performance}
-Figure~\ref{fig:rate_distortion} compares (i) the proposed WZQ, (ii) a learned non-WZ quantizer, and (iii) a sign quantizer. We also report on a protocol variant \emph{without} realignment phases. To ensure fairness, all methods include the SW coding approximation step; the sign baseline is given a perfect (oracle) prior, which is idealized and not achievable in practice. The Wyner--Ziv (WZ) bound is computed via Blahut--Arimoto using side information from round 25.
-
-Our WZQ dominates the alternatives, and its rate--distortion curve improves over training rounds---likely because model updates shrink and become more similar across rounds for the same worker, resetting them in a way each round (e.g., aggregation moderates overfitting workers). The variant without realignment degrades, highlighting the benefit of realignment.
+Figure~\ref{fig:rate_distortion} compares (i) Combined Protocol, (ii) Temporal-only Protocol, (iii) All-SI Protocol, (iv) learned non-DSC quantizer, and (v) Low-Bit quantizer (sign, Ternary, etc.).
+As we can see, all our protocol variants outperform the non-DSC and low-bit baselines, with the temporal-only protocol performing the best, and the all-SI protocol performing the worst among our variants.
+We hypothesize that the reason the all-SI protocol performs worse than the temporal-only protocol is a cause of train-inference missmatch: the all-SI protocol learns to recover a reconstruction from a different round which might not be ideal. On the other hand, the temporal-only protocol learns to recover the true gradient update from the same round, even when the side information is more restricted.
+We conclude that the temporal correlation is more significant than the inter-worker correlation and the gains from inter-worker SI are not significant enough to justify the train-inference mismatch.
 
 \subsection{FL Performance}
-Figure~\ref{fig:fl_performance} reports FL accuracy and per-round communication cost, including protocol variant with a post-warmup bit allowance of 1-bit for quantization instead of the 8-bit budget (3 stages with 2 bins). We also include a training report without any compression, which serves as an upper bound.
-
-The trained AUC is nearly perfect and outperforms the sign quantizer in both accuracy and communication cost. The 1-bit variant performs essentially as well.
-In both protocols, the rate generally increases until retraining, then becomes lower and more stable toward the end, probably due to the aforementioned shrinking updates and resetting.
+Figure~\ref{fig:fl_performance} reports FL accuracy per round. The trained accuracy is nearly perfect and outperforms the sign quantizer in both accuracy and communication cost. It also outperforms the identity (uncompressed) protocol, probably as the compression acts as a regularizer.

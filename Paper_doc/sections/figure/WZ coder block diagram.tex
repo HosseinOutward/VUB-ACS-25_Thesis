@@ -94,31 +94,31 @@
 \draw[flow] (hh1L.south) -- (hh2L.north);
 \draw[flow] (hh2L.south) -- (hhjL.north);
 
-% === Y fan (non-overlapping with SW Dec → \hat{h}^{(1)}) ===
-% Place Y near the top row, then fan with small vertical offsets into each \hat{h}^{(1)}_i
-\node (ylabel) at ($(hh11.west)+(-1.25cm,1cm)$) {$Y$};
-\coordinate (Yhub) at ($(hh11.west)+(-0.70cm,0)$);
-\draw[flow, -] (ylabel.east) -- (Yhub);
+% === S fan (non-overlapping with SW Dec → \hat{h}^{(1)}) ===
+% Place S near the top row, then fan with small vertical offsets into each \hat{h}^{(1)}_i
+\node (ylabel) at ($(hh11.west)+(-1.25cm,1cm)$) {$S$};
+\coordinate (Shub) at ($(hh11.west)+(-0.70cm,0)$);
+\draw[flow, -] (ylabel.east) -- (Shub);
 
-% Offsets so the Y taps don't coincide with the SW-Dec center entry
+% Offsets so the S taps don't coincide with the SW-Dec center entry
 \def\yoffTop{ 4.0pt}
 \def\yoffMid{ 4.0pt}
 \def\yoffBot{ 4.0pt}
 
 % to row 1
-\coordinate (Yin1) at ($ (hh11.west)+(-2.0mm,\yoffTop) $);
-\draw[flow, -] (Yhub) |- (Yin1);
-\draw[flow] (Yin1) -- ($ (hh11.west)+(0,\yoffTop) $);
+\coordinate (Sin1) at ($ (hh11.west)+(-2.0mm,\yoffTop) $);
+\draw[flow, -] (Shub) |- (Sin1);
+\draw[flow] (Sin1) -- ($ (hh11.west)+(0,\yoffTop) $);
 
 % to row 2
-\coordinate (Yin2) at ($ (hh21.west)+(-2.0mm,\yoffMid) $);
-\draw[flow, -] (Yhub) |- (Yin2);
-\draw[flow] (Yin2) -- ($ (hh21.west)+(0,\yoffMid) $);
+\coordinate (Sin2) at ($ (hh21.west)+(-2.0mm,\yoffMid) $);
+\draw[flow, -] (Shub) |- (Sin2);
+\draw[flow] (Sin2) -- ($ (hh21.west)+(0,\yoffMid) $);
 
 % to row j
-\coordinate (Yin3) at ($ (hhj1.west)+(-2.0mm,\yoffBot) $);
-\draw[flow, -] (Yhub) |- (Yin3);
-\draw[flow] (Yin3) -- ($ (hhj1.west)+(0,\yoffBot) $);
+\coordinate (Sin3) at ($ (hhj1.west)+(-2.0mm,\yoffBot) $);
+\draw[flow, -] (Shub) |- (Sin3);
+\draw[flow] (Sin3) -- ($ (hhj1.west)+(0,\yoffBot) $);
 
 \end{tikzpicture}
 \end{adjustbox}

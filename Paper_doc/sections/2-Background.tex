@@ -18,7 +18,7 @@ where $I(X;\hat{X}|Y)$ is conditional mutual information between $X$ and reconst
 %-----------------------------------------------------------------------
 \subsection{Learned WZ Quantizers + Slepian-Wolf Coding}
 \label{ssec:backlwzq}
-Learnable encoder-decoder pairs using DNNs~\cite{OzyilkanRecoverBinning}, where encoder $\phi$ quantizes input $\mathbf{x}$ to bin index $u$ (symbol); decoder $\psi$ reconstructs $\hat{\mathbf{x}}$ using bin index and side information $\mathbf{y}$.
+Learnable encoder-decoder pairs using DNNs~\cite{OzywzRecoverBinning}, where encoder $\phi$ quantizes input $\mathbf{x}$ to bin index $u$ (symbol); decoder $\psi$ reconstructs $\hat{\mathbf{x}}$ using bin index and side information $\mathbf{y}$.
 The derived Loss function requires conditional posterior (cond. prior) $p(\mathbf{x}|\mathbf{y},u)$, which is estimated by training a DNN-based model $q_\zeta(\mathbf{x}|\mathbf{y},u)$. Also, knowing the cond. prior enables the use of a separate Slepian-Wolf coding of the list of indices $U$, further reducing rate. There are works~\cite{ZhangTao2022} showcasing effectiveness of this extra step in FL.
 
 The loss function is:
@@ -29,7 +29,7 @@ where $q_\zeta$ is learned conditional prior, $d$ is distortion measure (MAPE), 
 
 \subsection{Successive Refinement}
 \label{ssec:backSR}
-Successive refinement sends multiple messages in stages for progressively better reconstruction. In WZ coding, $J$ stages use encoder-decoder pairs $(\phi_j, \psi_j)$. Learned versions~\cite{JoukovskyLayeredWZ} essentially use each stage's output as side information for the next, improving rate-distortion over monolithic coding.
+Successive refinement sends multiple messages in stages for progressively better reconstruction. In WZ coding, $J$ stages use encoder-decoder pairs $(\phi_j, \psi_j)$. Learned versions~\cite{BorisLayeredWZ} essentially use each stage's output as side information for the next, improving rate-distortion over monolithic coding.
 
 Encoders: $\phi_j : X^n \rightarrow \{1, \ldots, M_j\}$.
 

@@ -33,12 +33,12 @@
 \path (SWE.east) -- (SWD.west) coordinate[pos=.5] (midRS);
 \draw[thick] ($(midRS)+(-0.11,0.18)$) -- ($(midRS)+(0.11,-0.18)$);
 
-% --- side information Y with clean right-angle branches ---
-\coordinate (Y)   at ($(SWD.south) + ( -0.0,-0.9)$);
-\coordinate (YJ)  at ($(SWD.south) + (  0.0,-0.4)$); % junction under SWD
-\draw[thick] (Y) node[below=3pt] {$Y$} -- (YJ);
-\draw[thick,->] (YJ) -- (SWD.south);
-\draw[thick,->] (YJ) -| (DQ.south);
+% --- side information S with clean right-angle branches ---
+\coordinate (S)   at ($(SWD.south) + ( -0.0,-0.9)$);
+\coordinate (SJ)  at ($(SWD.south) + (  0.0,-0.4)$); % junction under SWD
+\draw[thick] (S) node[below=3pt] {$S$} -- (SJ);
+\draw[thick,->] (SJ) -- (SWD.south);
+\draw[thick,->] (SJ) -| (DQ.south);
 
 % --- dotted grouped regions ---
 %\node[group, fit=(Q)] (GQ) {};
