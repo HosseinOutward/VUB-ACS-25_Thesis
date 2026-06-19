@@ -1,5 +1,7 @@
 from __future__ import annotations
-from typing import Any, Dict, OrderedDict, Optional
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from typing import Any
 from pathlib import Path
 import csv
 import pickle
@@ -12,59 +14,59 @@ from run_fl import FLConfig
 from utils import StateDictManager
 
 
-def get_obj_compressed_size(obj, with_compression=True):
+def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
+    """Return the serialized storage size estimate for tensors and payload objects."""
     if isinstance(obj, torch.Tensor):
         return obj.element_size() * obj.nelement()
-    elif isinstance(obj, np.ndarray):
+    if isinstance(obj, np.ndarray):
         return obj.nbytes
-    elif isinstance(obj, (list, tuple)):
+    if isinstance(obj, (list, tuple)):
         return sum(get_obj_compressed_size(x, with_compression=False) for x in obj)
-    elif isinstance(obj, dict):
-        return sum(get_obj_compressed_size(v, with_compression=False) for k, v in obj.items())
-    elif hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
+    if isinstance(obj, dict):
+        return sum(get_obj_compressed_size(v, with_compression=False) for v in obj.values())
+    if hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
         return len(obj) * (obj._dtype.bitwidth // 8)
-    elif isinstance(obj, bytes):
+    if isinstance(obj, bytes):
         return len(obj)
-    elif obj is None:
+    if obj is None:
         return 1
-    else:
-        raise TypeError(f"Unsupported object type: {type(obj)}")
+    raise TypeError(f"Unsupported object type: {type(obj)}")
 
 
-def make_seriable(item):
+def make_serializable(item: Any) -> Any:
+    """Convert tensors and coder objects into pickle-friendly values."""
     if isinstance(item, np.ndarray):
         return item
-    elif isinstance(item, (np.uint8, np.uint16, np.uint32, np.uint64, np.float16)):
+    if isinstance(item, (np.integer, np.floating)):
         return item.item()
-    elif isinstance(item, (int, float, str, bytes)):
+    if isinstance(item, (int, float, str, bytes)):
         return item
-    elif isinstance(item, torch.Tensor):
+    if isinstance(item, torch.Tensor):
         return item.cpu()
-    elif isinstance(item, OrderedDict):
-        return OrderedDict({k: make_seriable(v) for k, v in item.items()})
-    elif isinstance(item, Dict):
-        return {k: make_seriable(v) for k, v in item.items()}
-    elif isinstance(item, (list, tuple)):
-        return [make_seriable(x) for x in item]
-    elif hasattr(item, '_dtype') and hasattr(item, '__len__'):
-        numpy_dtype = eval('np.' + str(item._dtype))
+    if isinstance(item, OrderedDict):
+        return OrderedDict((key, make_serializable(value)) for key, value in item.items())
+    if isinstance(item, Mapping):
+        return {key: make_serializable(value) for key, value in item.items()}
+    if isinstance(item, (list, tuple)):
+        return [make_serializable(x) for x in item]
+    if hasattr(item, '_dtype') and hasattr(item, '__len__'):
+        numpy_dtype = np.dtype(str(item._dtype))
         return np.array(item, dtype=numpy_dtype)
-    elif item is None:
+    if item is None:
         return None
-    else:
-        raise TypeError(f"Unsupported type for serialization: {type(item)}.")
+    raise TypeError(f"Unsupported type for serialization: {type(item)}.")
 
 
-def compress_data_list(data_list):
+def compress_data_list(data_list: Any) -> bytes:
     """Compress data using pickle and gzip."""
-    serializable_list = make_seriable(data_list)
+    serializable_list = make_serializable(data_list)
 
     pickled_data = pickle.dumps(serializable_list, protocol=pickle.HIGHEST_PROTOCOL)
     compressed_data = gzip.compress(pickled_data, compresslevel=6)
     return compressed_data
 
 
-def decompress_data_list(compressed_data):
+def decompress_data_list(compressed_data: bytes) -> Any:
     """Decompress data."""
     decompressed_data = gzip.decompress(compressed_data)
     data_list = pickle.loads(decompressed_data)
@@ -75,26 +77,26 @@ def decompress_data_list(compressed_data):
 class CompressionRecord:
     """Record for compression metrics. Stores all attributes for CSV export."""
 
-    def __init__(self, round_id: int, client_id: int, method: str = "identity"):
+    def __init__(self, round_id: int, client_id: int, method: str = "identity") -> None:
         self.round_id: int = round_id
         self.client_id: int = client_id
-        self.codec_class_used:str = method
-        self.compressed_bytes: Optional[int] = None
-        self.basic_raw_bytes: Optional[int] = None
-        self.compression_ratio: Optional[float] = None
-        self.global_eval_metrics: Dict[str, float] = {}
-        self.worker_eval_metrics: Dict[str, Dict[str, float]] = {}
-        self.entropy_real_rate: Optional[float] = None
-        self.model_size: Optional[int] = None
-        self.mse: Optional[float] = None
-        self.mape: Optional[float] = None
-        self.mspe_sqrt: Optional[float] = None
-        self.w_mean_of_vec: Optional[float] = None
-        self.wmape: Optional[float] = None
-        self.wmspe_sqrt: Optional[float] = None
-        self._og_delta_vec = None  # Original delta vector for reference
+        self.codec_class_used: str = method
+        self.compressed_bytes: float | None = None
+        self.basic_raw_bytes: float | None = None
+        self.compression_ratio: float | None = None
+        self.global_eval_metrics: dict[str, float] = {}
+        self.worker_eval_metrics: dict[str, dict[str, float]] = {}
+        self.entropy_real_rate: float | None = None
+        self.model_size: int | None = None
+        self.mse: float | None = None
+        self.mape: float | None = None
+        self.mspe_sqrt: float | None = None
+        self.w_mean_of_vec: float | None = None
+        self.wmape: float | None = None
+        self.wmspe_sqrt: float | None = None
+        self._og_delta_vec: torch.Tensor | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert record to dictionary using class attributes."""
         result = {
             'round_id': self.round_id,
@@ -126,7 +128,7 @@ class CompressionRecord:
 
         return result
 
-    def save_to_csv(self, save_dir: str | None = None) -> None:
+    def save_to_csv(self, save_dir: Path | str | None = None) -> None:
         """Append record to CSV file. If save_dir is None, skip saving."""
         if save_dir is None:
             return
@@ -140,7 +142,7 @@ class CompressionRecord:
         # Check if file exists to determine if we need to write headers
         file_exists = csv_file.exists()
 
-        with open(csv_file, 'a', newline='') as f:
+        with csv_file.open('a', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=record_dict.keys())
             if not file_exists:
                 writer.writeheader()
@@ -149,13 +151,15 @@ class CompressionRecord:
 
 # --- Compression Codecs --- #
 class IdentityCodec:
-    def __init__(self, fl_cfg: FLConfig):
+    def __init__(self, fl_cfg: FLConfig) -> None:
         self.fl_cfg = fl_cfg
 
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
+        """Create a metrics record for one client-round compression."""
         return CompressionRecord(round_id, client_id, method="identity")
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+        """Encode one flattened model delta into a transport payload."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
         record.basic_raw_bytes = get_obj_compressed_size(compress_data_list(delta_vec), with_compression=False) / (1024 ** 2)
 
@@ -171,11 +175,13 @@ class IdentityCodec:
         return payload
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
+        """Decode one transport payload and populate reconstruction metrics."""
         payload_content = decompress_data_list(payload)
         res = self._decompress(payload_content, record)
         assert res.dtype == torch.float32 and res.device == torch.device('cpu')
 
         delta_vec = record._og_delta_vec
+        assert delta_vec is not None, "CompressionRecord is missing original delta vector for metric calculation."
         record._og_delta_vec = None
 
         record.mse = torch.mean((res - delta_vec) ** 2).item()
@@ -192,10 +198,12 @@ class IdentityCodec:
 
     # Methods to be overridden by subclasses
     def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
+        """Compress a delta vector before generic payload serialization."""
         return delta_vec
 
     # Methods to be overridden by subclasses
     def _decompress(self, payload_content: Any, record: CompressionRecord) -> torch.Tensor:
+        """Reconstruct a delta vector from decoded payload content."""
         return payload_content
 
 
@@ -203,6 +211,7 @@ class BasicCompressionCodec(IdentityCodec):
     """Basic compression: float16 + gzip. Extends IdentityCodec."""
 
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
+        """Create a metrics record for basic float16 compression."""
         return CompressionRecord(round_id, client_id, method="basic")
 
     def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
@@ -210,22 +219,22 @@ class BasicCompressionCodec(IdentityCodec):
         return delta_fp16
     
     def _decompress(self, payload_content: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
-        return torch.tensor(payload_content, dtype=torch.float16).to(torch.float32)
+        return payload_content.to(torch.float32)
 
 
 def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCodec:
     """Create codec instance."""
     codec_name = fl_cfg.codec.lower()
 
-    codec = None  # <-- create the variable we'll return at the end
+    codec: IdentityCodec | None = None
 
-    if codec_name[:8] == "identity":
+    if codec_name.startswith("identity"):
         codec = IdentityCodec(fl_cfg)
     elif codec_name == "basic":
         codec = BasicCompressionCodec(fl_cfg)
-    elif codec_name[1:] == "_split_codec":
+    elif codec_name.endswith("_split_codec") and codec_name[:1].isdigit():
         from other_protocols.n_split_protocol import NSplitCodec
-        n = int(codec_name[0:1])
+        n = int(codec_name[0])
         codec = NSplitCodec(fl_cfg, n)
     else:
         norm_slices = None if "_basic_norm" in codec_name else sd_manager.get_slices()
@@ -233,8 +242,8 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
         quantizer_kwargs = {"norm_slices": norm_slices, "outlier_threshold": outlier_threshold}
         binary_prot = "_binary" in codec_name
 
-        if codec_name[:6] == "debug_":
-            if "cancerwithboundcalc" in codec_name[6:]:
+        if codec_name.startswith("debug_"):
+            if "cancerwithboundcalc" in codec_name.removeprefix("debug_"):
                 from experiments.rd_mspe_wz import CancerWithBoundCalc
                 codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
 
@@ -256,7 +265,8 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
             from cancer_protocol import CancerCodec
             codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
-        codec.c_cfg.debug_load_state = "_load_state" in codec_name
+        if codec is not None:
+            codec.c_cfg.debug_load_state = "_load_state" in codec_name
 
     if codec is None:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
@@ -266,13 +276,14 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
 
 def simulate_compression(
     codec: IdentityCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
-    model_size: int | None = None, save_dir: str | None = "compression_logs",
-    server_eval_metrics: Dict[str, float] = None, worker_eval_metrics: list[float] | None = None,
+    model_size: int | None = None, save_dir: Path | str | None = "compression_logs",
+    server_eval_metrics: dict[str, float] | None = None, worker_eval_metrics: Sequence[float] | None = None,
     metric_keys: list[str] | None = None) -> torch.Tensor:
+    """Simulate client encoding and server decoding for one flattened delta."""
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
     record.model_size = model_size
-    record.global_eval_metrics = server_eval_metrics
+    record.global_eval_metrics = server_eval_metrics or {}
 
     # Restructure worker metrics to match server metrics structure
     if worker_eval_metrics and metric_keys:

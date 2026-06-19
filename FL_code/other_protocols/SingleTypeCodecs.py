@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 import torch
 
 
@@ -12,22 +16,54 @@ from FL_code.cancer_protocol import CancerCodec
 
 
 class SingleTypeCodec(CancerCodec):
-    def __init__(self, single_letter, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
-        super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
-        self.c_cfg.warmup_phase = tuple((single_letter if a[0]!='P' else 'P',a[1],a[2]) for a in self.c_cfg.warmup_phase)
-        self.c_cfg.routine_phase = tuple((single_letter if a[0]!='F' else 'F',a[1],a[2]) for a in self.c_cfg.routine_phase)
+    """Cancer protocol variant that forces routine rounds to one training type."""
 
-        assert [c[0] in ['P', 'F', single_letter] for c in self.c_cfg.warmup_phase]
-        assert [c[0] in ['F', single_letter] for c in self.c_cfg.routine_phase]
+    def __init__(
+        self,
+        single_letter: str,
+        fl_cfg: FLConfig,
+        binary_prot: bool = False,
+        quantizer_kwargs: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(fl_cfg, binary_prot, quantizer_kwargs)
+        self.c_cfg.warmup_phase = tuple(
+            (single_letter if phase_type != 'P' else 'P', bins_per_plane, num_planes)
+            for phase_type, bins_per_plane, num_planes in self.c_cfg.warmup_phase
+        )
+        self.c_cfg.routine_phase = tuple(
+            (single_letter if phase_type != 'F' else 'F', bins_per_plane, num_planes)
+            for phase_type, bins_per_plane, num_planes in self.c_cfg.routine_phase
+        )
+
+        assert all(phase[0] in ('P', 'F', single_letter) for phase in self.c_cfg.warmup_phase), (
+            f"Warmup phase contains an invalid phase for {single_letter} codec."
+        )
+        assert all(phase[0] in ('F', single_letter) for phase in self.c_cfg.routine_phase), (
+            f"Routine phase contains an invalid phase for {single_letter} codec."
+        )
 
 
 class TemporalCodec(SingleTypeCodec):
-    def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
+    """Cancer protocol variant using temporal training rounds."""
+
+    def __init__(
+        self,
+        fl_cfg: FLConfig,
+        binary_prot: bool = False,
+        quantizer_kwargs: dict[str, Any] | None = None
+    ) -> None:
         super().__init__('T', fl_cfg, binary_prot, quantizer_kwargs)
 
 
 class RetrainCodec(SingleTypeCodec):
-    def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
+    """Cancer protocol variant using retraining rounds."""
+
+    def __init__(
+        self,
+        fl_cfg: FLConfig,
+        binary_prot: bool = False,
+        quantizer_kwargs: dict[str, Any] | None = None
+    ) -> None:
         super().__init__('R', fl_cfg, binary_prot, quantizer_kwargs)
 
 

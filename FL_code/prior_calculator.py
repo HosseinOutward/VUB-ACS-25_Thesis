@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import hashlib
+from typing import Any
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -22,6 +26,7 @@ class PriorCalculator:
 
     @staticmethod
     def get_hash(x_vec: torch.Tensor, sample_size: int = 128) -> str:
+        """Build a stable lightweight hash for prior-cache lookup."""
         sample = x_vec[:sample_size*3:3]
         sample = sample.cpu().numpy().round(decimals=1).astype(np.int32)
         hasher = hashlib.md5()
@@ -29,7 +34,8 @@ class PriorCalculator:
         return hasher.hexdigest()
 
     @staticmethod
-    def compute_marginal_prior(bins_vec: torch.Tensor, bins_per_plane, num_planes) -> torch.Tensor:
+    def compute_marginal_prior(bins_vec: torch.Tensor, bins_per_plane: int, num_planes: int) -> torch.Tensor:
+        """Estimate a per-plane marginal prior and broadcast it over all symbols."""
         vec_size = bins_vec.size(1)
         probs_per_plane = []
         for b_vec in bins_vec:
@@ -47,14 +53,21 @@ class PriorCalculator:
         return prior
 
     @staticmethod
-    def _compute_prior_from_network(q_model, bins_vec, side_info, training_tau=False, batch_size=500_000):
+    def _compute_prior_from_network(
+        q_model: Any,
+        bins_vec: torch.Tensor,
+        side_info: torch.Tensor,
+        training_tau: float | bool = False,
+        batch_size: int = 500_000
+    ) -> torch.Tensor:
         from cancer_quantizer import WZQuantizerCancer
 
         training_mode = training_tau is not False
 
         bins_vec = bins_vec.to(torch.long)
         bins_per_plane = q_model.bins_per_plane
-        def func(start_i, end_idx):
+
+        def func(start_i: int, end_idx: int) -> torch.Tensor:
             codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
                      for b in bins_vec[:, start_i:end_idx]]
             side_info_batch = side_info[start_i:end_idx].cuda()
@@ -73,8 +86,15 @@ class PriorCalculator:
         return priors
 
     @staticmethod
-    def train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
-                          c_cfg, batch_size=50_000) -> EncoderDecoderLayeredRNN:
+    def train_prior_model(
+        bins_vec: torch.Tensor,
+        side_info: torch.Tensor,
+        num_planes: int,
+        bins_per_plane: int,
+        c_cfg: Any,
+        batch_size: int = 50_000
+    ) -> EncoderDecoderLayeredRNN:
+        """Train repeated prior models and return the lowest-loss attempt."""
         train_attempts = []
         tries = 0
         while len(train_attempts) < c_cfg.prior_train_repeats:
@@ -92,8 +112,15 @@ class PriorCalculator:
         return q_model
 
     @staticmethod
-    def _train_prior_model(bins_vec, side_info, num_planes, bins_per_plane,
-                           c_cfg, batch_size, return_loss=False) -> EncoderDecoderLayeredRNN|tuple[EncoderDecoderLayeredRNN, float]:
+    def _train_prior_model(
+        bins_vec: torch.Tensor,
+        side_info: torch.Tensor,
+        num_planes: int,
+        bins_per_plane: int,
+        c_cfg: Any,
+        batch_size: int,
+        return_loss: bool = False
+    ) -> EncoderDecoderLayeredRNN | tuple[EncoderDecoderLayeredRNN, float]:
         assert bins_vec.size(0) == num_planes, "bins_vec first dimension must match num_planes"
 
         prior_model = EncoderDecoderLayeredRNN(

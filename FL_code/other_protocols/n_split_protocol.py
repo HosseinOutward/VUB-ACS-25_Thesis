@@ -1,4 +1,6 @@
-from typing import List, Tuple
+from __future__ import annotations
+
+from typing import Any
 
 import torch
 
@@ -14,40 +16,39 @@ from FL_code.prior_calculator import PriorCalculator
 
 
 class NSplitCodec(IdentityCodec):
-    def __init__(self, fl_cfg, split_points):
+    """Baseline codec that quantizes values by percentile split points."""
+
+    def __init__(self, fl_cfg: Any, split_points: int) -> None:
         super().__init__(fl_cfg)
         self.split_points = split_points
         self.num_clients = fl_cfg.num_clients
-        self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
-        self.si_vec_size = None
+        self.srvr_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.si_vec_size: int | None = None
 
     def create_record(self, round_id: int, client_id: int) -> BinsCodecRecord:
         return BinsCodecRecord(round_id, client_id, self.split_points, method=f"{self.split_points}-split")
 
     def get_si_data(self) -> torch.Tensor:
-        si_raw:List[torch.Tensor] = []
-        for s in self.srvr_past_reconst:
-            si_raw.extend(s)
+        si_raw = [tensor.float() for history in self.srvr_past_reconst for tensor in history]
+        si_raw = [tensor / tensor.abs().quantile(0.99) for tensor in si_raw]
 
-        si_raw = [s.float() for s in si_raw]
-        si_raw = [s/s.abs().quantile(0.99) for s in si_raw]
-
-        if si_raw == []:
+        if not si_raw:
+            assert self.si_vec_size is not None, "Side information size must be set before fallback prior creation."
             si_raw = [torch.zeros(self.si_vec_size)]
 
-        si_raw:torch.Tensor = torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
+        si_raw: torch.Tensor = torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
         return si_raw
 
-    def bin_f(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        perc_v = [torch.quantile(x, i/self.split_points) for i in range(1,self.split_points)]
+    def bin_f(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        perc_v = [torch.quantile(x, i / self.split_points) for i in range(1, self.split_points)]
 
         bins_vec = torch.zeros(x.shape, dtype=torch.uint8)
         for i, pv in enumerate(perc_v):
-            bins_vec[x>pv] = i+1
+            bins_vec[x > pv] = i + 1
 
         mean_v = torch.zeros(self.split_points, dtype=torch.float16)
         for i in range(self.split_points):
-            mean_v[i] = x[bins_vec==i].mean().to(torch.float16)
+            mean_v[i] = x[bins_vec == i].mean().to(torch.float16)
         return bins_vec.unsqueeze(0), mean_v
 
     def un_bin_f(self, bins_vec: torch.Tensor, mean_v: torch.Tensor) -> torch.Tensor:
@@ -56,7 +57,7 @@ class NSplitCodec(IdentityCodec):
             reconst[bins_vec[0]==i] = mean_v[i]
         return reconst
 
-    def _compress(self, delta_vec: torch.Tensor, record: BinsCodecRecord) -> tuple:
+    def _compress(self, delta_vec: torch.Tensor, record: BinsCodecRecord) -> tuple[torch.Tensor, torch.Tensor]:
         self.si_vec_size = len(delta_vec)
         bins_vec, mean_v = self.bin_f(delta_vec)
         payload = (bins_vec, mean_v)
@@ -72,7 +73,7 @@ class NSplitCodec(IdentityCodec):
 
         return payload
 
-    def _decompress(self, payload: dict, record: BinsCodecRecord) -> torch.Tensor:
+    def _decompress(self, payload: tuple[torch.Tensor, torch.Tensor], record: BinsCodecRecord) -> torch.Tensor:
         reconst = self.un_bin_f(*payload)
 
         history = self.srvr_past_reconst[record.client_id]

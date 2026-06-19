@@ -2,7 +2,8 @@ from __future__ import annotations
 import random
 import sys
 from collections import OrderedDict
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Any
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -15,12 +16,12 @@ from dataset import create_dataloader
 
 
 def create_training_progress_bar(
-    iterable_or_total: Union[int, object],
+    iterable_or_total: Any,
     desc: str,
     disable: bool = False,
     leave: bool = False,
     position: int = 0
-):
+) -> tqdm:
     common_config = {
         'disable': disable,
         'desc': desc,
@@ -56,16 +57,16 @@ def get_device(device_id: int = 0) -> torch.device:
 
 
 def setup_fl_worker(
-    cfg,
+    cfg: Any,
     role: str,
     device_id: int,
-    X_train: Optional[torch.Tensor],
-    y_train: Optional[torch.Tensor],
+    X_train: torch.Tensor | None,
+    y_train: torch.Tensor | None,
     X_test: torch.Tensor,
     y_test: torch.Tensor,
-    client_id: Optional[int] = None,
-    num_clients: Optional[int] = None
-) -> Tuple[FLModelTemplate, torch.device, DataLoader, Optional[DataLoader], StateDictManager]:
+    client_id: int | None = None,
+    num_clients: int | None = None
+) -> tuple[FLModelTemplate, torch.device, DataLoader, DataLoader | None, StateDictManager]:
     """
     Common setup for FL server/client workers.
 
@@ -90,7 +91,7 @@ def setup_fl_worker(
     return model, device, test_loader, train_loader, sd_manager
 
 
-def format_metrics(metrics: Dict[str, float], prefix: str = "") -> str:
+def format_metrics(metrics: dict[str, float], prefix: str = "") -> str:
     """Format metrics dict into a readable string."""
     p = f"{prefix} " if prefix else ""
     return f"{p}Loss: {metrics['loss']:.4f}, Acc: {metrics['acc']:.4f}, AUC: {metrics['auc']:.4f}"
@@ -114,7 +115,7 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batche
         model(x)
 
 
-def evaluate(model: FLModelTemplate, loader: DataLoader) -> Dict[str, float]:
+def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
     model.eval()
     loss_fn = nn.CrossEntropyLoss()
 
@@ -173,10 +174,10 @@ def evaluate(model: FLModelTemplate, loader: DataLoader) -> Dict[str, float]:
 
 
 class StateDictManager:
-    def __init__(self, model: nn.Module):
-        self.keys: List[str] = []
-        self.shapes: List[torch.Size] = []
-        self.numels: List[int] = []
+    def __init__(self, model: nn.Module) -> None:
+        self.keys: list[str] = []
+        self.shapes: list[torch.Size] = []
+        self.numels: list[int] = []
 
         # Extract trainable parameters metadata
         for key, param in model.named_parameters():
@@ -187,7 +188,7 @@ class StateDictManager:
 
         self.param_count = sum(self.numels)
 
-    def flatten(self, state_dict: dict) -> torch.Tensor:
+    def flatten(self, state_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         flat_list = []
         for key in self.keys:
             param = state_dict[key]
@@ -195,7 +196,7 @@ class StateDictManager:
         return torch.cat(flat_list, out=None)
 
     def unflatten(self, flat_vector: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
-        state_dict = OrderedDict()
+        state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
         offset = 0
 
         for key, shape, numel in zip(self.keys, self.shapes, self.numels):
@@ -205,7 +206,7 @@ class StateDictManager:
 
         return state_dict
 
-    def get_slices(self) -> List[slice]:
+    def get_slices(self) -> list[slice]:
         slices = []
         offset = 0
         for numel in self.numels:
@@ -213,12 +214,20 @@ class StateDictManager:
             offset += numel
         return slices
 
-    def clone_trainable(self, state_dict: dict) -> OrderedDict[str, torch.Tensor]:
+    def clone_trainable(self, state_dict: dict[str, torch.Tensor]) -> OrderedDict[str, torch.Tensor]:
         return OrderedDict((k, state_dict[k].cpu().detach().clone()) for k in self.keys)
 
-    def compute_delta(self, new_state: dict, old_state: dict) -> OrderedDict[str, torch.Tensor]:
+    def compute_delta(
+        self,
+        new_state: dict[str, torch.Tensor],
+        old_state: dict[str, torch.Tensor]
+    ) -> OrderedDict[str, torch.Tensor]:
         return OrderedDict((k, new_state[k] - old_state[k]) for k in self.keys)
 
-    def apply_delta_inplace(self, state_dict: dict, delta: dict) -> None:
+    def apply_delta_inplace(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        delta: dict[str, torch.Tensor]
+    ) -> None:
         for key in self.keys:
             state_dict[key].add_(delta[key].to(state_dict[key].device))
