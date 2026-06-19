@@ -1,10 +1,11 @@
 from __future__ import annotations
-from typing import Tuple
+
 from abc import ABC, abstractmethod
 
 import math
 import torch
 from torch import optim as optim, nn as nn
+from torch.utils.data import DataLoader
 from torchvision.models import resnet18, resnet50
 
 from other_codes.resnet56 import ResNet56CIFAR
@@ -14,7 +15,7 @@ from run_fl import FLConfig
 class FLModelTemplate(nn.Module, ABC):
     """Minimalist base class for federated learning models."""
 
-    def __init__(self, cfg, device: torch.device):
+    def __init__(self, cfg: FLConfig, device: torch.device) -> None:
         super().__init__()
         self.cfg = cfg
         self.device = device
@@ -25,11 +26,11 @@ class FLModelTemplate(nn.Module, ABC):
         ...
 
     @abstractmethod
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         """Execute a single training step on one batch."""
         ...
 
-    def train_epoch(self, dataloader, optimizer: optim.Optimizer, scaler: torch.amp.GradScaler) -> None:
+    def train_epoch(self, dataloader: DataLoader, optimizer: optim.Optimizer, scaler: torch.amp.GradScaler) -> None:
         """Train for one complete epoch."""
         self.train()
 
@@ -53,7 +54,7 @@ class FLModelTemplate(nn.Module, ABC):
 class ResNetFLModel(FLModelTemplate):
     """Unified ResNet model for federated learning."""
 
-    def __init__(self, cfg: FLConfig, device: torch.device, model: nn.Module):
+    def __init__(self, cfg: FLConfig, device: torch.device, model: nn.Module) -> None:
         super().__init__(cfg, device)
         self.model = model
         self.loss_fn = nn.CrossEntropyLoss()
@@ -69,7 +70,7 @@ class ResNetFLModel(FLModelTemplate):
             fused=self.cfg.fused_optimizer
         )
 
-    def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
+    def training_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
         x, y = batch[0].to(self.device), batch[1].to(self.device)
         if self.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)

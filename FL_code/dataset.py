@@ -1,6 +1,6 @@
 from __future__ import annotations
-import os
-from typing import Tuple, Optional
+from pathlib import Path
+from typing import Any
 
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -20,7 +20,7 @@ class SharedTensorDataset(Dataset):
     def __len__(self) -> int:
         return len(self.y)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.X[idx], self.y[idx]
 
 
@@ -39,11 +39,11 @@ DATASET_CONFIG = {
 
 def precompute_dataset_to_shared(
     dataset_name: str,
-    data_folder: str,
+    data_folder: Path | str,
     split: str,
     dtype: torch.dtype = torch.float32,
-    fraction: float = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    fraction: float | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Precompute dataset preprocessing and store in shared memory."""
     dataset_name = dataset_name.upper()
     if dataset_name not in DATASET_CONFIG:
@@ -51,14 +51,15 @@ def precompute_dataset_to_shared(
 
     is_train = (split == "train")
     cfg = DATASET_CONFIG[dataset_name]
+    data_path = Path(data_folder)
 
     # Load dataset
     if dataset_name == 'SVHN':
-        ds = SVHN(root=os.path.join(data_folder, "SVHN"), split=split, download=False)
+        ds = SVHN(root=data_path / "SVHN", split=split, download=False)
         X = torch.from_numpy(ds.data).float().div_(255.0)
         y = torch.tensor(ds.labels, dtype=torch.long)
     else:  # CIFAR10
-        ds = CIFAR10(root=os.path.join(data_folder, "CIFAR10"), train=is_train, download=True)
+        ds = CIFAR10(root=data_path / "CIFAR10", train=is_train, download=True)
         X = torch.from_numpy(ds.data).float().permute(0, 3, 1, 2).div_(255.0)
         y = torch.tensor(ds.targets, dtype=torch.long)
 
@@ -81,9 +82,10 @@ def precompute_dataset_to_shared(
 
 
 def create_dataloader(
-    X: torch.Tensor, y: torch.Tensor, cfg, device: torch.device,
-    is_train: bool, client_id: Optional[int] = None, num_clients: Optional[int] = None
+    X: torch.Tensor, y: torch.Tensor, cfg: Any, device: torch.device,
+    is_train: bool, client_id: int | None = None, num_clients: int | None = None
 ) -> DataLoader:
+    """Create a train or test dataloader over shared tensors."""
     assert (client_id is None and is_train is False) or (client_id is not None and is_train is True)
 
     dataset = SharedTensorDataset(X, y)

@@ -1,5 +1,9 @@
-from typing import List, Optional, Callable, TYPE_CHECKING, Dict, Tuple
+from __future__ import annotations
+
+from collections.abc import Callable
 from contextlib import nullcontext
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -13,7 +17,7 @@ if TYPE_CHECKING:
     from cancer_protocol import CancerConfig
 
 
-def get_normalization_factor(y: torch.Tensor) -> Tuple[float,float]:
+def get_normalization_factor(y: torch.Tensor) -> tuple[float, float]:
     """Calculate normalization factor based on quantiles."""
     num_samples = 5
     sample_size = min(200_000, len(y))
@@ -43,7 +47,7 @@ def get_normalization_factor(y: torch.Tensor) -> Tuple[float,float]:
     return norm_fact, g
 
 
-def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float) -> Tuple:
+def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float) -> tuple[np.ndarray, float | None, np.ndarray | torch.Tensor]:
     """Extract outlier information from a tensor."""
     outlier_mask = torch.abs(grad_flat_normal) > outlier_threshold
     outlier_count = torch.sum(outlier_mask)
@@ -65,11 +69,12 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
 
 class WZQuantizerCancer:
     def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int,
-                 bins_per_plane: int, si_size: int, marginal_loss=False, norm_slices: List[slice]|bool|None = False,
-                 outlier_threshold: float|bool = False, extra_si_for_prior:List[torch.Tensor]=()) -> None:
+                 bins_per_plane: int, si_size: int, marginal_loss=False, norm_slices: list[slice] | bool | None = False,
+                 outlier_threshold: float | bool = False,
+                 extra_si_for_prior: list[torch.Tensor] | tuple[torch.Tensor, ...] = ()) -> None:
         # Data preprocessing parameters - defaults to single slice (no partitioning)
-        self.vec_slices: List[slice]|bool = norm_slices if norm_slices is not None else [slice(0, None)]
-        self.outlier_threshold: float|bool = outlier_threshold
+        self.vec_slices: list[slice] | bool = norm_slices if norm_slices is not None else [slice(0, None)]
+        self.outlier_threshold: float | bool = outlier_threshold
 
         self.extra_si_for_prior = extra_si_for_prior
 
@@ -82,13 +87,13 @@ class WZQuantizerCancer:
             num_planes, bins_per_plane, si_size, marginal_loss)
 
         # default assume that its pretrained marginal model if si_size==0 unless trained otherwise
-        self.side_info_list_used: List[torch.Tensor] | str | None
+        self.side_info_list_used: list[torch.Tensor] | str | None
         self.side_info_list_used = 'P' if si_size==0 else None
         self.si_count = max(si_size, 1)
 
-        self.cached_priors_dict: Dict[str, torch.Tensor] = {}
+        self.cached_priors_dict: dict[str, torch.Tensor] = {}
         self.wmspe_denom: float | None = None
-        self.si_vec_size: Optional[int] = None
+        self.si_vec_size: int | None = None
 
     @property
     def num_planes(self) -> int:
@@ -139,7 +144,7 @@ class WZQuantizerCancer:
 
         return loss
 
-    def get_x_data(self, x_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
+    def get_x_data(self, x_raw: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, tuple]]:
         if self.si_vec_size is None:
             self.si_vec_size = x_raw.shape[0]
 
@@ -176,7 +181,7 @@ class WZQuantizerCancer:
         si_trans = torch.stack(si_trans).cuda().T.to(torch.float32).contiguous()
         return si_trans
 
-    def train_model(self, x_raw: torch.Tensor, si_raw_list: Optional[List[torch.Tensor]],
+    def train_model(self, x_raw: torch.Tensor, si_raw_list: list[torch.Tensor] | None,
                     batch_size: int = 50_000) -> None:
         if self.no_si:
             assert si_raw_list is None, "Marginal model expects an empty si_raw_list for training."
@@ -203,8 +208,8 @@ class WZQuantizerCancer:
         assert x_prep.shape[0] == self.si_vec_size
 
         tries = 0
-        model_losses: List[float] = []
-        model_list: List[EncoderDecoderLayeredRNN] = []
+        model_losses: list[float] = []
+        model_list: list[EncoderDecoderLayeredRNN] = []
         while len(model_losses) < max_attempts:
             assert tries<=max_attempts*5, "Too many failed training attempts."
             tries += 1
@@ -329,7 +334,7 @@ class WZQuantizerCancer:
 
         # Pre-allocate list with estimated capacity
         num_batches = (input_size + batch_size - 1) // batch_size
-        all_res: List[torch.Tensor | None] = [None] * num_batches
+        all_res: list[torch.Tensor | None] = [None] * num_batches
 
         # Use inference_mode context only when not in training mode
         ctx = nullcontext() if training_mode else torch.inference_mode()
@@ -348,7 +353,7 @@ class WZQuantizerCancer:
         torch.cuda.empty_cache()
         return concat_res
 
-    def encoding_process(self, grad_raw: torch.Tensor) -> Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
+    def encoding_process(self, grad_raw: torch.Tensor) -> tuple[torch.Tensor, tuple[torch.Tensor, tuple]]:
         # Keep on CPU, batch processing will handle GPU transfers
         grad_prep, prep_metadata = self.get_x_data(grad_raw)
         bins = self._encoding_process(grad_prep)
@@ -374,7 +379,7 @@ class WZQuantizerCancer:
 
         return bins.to(dtype)
 
-    def decoding_process(self, payload_content: Tuple[torch.Tensor, Tuple[torch.Tensor, Tuple]],
+    def decoding_process(self, payload_content: tuple[torch.Tensor, tuple[torch.Tensor, tuple]],
                          batch_size: int = 500_000) -> torch.Tensor:
         # return torch.from_numpy(quantized_data).float()/1000.0
 
@@ -437,52 +442,50 @@ class WZQuantizerCancer:
         return self.cached_priors_dict[data_hash_str]
 
     def _apply_pre_process(self, x_raw: torch.Tensor, force_no_outlier_handling=False,
-                           ) -> Tuple[torch.Tensor, torch.Tensor, Tuple]:
+                           ) -> tuple[torch.Tensor, torch.Tensor, tuple]:
         x_prep = x_raw.clone()
 
-        no_normal_handling = (self.vec_slices == False)
-        no_outlier_handling = (self.outlier_threshold == False) or force_no_outlier_handling
+        no_normal_handling = self.vec_slices is False
+        no_outlier_handling = self.outlier_threshold is False or force_no_outlier_handling
 
-        norm_factors: List[Tuple[float,float]] = [(1,0)]
+        norm_factors: list[tuple[float, float]] = [(1, 0)]
         if not no_normal_handling:
             norm_factors = []
             for v_slc in self.vec_slices:
                 norm_fact, grav_center = get_normalization_factor(x_prep[v_slc])
                 norm_factors.append((norm_fact, grav_center))
                 x_prep[v_slc] = (x_prep[v_slc] - grav_center) / norm_fact
-        norm_factors:torch.Tensor = torch.Tensor(norm_factors).to(torch.float16)
+        norm_factors_tensor = torch.tensor(norm_factors, dtype=torch.float16)
 
         # Outlier handling (if enabled)
-        outlier_positions: List[np.ndarray] = []
-        outlier_max: Optional[np.ndarray] = None
-        outlier_sign: np.ndarray = np.array([], dtype=np.bool)
+        outlier_positions: list[np.ndarray] | np.ndarray = []
+        outlier_max: float | np.ndarray | None = None
+        outlier_sign: np.ndarray = np.array([], dtype=np.bool_)
         if not no_outlier_handling:
             outlier_positions, outlier_max, outlier_sign = get_outlier_factor(x_prep, self.outlier_threshold)
-            outlier_max:float
-            outlier_positions:np.ndarray
             if len(outlier_positions) != 0:
                 outlier_x = x_prep[outlier_positions]
                 x_prep[outlier_positions] = (
                         (torch.abs(outlier_x) - self.outlier_threshold) * torch.sign(outlier_x) / outlier_max)
 
                 op_offset = 2**8
-                outlier_positions:List[np.ndarray] = [(
-                        outlier_positions[(outlier_positions>=start_i) * (outlier_positions<start_i+op_offset)]-start_i
+                outlier_positions: list[np.ndarray] = [(
+                        outlier_positions[(outlier_positions >= start_i) * (outlier_positions < start_i + op_offset)] - start_i
                     ).astype(np.uint8)
-                    for start_i in range(0, len(x_raw)+op_offset-1, op_offset)
+                    for start_i in range(0, len(x_raw) + op_offset - 1, op_offset)
                 ]
 
-                outlier_sign = np.array(outlier_sign==1).astype(np.bool)
-            outlier_max:np.ndarray = np.array([outlier_max]).astype(np.float16)
+                outlier_sign = np.array(outlier_sign == 1).astype(np.bool_)
+            outlier_max = np.array([outlier_max]).astype(np.float16)
 
         outlier_param = (outlier_positions, outlier_max, outlier_sign)
 
-        return x_prep, norm_factors, outlier_param
+        return x_prep, norm_factors_tensor, outlier_param
 
-    def _post_process(self, recons_raw: torch.Tensor, norm_factors: torch.Tensor, outlier_param: Tuple) -> torch.Tensor:
+    def _post_process(self, recons_raw: torch.Tensor, norm_factors: torch.Tensor, outlier_param: tuple) -> torch.Tensor:
         recons_prep = recons_raw.clone()
         # Restore outliers
-        outlier_positions: List[np.ndarray] = outlier_param[0]
+        outlier_positions: list[np.ndarray] = outlier_param[0]
         if len(outlier_positions):
             outlier_max: float = outlier_param[1]
             outlier_sign: torch.Tensor = torch.from_numpy(outlier_param[2]).float()*2-1
@@ -500,7 +503,7 @@ class WZQuantizerCancer:
                 (torch.abs(recons_prep[outlier_positions]) * outlier_max + self.outlier_threshold) * outlier_sign
 
         # Denormalize per slice
-        if type(self.vec_slices) is list:
+        if isinstance(self.vec_slices, list):
             for i, v_slc in enumerate(self.vec_slices):
                 norm_fact, grav_center = norm_factors[i]
                 recons_prep[v_slc] = recons_prep[v_slc] * norm_fact + grav_center
@@ -516,7 +519,7 @@ if __name__ == "__main__":
     y = base_signal + torch.from_numpy(np.random.normal(0, np.sqrt(0.1), 1_000_000).astype(np.float32))
     side_info = [base_signal.clone(), (y.clone()+base_signal)/2]
 
-    pretrained_path = CancerConfig().pretrain_pth_dir+"/bpp8_np3_pretrained_wzq_rnn.pth"
+    pretrained_path = CancerConfig().pretrain_pth_dir / "bpp8_np3_pretrained_wzq_rnn.pth"
 
     def test(quantizer):
         bins, metadata = quantizer.encoding_process(y)

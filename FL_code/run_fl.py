@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 from dataclasses import dataclass
@@ -185,4 +187,3 @@ if __name__ == "__main__":
         nprocs=cfg.num_clients + 1,
         join=True
     )
-

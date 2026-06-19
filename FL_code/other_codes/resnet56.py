@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from torch import nn
 
@@ -5,7 +7,7 @@ from torch import nn
 class BasicBlockCIFAR(nn.Module):
     """Basic residual block for CIFAR ResNet."""
 
-    def __init__(self, in_planes: int, planes: int, stride: int = 1):
+    def __init__(self, in_planes: int, planes: int, stride: int = 1) -> None:
         super().__init__()
         self.conv1 = nn.Conv2d(in_planes, planes, 3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -27,7 +29,7 @@ class BasicBlockCIFAR(nn.Module):
 class ResNet56CIFAR(nn.Module):
     """ResNet-56 for CIFAR (32x32 images). 3 stages × 9 blocks each."""
 
-    def __init__(self, num_classes: int = 10):
+    def __init__(self, num_classes: int = 10) -> None:
         super().__init__()
         self.in_planes = 16
         self.conv1 = nn.Conv2d(3, 16, 3, padding=1, bias=False)
@@ -46,7 +48,7 @@ class ResNet56CIFAR(nn.Module):
             layers.append(BasicBlockCIFAR(planes, planes))
         return nn.Sequential(*layers)
 
-    def _init_weights(self):
+    def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -58,4 +60,3 @@ class ResNet56CIFAR(nn.Module):
         x = torch.relu(self.bn1(self.conv1(x)))
         x = self.layer3(self.layer2(self.layer1(x)))
         return self.fc(torch.flatten(self.avgpool(x), 1))
-

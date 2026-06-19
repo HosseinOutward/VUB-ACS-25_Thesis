@@ -43,9 +43,12 @@ Each round has a type that determines quantizer training and side information us
 'M' - MARGINAL (optional, not in default config):
     - Similar to 'P' but trains a marginal model from scratch instead of loading pretrained
 """
+from __future__ import annotations
+
 import gc
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any
 import torch
 
 from cancer_quantizer import WZQuantizerCancer
@@ -61,11 +64,11 @@ from run_fl import FLConfig, _DEBUG_FLAG
 class CancerConfig:
     """Configuration for Cancer protocol phases and WZ model."""
     # Phase info, (phase type, bins per plane (not bits), num planes)
-    warmup_phase: Tuple[Tuple[str, int, int]] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
-    routine_phase: Tuple[Tuple[str, int, int]] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
+    warmup_phase: tuple[tuple[str, int, int], ...] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
+    routine_phase: tuple[tuple[str, int, int], ...] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6
 
     max_side_info_count: int = 5
-    pretrain_pth_dir: str = r'data/pre_trained_pth/' # ignored if train_marginal=True
+    pretrain_pth_dir: Path = Path('data/pre_trained_pth')  # ignored if train_marginal=True
 
     train_epochs: int = 70 if not _DEBUG_FLAG else 1
     reconst_ld: float = 200.0
@@ -74,21 +77,23 @@ class CancerConfig:
     lr_step: int = 35
     tau: float = 1.3
     tau_rate: float = 10.0
-    quantizer_train_repeats = 3
-    prior_train_repeats = 3
+    quantizer_train_repeats: int = 3
+    prior_train_repeats: int = 3
 
-    debug_save_codec_state:str = 'quantizer_state'
+    debug_save_codec_state: str = 'quantizer_state'
     debug_load_state: bool = False
 
 
 class BinsCodecRecord(CompressionRecord):
-    def __init__(self, round_id: int, client_id: int, bins_per_plane: int, method: str):
-        super().__init__(round_id, client_id, method)
-        self.bins_per_plane: Optional[int] = bins_per_plane
-        self.prior_rate: Optional[float] = None
-        self.marginal_rate: Optional[float] = None
+    """Compression record with quantized-bin rate diagnostics."""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def __init__(self, round_id: int, client_id: int, bins_per_plane: int | None, method: str) -> None:
+        super().__init__(round_id, client_id, method)
+        self.bins_per_plane: int | None = bins_per_plane
+        self.prior_rate: float | None = None
+        self.marginal_rate: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result.update({
             "bins_per_plane": self.bins_per_plane,
@@ -99,18 +104,20 @@ class BinsCodecRecord(CompressionRecord):
 
 
 class CancerRecord(BinsCodecRecord):
+    """Compression record for one Cancer protocol client-round."""
+
     def __init__(self, round_id: int, client_id: int, method: str = "cancer",
-                 phase: Optional[str] = None, round_type: Optional[str] = None,
-                 bits_per_plane: Optional[int] = None, num_planes: Optional[int] = None):
+                 phase: str | None = None, round_type: str | None = None,
+                 bits_per_plane: int | None = None, num_planes: int | None = None) -> None:
         assert method == "cancer", "CancerRecord must be used by method 'cancer'"
         super().__init__(round_id, client_id, bits_per_plane, method)
-        self.phase: Optional[str] = phase
-        self.round_type: Optional[str] = round_type
-        self.num_planes: Optional[int] = num_planes
-        self.encoder_decoder_size: Optional[int] = None
-        self.meta_data_size: Optional[int] = None
+        self.phase: str | None = phase
+        self.round_type: str | None = round_type
+        self.num_planes: int | None = num_planes
+        self.encoder_decoder_size: float | None = None
+        self.meta_data_size: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = super().to_dict()
         result.update({
             "phase": self.phase,
@@ -129,7 +136,14 @@ class CancerRecord(BinsCodecRecord):
 # Cancer Codec Implementation
 # ============================================================================
 class CancerCodec(IdentityCodec):
-    def __init__(self, fl_cfg: FLConfig, binary_prot=False, quantizer_kwargs=None):
+    """Cancer protocol codec coordinating WZ quantizers and side-information histories."""
+
+    def __init__(
+        self,
+        fl_cfg: FLConfig,
+        binary_prot: bool = False,
+        quantizer_kwargs: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(fl_cfg)
         if quantizer_kwargs is None:
             quantizer_kwargs = {'norm_slices': False, 'outlier_threshold': False}
@@ -146,11 +160,11 @@ class CancerCodec(IdentityCodec):
         self.quantizer_kwargs = quantizer_kwargs
 
         # Per-client reconstruction histories
-        self.srvr_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
-        self.client_past_reconst: List[List[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.srvr_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.client_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
 
         # Frozen state for frozen phase
-        self.frozen_quantizers: List[Optional[WZQuantizerCancer]] = [None] * self.num_clients
+        self.frozen_quantizers: list[WZQuantizerCancer | None] = [None] * self.num_clients
 
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
@@ -220,7 +234,7 @@ class CancerCodec(IdentityCodec):
         elif round_type != 'P':
             quantizer.train_model(target_x, train_si)
         else:
-            weight_path = self.c_cfg.pretrain_pth_dir + f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
+            weight_path = Path(self.c_cfg.pretrain_pth_dir) / f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
             quantizer.coding_model.load_state_dict(torch.load(weight_path), strict=False)
             quantizer.side_info_list_used = []  # Pretrained models are marginal
 
@@ -236,7 +250,7 @@ class CancerCodec(IdentityCodec):
             if '_continue' in self.fl_cfg.codec and not codec_state_path.exists():
                 self.c_cfg.debug_load_state = False
                 if '_continue_then_save' in self.fl_cfg.codec:
-                    self.fl_cfg.codec.debug_save_train_data = True
+                    self.fl_cfg.debug_save_train_data = True
 
         if record.round_type != 'F':
             self._train_quantizer_or_load(delta_vec, record)
@@ -283,8 +297,14 @@ class CancerCodec(IdentityCodec):
 
         return payload
 
-    def _build_payload(self, bins, prep_metadata, quantizer: WZQuantizerCancer, record: CancerRecord) -> dict:
-        payload:Dict[str, Any] = {
+    def _build_payload(
+        self,
+        bins: torch.Tensor,
+        prep_metadata: tuple[torch.Tensor, tuple],
+        quantizer: WZQuantizerCancer,
+        record: CancerRecord
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             'payload_content': (bins, prep_metadata),
         }
 
@@ -316,7 +336,7 @@ class CancerCodec(IdentityCodec):
 
         return reconst
 
-    def _update_history(self, history: List[torch.Tensor], item: torch.Tensor):
+    def _update_history(self, history: list[torch.Tensor], item: torch.Tensor) -> None:
         history.append(item.to(torch.float16))
         if len(history) > self.c_cfg.max_side_info_count:
             history.pop(0)
@@ -406,4 +426,3 @@ if __name__ == "__main__":
     print(f"  Comp_ratio={np.mean(comp_ratio_list):.2f}x")
     print(f"  Prior_rate={np.mean(prior_rate_list):.3f}bpp | Marginal_rate={np.mean(marginal_rate_list):.3f}bpp | Entropy_real_rate={np.mean(entropy_real_rate_list):.3f}bpp")
     print(f"{'='*70}")
-
