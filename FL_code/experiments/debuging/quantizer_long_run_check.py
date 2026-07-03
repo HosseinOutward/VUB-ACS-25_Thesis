@@ -16,17 +16,13 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from pathlib import Path
-import sys
 
 # import pydevd_pycharm
 # pydevd_pycharm.settrace('ETROFLOCK', port=32112,
 #         stdout_to_server=True, stderr_to_server=True, suspend=True)
 
-# Add project root to path
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent.parent  # -> VUB-ACS-25_Thesis/FL_code
-sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root.parent))
 
 from FL_code.codec import create_codec
 from FL_code.cancer_protocol import CancerCodec

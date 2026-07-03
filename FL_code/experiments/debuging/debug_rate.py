@@ -1,11 +1,5 @@
 """Debug script to compare rate calculation methods"""
-import sys
-from pathlib import Path
 
-# Add project root to path (works both in PyCharm and terminal)
-script_dir = Path(__file__).resolve().parent
-project_root = script_dir.parent.parent  # FL_reworked/experiments/debuging -> VUB-ACS-25_Thesis
-sys.path.insert(0, str(project_root))
 
 import torch
 import torch.nn.functional as F

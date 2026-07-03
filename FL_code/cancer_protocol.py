@@ -46,23 +46,24 @@ Each round has a type that determines quantizer training and side information us
 from __future__ import annotations
 
 import gc
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 import torch
+from pydantic import BaseModel, ConfigDict
 
-from cancer_quantizer import WZQuantizerCancer
-from codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
-from prior_calculator import PriorCalculator
-from run_fl import FLConfig, _DEBUG_FLAG
+from FL_code.cancer_quantizer import WZQuantizerCancer
+from FL_code.codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
+from FL_code.prior_calculator import PriorCalculator
+from FL_code.run_fl import FLConfig, _DEBUG_FLAG
 
 
 # ============================================================================
 # Cancer Protocol Configuration and Records
 # ============================================================================
-@dataclass
-class CancerConfig:
+
+class CancerConfig(BaseModel):
     """Configuration for Cancer protocol phases and WZ model."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     # Phase info, (phase type, bins per plane (not bits), num planes)
     warmup_phase: tuple[tuple[str, int, int], ...] = (('P', 8, 3), ('T', 8, 3)) + (('R', 4, 3),) * 3
     routine_phase: tuple[tuple[str, int, int], ...] = (('T', 2, 3), ('T', 2, 3), ('R', 2, 3)) + (('F', 2, 3),) * 6

@@ -4,13 +4,7 @@ from typing import Any
 
 import torch
 
-try:
-    from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
-except ModuleNotFoundError:
-    import sys
-    sys.path.append('..')
-    from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
-
+from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
 from FL_code.codec import IdentityCodec
 from FL_code.prior_calculator import PriorCalculator
 

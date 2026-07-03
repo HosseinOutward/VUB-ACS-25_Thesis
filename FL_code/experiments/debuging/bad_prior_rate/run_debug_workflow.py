@@ -1,12 +1,10 @@
 """Simple script to run FL workflow and trigger debug dumps when prior > marginal."""
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import numpy as np
 import torch
-from cancer_protocol import CancerCodec, CancerConfig
-from run_fl import FLConfig
+from FL_code.cancer_protocol import CancerCodec, CancerConfig
+from FL_code.run_fl import FLConfig
 
 
 def run_workflow():

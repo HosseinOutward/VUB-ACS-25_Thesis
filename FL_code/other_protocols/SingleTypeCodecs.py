@@ -5,14 +5,8 @@ from typing import Any
 import torch
 
 
-try:
-    from FL_code.cancer_protocol import CancerConfig, CancerCodec
-except ModuleNotFoundError:
-    import sys
-    sys.path.append('..')
-    from FL_code.cancer_protocol import CancerConfig
-from FL_code.run_fl import FLConfig
 from FL_code.cancer_protocol import CancerCodec
+from FL_code.run_fl import FLConfig
 
 
 class SingleTypeCodec(CancerCodec):

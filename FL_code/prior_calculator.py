@@ -7,9 +7,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from run_fl import FLConfig
-from brent_wz_models import EncoderDecoderLayeredRNN
-from utils import create_training_progress_bar
+from FL_code.run_fl import FLConfig
+from FL_code.brent_wz_models import EncoderDecoderLayeredRNN
+from FL_code.utils import create_training_progress_bar
 
 class PriorCalculator:
     @staticmethod
