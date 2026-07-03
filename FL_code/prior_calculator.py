@@ -60,7 +60,7 @@ class PriorCalculator:
         training_tau: float | bool = False,
         batch_size: int = 500_000
     ) -> torch.Tensor:
-        from cancer_quantizer import WZQuantizerCancer
+        from FL_code.cancer_quantizer import WZQuantizerCancer
 
         training_mode = training_tau is not False
 
@@ -143,19 +143,22 @@ class PriorCalculator:
         for epoch in range(c_cfg.train_epochs):
             indices = torch.randint(0, vec_size, (total_samples,), dtype=torch.long)
             bins_subset, si_subset = bins_vec[:, indices], side_info[indices]
+            """Assert that sampled bins and side information share the same original indices."""
+            assert torch.equal(bins_subset, bins_vec[:, indices]), "Sampled bins do not match the selected prior-training indices."
+            assert torch.equal(si_subset, side_info[indices]), "Sampled side information does not match the selected prior-training indices."
 
             epoch_loss = 0.0
             for batch_idx, start_i in enumerate(range(0, total_samples, batch_size)):
                 end_i = min(start_i + batch_size, total_samples)
                 bins_batch, si_batch = bins_subset[:, start_i:end_i], si_subset[start_i:end_i]
 
-                si_batch += torch.randn_like(si_batch) * (1e-4 * si_batch.abs().mean())
+                si_batch = si_batch + torch.randn_like(si_batch) * (1e-4 * si_batch.abs().mean())
 
                 training_prog = epoch / (c_cfg.train_epochs + 1)
                 tau = c_cfg.tau * np.exp(training_prog * np.log(0.1 / c_cfg.tau))
 
                 codes = [F.one_hot(b, num_classes=bins_per_plane).cuda()
-                            for b in bins_vec[:, start_i:end_i].long()]
+                            for b in bins_batch.long()]
 
                 prior_batch = prior_model.get_priors(codes=codes, y=si_batch, tau=tau)
                 prior_batch = torch.stack(prior_batch)

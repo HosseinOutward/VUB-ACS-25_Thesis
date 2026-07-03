@@ -224,51 +224,58 @@ class BasicCompressionCodec(IdentityCodec):
         return payload_content.to(torch.float32)
 
 
-def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCodec:
+def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager | None) -> IdentityCodec:
     """Create codec instance."""
     codec_name = fl_cfg.codec.lower()
 
     codec: IdentityCodec | None = None
 
-    if codec_name.startswith("identity"):
+    if codec_name == "identity":
         codec = IdentityCodec(fl_cfg)
     elif codec_name == "basic":
         codec = BasicCompressionCodec(fl_cfg)
-    elif codec_name.endswith("_split_codec") and codec_name[:1].isdigit():
+    elif codec_name == "split":
         from FL_code.other_protocols.n_split_protocol import NSplitCodec
-        n = int(codec_name[0])
-        codec = NSplitCodec(fl_cfg, n)
+        split_name = fl_cfg.run_name or fl_cfg.codec
+        assert split_name.endswith("_split_codec") and split_name.split("_", 1)[0].isdigit(), (
+            "Split codec requires an input name like '3_split_codec'."
+        )
+        codec = NSplitCodec(fl_cfg, int(split_name.split("_", 1)[0]))
     else:
-        norm_slices = None if "_basic_norm" in codec_name else sd_manager.get_slices()
-        outlier_threshold = 1.6 if "_w_outlier" in codec_name else False
-        quantizer_kwargs = {"norm_slices": norm_slices, "outlier_threshold": outlier_threshold}
-        binary_prot = "_binary" in codec_name
+        from FL_code.cancer_protocol import build_cancer_config_for_fl
+        c_cfg = build_cancer_config_for_fl(fl_cfg)
 
-        if codec_name.startswith("debug_"):
-            if "cancerwithboundcalc" in codec_name.removeprefix("debug_"):
-                from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
-                codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
+        norm_slices = None
+        if c_cfg.use_model_slices:
+            assert sd_manager is not None, "StateDictManager is required when CancerConfig.use_model_slices is enabled."
+            norm_slices = sd_manager.get_slices()
+        quantizer_kwargs = {
+            "norm_slices": norm_slices,
+            "outlier_threshold": c_cfg.outlier_threshold if c_cfg.outlier_threshold is not None else False,
+        }
+        binary_prot = c_cfg.binary_protocol
 
-        elif "non_wz_learned_worker" in codec_name:
+        if codec_name == "debug_cancerwithboundcalc":
+            from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
+            codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
+
+        elif codec_name == "non_wz_learned_worker":
             from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             codec = SingleTypeCodec('TMM', fl_cfg, binary_prot, quantizer_kwargs)
-        elif "non_wz_learned_server" in codec_name:
+        elif codec_name == "non_wz_learned_server":
             from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             codec = SingleTypeCodec('RMM', fl_cfg, binary_prot, quantizer_kwargs)
 
-        elif "temporal_only" in codec_name:
+        elif codec_name == "temporal_only":
             from FL_code.other_protocols.SingleTypeCodecs import TemporalCodec
             codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-        elif "retrain_only" in codec_name:
+        elif codec_name == "retrain_only":
             from FL_code.other_protocols.SingleTypeCodecs import RetrainCodec
             codec = RetrainCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
-        elif "cancer" in codec_name:
+        elif codec_name == "cancer":
             from FL_code.cancer_protocol import CancerCodec
             codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
-
-        if codec is not None:
-            codec.c_cfg.debug_load_state = "_load_state" in codec_name
 
     if codec is None:
         raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
