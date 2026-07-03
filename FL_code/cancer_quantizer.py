@@ -8,13 +8,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from prior_calculator import PriorCalculator
-from run_fl import FLConfig
-from utils import create_training_progress_bar
-from brent_wz_models import EncoderDecoderLayeredRNN
+from FL_code.prior_calculator import PriorCalculator
+from FL_code.run_fl import FLConfig
+from FL_code.utils import create_training_progress_bar
+from FL_code.brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
-    from cancer_protocol import CancerConfig
+    from FL_code.cancer_protocol import CancerConfig
 
 
 def get_normalization_factor(y: torch.Tensor) -> tuple[float, float]:
@@ -513,7 +513,7 @@ class WZQuantizerCancer:
 
 if __name__ == "__main__":
     import time
-    from cancer_protocol import CancerConfig
+    from FL_code.cancer_protocol import CancerConfig
 
     base_signal = torch.from_numpy(np.random.normal(0, 1, 1_000_000).astype(np.float32))
     y = base_signal + torch.from_numpy(np.random.normal(0, np.sqrt(0.1), 1_000_000).astype(np.float32))

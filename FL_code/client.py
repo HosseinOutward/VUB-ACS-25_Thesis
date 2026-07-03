@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from run_fl import FLConfig
-from utils import set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics
+from FL_code.run_fl import FLConfig
+from FL_code.utils import set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics
 
 
 def run_federated_client(

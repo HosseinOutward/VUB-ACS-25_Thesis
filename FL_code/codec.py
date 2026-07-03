@@ -10,8 +10,8 @@ import gzip
 import torch
 import numpy as np
 
-from run_fl import FLConfig
-from utils import StateDictManager
+from FL_code.run_fl import FLConfig
+from FL_code.utils import StateDictManager
 
 
 def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
@@ -168,6 +168,7 @@ class IdentityCodec:
 
         record.compressed_bytes = get_obj_compressed_size(payload, with_compression=False) / (1024 ** 2)
         record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
+        assert record.model_size is not None and record.model_size > 0, "CompressionRecord.model_size is bad."
         record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
 
         record._og_delta_vec = delta_vec.clone()
@@ -191,6 +192,7 @@ class IdentityCodec:
 
         record.w_mean_of_vec = torch.abs(delta_vec).mean().item()
         w = record.w_mean_of_vec
+        assert w != 0.0, "CompressionRecord weighted metrics require a non-zero mean absolute delta vector."
         record.wmape = torch.mean(torch.abs(res - delta_vec)).item()/w * 100
         record.wmspe_sqrt = float(np.sqrt(record.mse))/w * 100
 
@@ -233,7 +235,7 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
     elif codec_name == "basic":
         codec = BasicCompressionCodec(fl_cfg)
     elif codec_name.endswith("_split_codec") and codec_name[:1].isdigit():
-        from other_protocols.n_split_protocol import NSplitCodec
+        from FL_code.other_protocols.n_split_protocol import NSplitCodec
         n = int(codec_name[0])
         codec = NSplitCodec(fl_cfg, n)
     else:
@@ -244,25 +246,25 @@ def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager) -> IdentityCode
 
         if codec_name.startswith("debug_"):
             if "cancerwithboundcalc" in codec_name.removeprefix("debug_"):
-                from experiments.rd_mspe_wz import CancerWithBoundCalc
+                from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
                 codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
 
         elif "non_wz_learned_worker" in codec_name:
-            from other_protocols.SingleTypeCodecs import SingleTypeCodec
+            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             codec = SingleTypeCodec('TMM', fl_cfg, binary_prot, quantizer_kwargs)
         elif "non_wz_learned_server" in codec_name:
-            from other_protocols.SingleTypeCodecs import SingleTypeCodec
+            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             codec = SingleTypeCodec('RMM', fl_cfg, binary_prot, quantizer_kwargs)
 
         elif "temporal_only" in codec_name:
-            from other_protocols.SingleTypeCodecs import TemporalCodec
+            from FL_code.other_protocols.SingleTypeCodecs import TemporalCodec
             codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
         elif "retrain_only" in codec_name:
-            from other_protocols.SingleTypeCodecs import RetrainCodec
+            from FL_code.other_protocols.SingleTypeCodecs import RetrainCodec
             codec = RetrainCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
         elif "cancer" in codec_name:
-            from cancer_protocol import CancerCodec
+            from FL_code.cancer_protocol import CancerCodec
             codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
 
         if codec is not None:

@@ -9,13 +9,10 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from pathlib import Path
-import sys
 from dataclasses import dataclass
 from typing import List, Dict
 import itertools
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from FL_code.codec import create_codec
 from FL_code.cancer_protocol import CancerCodec, CancerConfig

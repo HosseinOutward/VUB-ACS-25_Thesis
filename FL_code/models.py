@@ -8,8 +8,8 @@ from torch import optim as optim, nn as nn
 from torch.utils.data import DataLoader
 from torchvision.models import resnet18, resnet50
 
-from other_codes.resnet56 import ResNet56CIFAR
-from run_fl import FLConfig
+from FL_code.other_codes.resnet56 import ResNet56CIFAR
+from FL_code.run_fl import FLConfig
 
 
 class FLModelTemplate(nn.Module, ABC):

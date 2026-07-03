@@ -6,9 +6,7 @@ Usage:
     python inspect_debug_dump.py dump_0001.pt      # Load specific dump
     python inspect_debug_dump.py --list            # List all dumps
 """
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
 import torch

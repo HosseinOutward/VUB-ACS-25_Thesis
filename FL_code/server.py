@@ -3,9 +3,9 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
-from run_fl import FLConfig
-from utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
-from codec import create_codec, simulate_compression
+from FL_code.run_fl import FLConfig
+from FL_code.utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
+from FL_code.codec import create_codec, simulate_compression
 
 
 def run_federated_server(

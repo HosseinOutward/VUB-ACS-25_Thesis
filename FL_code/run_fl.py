@@ -1,23 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
-from dataclasses import dataclass
 from datetime import timedelta
 
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from pathlib import Path
+from pydantic import BaseModel, ConfigDict
 
 _DEBUG_FLAG = False # True
 if _DEBUG_FLAG:
     print('**************************************************')
     print('******************  DEBUG MODE  ******************')
 
-@dataclass
-class FLConfig:
+
+class FLConfig(BaseModel):
+
     """Federated learning configuration."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     # Codec to use: identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
     # non_wz_learned, cancer (_w_outlier, _basic_norm, _binary), temporal_only
     codec: str = "cancer_w_outlier"
@@ -27,7 +30,7 @@ class FLConfig:
     num_clients: int = 5 if not _DEBUG_FLAG else 3
     num_loader_workers: int = 2
     num_classes: int = 10
-    data_folder: str = "data"
+    data_folder: Path = Path("data")
     rounds: int = 50
     local_epochs: int = 5 if not _DEBUG_FLAG else 1
     batch_size: int = 500
@@ -48,8 +51,8 @@ class FLConfig:
     compile_mode: str | bool = False  # linux only; False for no compiling
 
     training_progress_bar: bool = False
-    records_dir: str | None = f"records"  # Directory to save records, None to disable
-    dataset_fraction: float = None if not _DEBUG_FLAG else 0.1  # Fraction of dataset to use or None for full
+    records_dir: Path | None = Path("records")  # Directory to save records, None to disable
+    dataset_fraction: float | None = None if not _DEBUG_FLAG else 0.1  # Fraction of dataset to use or None for full
 
     backend: str = "gloo" # "gloo" only, "nccl" for GPU/Linux and doesn't support cpu
     master_addr: str = "localhost"
@@ -57,8 +60,8 @@ class FLConfig:
 
     debug_save_train_data: bool = False
     debug_data_folder: Path = Path('experiments/debuging/debugging_data')
-    debug_save_deltas:str = 'delta_vec_data'
-    debug_load_from_saved_data:bool = False
+    debug_save_deltas: str = 'delta_vec_data'
+    debug_load_from_saved_data: bool = False
 
 
 def _worker(
@@ -82,10 +85,10 @@ def _worker(
 
     try:
         if rank == 0:
-            from server import run_federated_server
+            from FL_code.server import run_federated_server
             run_federated_server(cfg, rank, world_size, X_test, y_test)
         else:
-            from client import run_federated_client
+            from FL_code.client import run_federated_client
             run_federated_client(cfg, rank, world_size, X_train, y_train, X_test, y_test)
     except Exception:
         print(f"\n{'='*70}", file=sys.stderr)
@@ -125,8 +128,6 @@ if __name__ == "__main__":
 
     # Auto-create run folder with incremented number
     if cfg.records_dir:
-        from pathlib import Path
-        import json
         base_dir = Path(cfg.records_dir)
         base_dir.mkdir(exist_ok=True, parents=True)
 
@@ -138,30 +139,25 @@ if __name__ == "__main__":
 
         run_dir = base_dir / f"run{run_num}_{cfg.codec}"
         run_dir.mkdir()
-        cfg.records_dir = str(run_dir)
+        cfg.records_dir = run_dir
 
         # Save FL config
-        fl_config_dict = {k: v for k, v in cfg.__dict__.items()}
         with open(run_dir / "fl_config.json", 'w') as f:
-            def json_default(obj):
-                if isinstance(obj, Path): return str(obj)
-                raise TypeError(f"{obj.__class__.__name__} is not JSON serializable")
-            json.dump(fl_config_dict, f, indent=2, default=json_default)
+            json.dump(cfg.model_dump(mode="json"), f, indent=2)
 
         # Save codec config if cancer codec
         if "cancer" in cfg.codec.lower():
-            from cancer_protocol import CancerConfig
+            from FL_code.cancer_protocol import CancerConfig
             c_cfg = CancerConfig()
-            codec_config_dict = {k: v for k, v in c_cfg.__dict__.items()}
             with open(run_dir / "codec_config.json", 'w') as f:
-                json.dump(codec_config_dict, f, indent=2, default=str)
+                json.dump(c_cfg.model_dump(mode="json"), f, indent=2)
 
     # Set environment variables for address and port
     os.environ['MASTER_ADDR'] = cfg.master_addr
     os.environ['MASTER_PORT'] = cfg.master_port
 
     # Precompute dataset and store in shared memory
-    from dataset import precompute_dataset_to_shared
+    from FL_code.dataset import precompute_dataset_to_shared
     if cfg.dataset_fraction:
         assert 0.0 < cfg.dataset_fraction < 1.0, "dataset_fraction must be in (0.0, 1.0)"
         print(f"[Debug] Using {cfg.dataset_fraction*100:.1f}% of dataset for quick testing.")
