@@ -46,15 +46,17 @@ Each round has a type that determines quantizer training and side information us
 from __future__ import annotations
 
 import gc
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal
+
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from FL_code.cancer_quantizer import WZQuantizerCancer
 from FL_code.codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
 from FL_code.prior_calculator import PriorCalculator
-from FL_code.run_fl import FLConfig, _DEBUG_FLAG
+from FL_code.run_fl import FLConfig
 
 
 # ============================================================================
@@ -71,9 +73,9 @@ class CancerConfig(BaseModel):
     max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path('data/pre_trained_pth')  # ignored if train_marginal=True
 
-    train_epochs: int = 70 if not _DEBUG_FLAG else 1
+    train_epochs: int = 70
     reconst_ld: float = 200.0
-    train_sample_size: int = 300_000 if not _DEBUG_FLAG else 100_000
+    train_sample_size: int = 300_000
     lr: float = 1e-3
     lr_step: int = 35
     tau: float = 1.3
@@ -83,6 +85,77 @@ class CancerConfig(BaseModel):
 
     debug_save_codec_state: str = 'quantizer_state'
     debug_load_state: bool = False
+    binary_protocol: bool = False
+    mid_rate_protocol: bool = False
+    use_model_slices: bool = True
+    outlier_threshold: float | None = None
+
+
+def build_cancer_config_for_fl(fl_cfg: FLConfig, binary_prot: bool | None = None) -> CancerConfig:
+    """Create the Cancer protocol configuration implied by an FL configuration."""
+    cfg = CancerConfig()
+    codec_label = (fl_cfg.run_name or fl_cfg.codec).lower()
+
+    if fl_cfg.debug_mode:
+        cfg.train_epochs = 1
+        cfg.train_sample_size = 100_000
+
+    cfg.binary_protocol = "_binary" in codec_label
+    cfg.mid_rate_protocol = "_mid_rate" in codec_label or "_mid" in codec_label
+    cfg.use_model_slices = "_basic_norm" not in codec_label
+    cfg.outlier_threshold = 1.6 if "_w_outlier" in codec_label else None
+    cfg.debug_load_state = "_load_state" in codec_label
+
+    if binary_prot is not None:
+        cfg.binary_protocol = binary_prot
+
+    if cfg.binary_protocol:
+        cfg.routine_phase = tuple((phase_type, 2, 1) for phase_type, _, _ in cfg.routine_phase)
+    if cfg.mid_rate_protocol:
+        cfg.routine_phase = tuple((phase_type, 2, 2) for phase_type, _, _ in cfg.routine_phase)
+    return cfg
+
+
+class SideInformationTensor(BaseModel):
+    """A side-information tensor with explicit ownership and data-flow metadata."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    tensor: torch.Tensor
+    owner: Literal["server", "client"]
+    round_id: int
+    client_id: int
+
+
+class SideInformationBundle:
+    """Side information selected for one quantizer and prior-training decision."""
+
+    def __init__(
+        self,
+        training: Sequence[SideInformationTensor] = (),
+        prior: Sequence[SideInformationTensor] = (),
+        target: torch.Tensor | None = None,
+    ) -> None:
+        self.training: tuple[SideInformationTensor, ...] = tuple(training)
+        self.prior: tuple[SideInformationTensor, ...] = tuple(prior)
+        self.target: torch.Tensor | None = target
+
+    @property
+    def training_tensors(self) -> list[torch.Tensor]:
+        """Return tensors consumed by quantizer training."""
+        return [recon.tensor for recon in self.training]
+
+    @property
+    def prior_tensors(self) -> list[torch.Tensor]:
+        """Return tensors consumed only by prior estimation."""
+        return [recon.tensor for recon in self.prior]
+
+    def with_training_as_prior(self) -> SideInformationBundle:
+        """Return a bundle that also exposes training reconstructions to prior estimation."""
+        return SideInformationBundle(
+            training=self.training,
+            prior=(*self.prior, *self.training),
+            target=self.target,
+        )
 
 
 class BinsCodecRecord(CompressionRecord):
@@ -152,17 +225,13 @@ class CancerCodec(IdentityCodec):
         self.fl_cfg = fl_cfg
         self.num_clients = fl_cfg.num_clients
 
-        self.c_cfg = CancerConfig()
-        if binary_prot:
-            self.c_cfg.routine_phase = tuple((a[0],2,1) for a in self.c_cfg.routine_phase)
-        if '_mid' in fl_cfg.codec:
-            self.c_cfg.routine_phase = tuple((a[0],2,2) for a in self.c_cfg.routine_phase)
+        self.c_cfg = build_cancer_config_for_fl(fl_cfg, binary_prot)
 
         self.quantizer_kwargs = quantizer_kwargs
 
         # Per-client reconstruction histories
-        self.srvr_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
-        self.client_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.srvr_past_reconst: list[list[SideInformationTensor]] = [[] for _ in range(self.num_clients)]
+        self.client_past_reconst: list[list[SideInformationTensor]] = [[] for _ in range(self.num_clients)]
 
         # Frozen state for frozen phase
         self.frozen_quantizers: list[WZQuantizerCancer | None] = [None] * self.num_clients
@@ -180,62 +249,69 @@ class CancerCodec(IdentityCodec):
 
     def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
         """Train new quantizer or load pretrained if needed (P, T, R rounds)."""
-        round_type, round_bpp, round_np = record.round_type, record.bins_per_plane, record.num_planes
+        assert record.round_type is not None
+        assert record.bins_per_plane is not None
+        assert record.num_planes is not None
+        
+        round_type = record.round_type
         client_idx = record.client_id
 
-        extra_si_for_prior = []
-
-        # Marginal loss with conditional decoder is XM
-        # Full marginal (no conditional decoder) will be XMM
-        remove_si = len(round_type)==3
-        assert not remove_si or (round_type[2] == 'M')
+        remove_si = len(round_type) == 3
+        assert not remove_si or round_type[2] == "M", "Three-letter round types must end with M."
         force_marginal_loss = len(round_type) != 1
         if force_marginal_loss:
-            assert round_type[1] == "M" and round_type[0] in ['T', 'R']
+            assert round_type[1] == "M" and round_type[0] in ("T", "R"), f"Invalid marginal round type: {round_type}"
             round_type = round_type[0]
 
-        # Determine training side info and target based on round type
-        if round_type == 'P': # Pretrained
-            extra_si_for_prior = [item
-                            for reconst_list in self.srvr_past_reconst
-                            for item in reconst_list]
-            train_si, target_x = None, None
-
-        elif round_type == 'R': # Retrain
-            train_si = [item
-                    for cid, reconst_list in enumerate(self.srvr_past_reconst)
-                    for item in (reconst_list[:-1] if cid == client_idx else reconst_list)]
-            target_x = self.srvr_past_reconst[client_idx][-1]
-            extra_si_for_prior = [target_x]
-            assert len(train_si) == min(record.round_id * self.num_clients + client_idx - 1,
-                                      self.c_cfg.max_side_info_count * self.num_clients - 1)
-
-        elif round_type == 'T': # Temporal
-            train_si = [*self.client_past_reconst[client_idx]]
-            extra_si_for_prior = [*train_si]
-            target_x = delta_vec
-
+        if round_type == "P": # Pretrained
+            bundle = SideInformationBundle(
+                prior=tuple(recon for history in self.srvr_past_reconst for recon in history))
+        elif round_type == "R":
+            target_recon = self.srvr_past_reconst[client_idx][-1]
+            training_recons = tuple(
+                recon
+                for cid, history in enumerate(self.srvr_past_reconst)
+                for recon in (history[:-1] if cid == client_idx else history)
+            )
+            bundle = SideInformationBundle(
+                training=training_recons,
+                prior=(target_recon,),
+                target=target_recon.tensor,
+            )
+            assert len(bundle.training) == min(
+                record.round_id * self.num_clients + client_idx - 1,
+                self.c_cfg.max_side_info_count * self.num_clients - 1
+            ), "Retrain side-information count does not match protocol schedule."
+        elif round_type == "T": # Temporal
+            training_recons = tuple(self.client_past_reconst[client_idx])
+            bundle = SideInformationBundle(
+                training=training_recons,
+                prior=training_recons,
+                target=delta_vec,
+            )
         else:
             raise ValueError(f"Invalid round type for training: {round_type}")
 
         if remove_si:
-            extra_si_for_prior += train_si
+            bundle = bundle.with_training_as_prior()
 
-        # Create a new quantizer instance
         quantizer = WZQuantizerCancer(
-            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=round_np, bins_per_plane=round_bpp,
-            si_size=len(train_si) if train_si is not None else 0,
+            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=record.num_planes,
+            bins_per_plane=record.bins_per_plane, si_size=len(bundle.training),
             marginal_loss=force_marginal_loss, **self.quantizer_kwargs,
-            extra_si_for_prior = extra_si_for_prior
+            extra_si_for_prior=bundle.prior_tensors
         )
 
         # Load pretrained weights or train the model
         if self.c_cfg.debug_load_state:
             quantizer.coding_model.eval()
-        elif round_type != 'P':
-            quantizer.train_model(target_x, train_si)
+        elif round_type != "P":
+            assert bundle.target is not None
+            quantizer.train_model(bundle.target, bundle.training_tensors)
         else:
-            weight_path = Path(self.c_cfg.pretrain_pth_dir) / f'bpp{round_bpp}_np{round_np}_pretrained_wzq_rnn.pth'
+            weight_path = Path(self.c_cfg.pretrain_pth_dir) / (
+                f"bpp{record.bins_per_plane}_np{record.num_planes}_pretrained_wzq_rnn.pth"
+            )
             quantizer.coding_model.load_state_dict(torch.load(weight_path), strict=False)
             quantizer.side_info_list_used = []  # Pretrained models are marginal
 
@@ -248,9 +324,9 @@ class CancerCodec(IdentityCodec):
         if self.c_cfg.debug_load_state:
             codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
             codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
-            if '_continue' in self.fl_cfg.codec and not codec_state_path.exists():
+            if self.fl_cfg.debug_continue_from_saved_data and not codec_state_path.exists():
                 self.c_cfg.debug_load_state = False
-                if '_continue_then_save' in self.fl_cfg.codec:
+                if self.fl_cfg.debug_continue_then_save:
                     self.fl_cfg.debug_save_train_data = True
 
         if record.round_type != 'F':
@@ -326,19 +402,34 @@ class CancerCodec(IdentityCodec):
     def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
         client_idx = record.client_id
         quantizer = self.frozen_quantizers[client_idx]
-        reconst = quantizer.decoding_process(payload['payload_content'])
+        assert quantizer is not None, f"Missing quantizer for client {client_idx}."
+        reconst = quantizer.decoding_process(payload["payload_content"])
 
-        # Update server-side history (always)
-        self._update_history(self.srvr_past_reconst[client_idx], reconst)
+        self._update_history(
+            self.srvr_past_reconst[client_idx], reconst, owner="server",
+            round_id=record.round_id, client_id=client_idx
+        )
 
-        # Update client-side history (only for T and P rounds)
-        if record.round_type in ('T', 'P'):
-            self._update_history(self.client_past_reconst[client_idx], reconst)
+        assert record.round_type is not None
+        if record.round_type[0] in ("T", "P"):
+            self._update_history(
+                self.client_past_reconst[client_idx], reconst, owner="client",
+                round_id=record.round_id, client_id=client_idx
+            )
 
         return reconst
 
-    def _update_history(self, history: list[torch.Tensor], item: torch.Tensor) -> None:
-        history.append(item.to(torch.float16))
+    def _update_history(
+        self,
+        history: list[SideInformationTensor],
+        item: torch.Tensor,
+        owner: Literal["server", "client"],
+        round_id: int,
+        client_id: int
+    ) -> None:
+        history.append(SideInformationTensor(
+            tensor=item.to(torch.float16), owner=owner, round_id=round_id, client_id=client_id
+        ))
         if len(history) > self.c_cfg.max_side_info_count:
             history.pop(0)
 

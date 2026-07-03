@@ -26,7 +26,7 @@ The central design question is always: what side information is available at the
 
 These standards apply to every module unless a more specific local instruction says otherwise.
 
-- **Use Pydantic v2** when data contracts or structured configuration models are needed.
+- **Use Pydantic v2** when data contracts or structured configuration models are needed. not for functions or code data handling.
 - **Use full type hints** on every function signature and class attribute.
 - **Use future annotations.** Add `from __future__ import annotations` at the top of every Python file.
 - **Use `pathlib.Path` for filesystem paths.** Do not pass paths around as `str`.

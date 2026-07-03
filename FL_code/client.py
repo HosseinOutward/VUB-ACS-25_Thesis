@@ -65,9 +65,9 @@ def run_federated_client(
         if cfg.debug_load_from_saved_data:
             delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
             delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
-            if '_continue' in cfg.codec and not delta_data_path.exists():
+            if cfg.debug_continue_from_saved_data and not delta_data_path.exists():
                 cfg.debug_load_from_saved_data = False
-                if '_continue_then_save' in cfg.codec:
+                if cfg.debug_continue_then_save:
                     cfg.debug_save_train_data = True
 
         if not cfg.debug_load_from_saved_data:
@@ -114,4 +114,3 @@ def run_federated_client(
             torch.save(delta_vec, delta_data_path)
 
         curr_rnd_i += 1
-
