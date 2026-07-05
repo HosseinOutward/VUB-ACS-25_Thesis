@@ -16,7 +16,6 @@ import torch.nn.functional as F
 from FL_code.cancer_quantizer import WZQuantizerCancer
 from FL_code.prior_calculator import PriorCalculator
 from FL_code.cancer_protocol import CancerConfig
-from FL_code.run_fl import FLConfig
 # from FL_reworked.brent_wz_models import EncoderDecoderLayeredRNN
 
 
@@ -165,14 +164,13 @@ class DebugInspector:
         cfg = d['quantizer_config']
 
         c_cfg = CancerConfig()
-        fl_cfg = FLConfig(num_clients=1)
 
         # Determine si_size from saved side info
         si_list = d['side_info_list_used']
         si_size = len(si_list) if isinstance(si_list, list) else 0
 
         quantizer = WZQuantizerCancer(
-            c_cfg=c_cfg, fl_cfg=fl_cfg,
+            c_cfg=c_cfg,
             num_planes=cfg['num_planes'],
             bins_per_plane=cfg['bins_per_plane'],
             si_size=si_size,
@@ -343,4 +341,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

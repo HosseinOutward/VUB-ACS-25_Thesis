@@ -1,28 +1,80 @@
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
-from FL_code.codec import IdentityCodec
-from FL_code.codec_registry import require_int_codec_option
-from FL_code.protocol_records import BinsCodecRecord
+from FL_code.cancer_protocol import CancerConfig
+from FL_code.codec import CompressionRecord, IdentityCodec
 from FL_code.prior_calculator import PriorCalculator
+
+if TYPE_CHECKING:
+    from FL_code.utils import StateDictManager
+
+
+class NSplitRecord(CompressionRecord):
+    """Compression record for n-split quantized-symbol diagnostics."""
+
+    def __init__(self, round_id: int, client_id: int, bins_per_plane: int | None, method: str) -> None:
+        super().__init__(round_id, client_id, method)
+        self.bins_per_plane: int | None = bins_per_plane
+        self.prior_rate: float | None = None
+        self.marginal_rate: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert split-protocol metrics to a flat CSV-ready dictionary."""
+        result = super().to_dict()
+        result.update({
+            "bins_per_plane": self.bins_per_plane,
+            "prior_rate": self.prior_rate,
+            "marginal_rate": self.marginal_rate,
+        })
+        return result
 
 
 class NSplitCodec(IdentityCodec):
     """Baseline codec that quantizes values by percentile split points."""
 
-    def __init__(self, fl_cfg: Any, split_points: int) -> None:
-        super().__init__(fl_cfg)
+    OPTION_ORDER: tuple[str, ...] = ("points",)
+
+    def __init__(self, split_points: int, codec_name: str = "split|points=3") -> None:
+        super().__init__(codec_name)
         self.split_points = split_points
-        self.num_clients = fl_cfg.num_clients
-        self.srvr_past_reconst: list[list[torch.Tensor]] = [[] for _ in range(self.num_clients)]
+        self.srvr_past_reconst: list[list[torch.Tensor]] = []
         self.si_vec_size: int | None = None
 
-    def create_record(self, round_id: int, client_id: int) -> BinsCodecRecord:
-        return BinsCodecRecord(round_id, client_id, self.split_points, method=f"{self.split_points}-split")
+    @staticmethod
+    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
+        """Validate split codec name options."""
+        # TODO: finalize the split protocol's long-term option vocabulary.
+        assert len(option_tokens) == 1, "split codec requires exactly one ordered option: points=<int>."
+        key, sep, value = option_tokens[0].partition("=")
+        assert key == "points" and sep == "=", "split codec option must use points=<int>."
+        split_points = int(value)
+        assert split_points > 1, "split codec points option must be greater than 1."
+
+    @classmethod
+    def create_from_codec_name(
+        cls,
+        codec_name: str,
+        protocol_name: str,
+        option_tokens: Sequence[str],
+        sd_manager: StateDictManager | None,
+    ) -> NSplitCodec:
+        """Create an n-split baseline codec from ordered codec-name options."""
+        assert protocol_name == "split"
+        key, sep, value = option_tokens[0].partition("=")
+        assert key == "points" and sep == "=", "split codec name was not validated before creation."
+        return cls(int(value), codec_name=codec_name)
+
+    def create_record(self, round_id: int, client_id: int) -> NSplitRecord:
+        return NSplitRecord(round_id, client_id, self.split_points, method=self.codec_name)
+
+    def _ensure_client_history(self, client_id: int) -> list[torch.Tensor]:
+        while len(self.srvr_past_reconst) <= client_id:
+            self.srvr_past_reconst.append([])
+        return self.srvr_past_reconst[client_id]
 
     def get_si_data(self) -> torch.Tensor:
         si_raw = [tensor.float() for history in self.srvr_past_reconst for tensor in history]
@@ -53,7 +105,7 @@ class NSplitCodec(IdentityCodec):
             reconst[bins_vec[0]==i] = mean_v[i]
         return reconst
 
-    def _compress(self, delta_vec: torch.Tensor, record: BinsCodecRecord) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compress(self, delta_vec: torch.Tensor, record: NSplitRecord) -> tuple[torch.Tensor, torch.Tensor]:
         self.si_vec_size = len(delta_vec)
         bins_vec, mean_v = self.bin_f(delta_vec)
         payload = (bins_vec, mean_v)
@@ -69,10 +121,10 @@ class NSplitCodec(IdentityCodec):
 
         return payload
 
-    def _decompress(self, payload: tuple[torch.Tensor, torch.Tensor], record: BinsCodecRecord) -> torch.Tensor:
+    def _decompress(self, payload: tuple[torch.Tensor, torch.Tensor], record: NSplitRecord) -> torch.Tensor:
         reconst = self.un_bin_f(*payload)
 
-        history = self.srvr_past_reconst[record.client_id]
+        history = self._ensure_client_history(record.client_id)
         history.append(reconst.to(torch.float16))
         # history.append(payload[0].squeeze())
         if len(history) > CancerConfig().max_side_info_count:
@@ -86,7 +138,7 @@ if __name__ == '__main__':
     num_rounds = 10
     vector_size = 1_000_000
     base_vector = torch.normal(0, 1, size=(vector_size,))
-    codec = NSplitCodec(num_clients, split_points=split_points)
+    codec = NSplitCodec(split_points=split_points)
 
     for round_id in range(num_rounds):
         base_vector = base_vector + torch.normal(0.0, 0.01, size=(vector_size,))

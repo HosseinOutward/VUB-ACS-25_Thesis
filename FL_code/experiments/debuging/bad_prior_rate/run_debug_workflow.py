@@ -4,7 +4,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from FL_code.cancer_protocol import CancerCodec, CancerConfig
-from FL_code.run_fl import FLConfig
 
 
 def run_workflow():
@@ -13,25 +12,25 @@ def run_workflow():
     print("RUNNING FL WORKFLOW TO GENERATE DEBUG DUMPS")
     print("="*70)
 
-    fl_cfg = FLConfig(num_clients=2, training_progress_bar=True)
+    num_clients = 2
     c_cfg = CancerConfig()
+    c_cfg.training_progress_bar = True
 
     # Use M for first round since no SI available yet
     c_cfg.warmup_phase = (('M', 8, 3), ('T', 8, 3), ('R', 4, 3), ('R', 4, 3), ('R', 4, 3))
 
-    codec = CancerCodec(fl_cfg, quantizer_kwargs={'norm_slices': [slice(0, None)]})
-    codec.c_cfg = c_cfg
+    codec = CancerCodec(c_cfg, quantizer_kwargs={'norm_slices': [slice(0, None)]})
 
     n = 300_000
     base_gradient = torch.randn(n) * 0.1
 
-    print(f"\nnum_clients={fl_cfg.num_clients}, vector_size={n}")
+    print(f"\nnum_clients={num_clients}, vector_size={n}")
     print(f"warmup_phase: {c_cfg.warmup_phase}")
     print(f"routine_phase: {c_cfg.routine_phase}")
     print("\nRunning rounds...")
 
     for round_id in range(12):
-        for client_id in range(fl_cfg.num_clients):
+        for client_id in range(num_clients):
             delta = base_gradient + torch.randn(n) * 0.05
 
             record = codec.create_record(round_id, client_id)
@@ -60,4 +59,3 @@ def run_workflow():
 
 if __name__ == "__main__":
     run_workflow()
-

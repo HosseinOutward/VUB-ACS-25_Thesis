@@ -48,19 +48,17 @@ from __future__ import annotations
 import gc
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.codec import IdentityCodec, get_obj_compressed_size
-from FL_code.codec_registry import optional_bool_codec_option, reject_unknown_codec_options
+from FL_code.codec import CompressionRecord, IdentityCodec, get_obj_compressed_size
 from FL_code.prior_calculator import PriorCalculator
-from FL_code.protocol_records import BinsCodecRecord
 
 if TYPE_CHECKING:
-    from FL_code.run_fl import FLConfig
     from FL_code.utils import StateDictManager
 
 
@@ -94,31 +92,45 @@ class CancerConfig(BaseModel):
     mid_rate_protocol: bool = False
     use_model_slices: bool = True
     outlier_threshold: float | None = None
+    training_progress_bar: bool = False
+    records_dir: Path = Path("records")
+    tf32: bool = True
+    fused_optimizer: bool = True
+    mixed_precision: bool = True
 
 
-def build_cancer_config_for_fl(fl_cfg: FLConfig, binary_prot: bool | None = None) -> CancerConfig:
-    """Create the Cancer protocol configuration implied by an FL configuration."""
-    cfg = CancerConfig()
-    codec_label = (fl_cfg.run_name or fl_cfg.codec).lower()
+_CANCER_VARIANT_TOKENS: Mapping[str, str] = MappingProxyType({
+    "temporal_only": "temporal_only",
+    "retrain_only": "retrain_only",
+    "non_wz_worker": "non_wz_learned_worker",
+    "non_wz_server": "non_wz_learned_server",
+    "bound_calc": "debug_cancerwithboundcalc",
+})
+_CANCER_RATE_TOKENS = frozenset({"binary", "mid_rate"})
+_CANCER_OPTION_ORDER: tuple[str, ...] = ("variant", "rate", "model_slices", "outlier")
+_CLIENT_RECONSTRUCTION_ROUNDS = frozenset({"P", "T"})
 
-    if fl_cfg.debug_mode:
-        cfg.train_epochs = 1
-        cfg.train_sample_size = 100_000
 
-    cfg.binary_protocol = "_binary" in codec_label
-    cfg.mid_rate_protocol = "_mid_rate" in codec_label or "_mid" in codec_label
-    cfg.use_model_slices = "_basic_norm" not in codec_label
-    cfg.outlier_threshold = 1.6 if "_w_outlier" in codec_label else None
-    cfg.debug_load_state = "_load_state" in codec_label
+def _cancer_option_category(token: str) -> str:
+    if token in _CANCER_VARIANT_TOKENS:
+        return "variant"
+    if token in _CANCER_RATE_TOKENS:
+        return "rate"
+    if token == "no_model_slices":
+        return "model_slices"
+    if token.startswith("outlier="):
+        return "outlier"
+    assert False, f"Unknown Cancer codec option token: {token!r}."
 
-    if binary_prot is not None:
-        cfg.binary_protocol = binary_prot
 
-    if cfg.binary_protocol:
-        cfg.routine_phase = tuple((phase_type, 2, 1) for phase_type, _, _ in cfg.routine_phase)
-    if cfg.mid_rate_protocol:
-        cfg.routine_phase = tuple((phase_type, 2, 2) for phase_type, _, _ in cfg.routine_phase)
-    return cfg
+def _parse_outlier_threshold(token: str) -> float:
+    _, _, raw_value = token.partition("=")
+    try:
+        threshold = float(raw_value)
+    except ValueError as exc:
+        raise AssertionError(f"Cancer codec option {token!r} must use a numeric threshold.") from exc
+    assert threshold > 0, f"Cancer codec option {token!r} must be greater than 0."
+    return threshold
 
 
 class SideInformationTensor(BaseModel):
@@ -131,68 +143,19 @@ class SideInformationTensor(BaseModel):
     client_id: int
 
 
-class SideInformationBundle:
-    """Side information selected for one quantizer and prior-training decision."""
-
-    def __init__(
-        self,
-        training: Sequence[SideInformationTensor] = (),
-        prior: Sequence[SideInformationTensor] = (),
-        target: torch.Tensor | None = None,
-    ) -> None:
-        self.training: tuple[SideInformationTensor, ...] = tuple(training)
-        self.prior: tuple[SideInformationTensor, ...] = tuple(prior)
-        self.target: torch.Tensor | None = target
-
-    @property
-    def training_tensors(self) -> list[torch.Tensor]:
-        """Return tensors consumed by quantizer training."""
-        return [recon.tensor for recon in self.training]
-
-    @property
-    def prior_tensors(self) -> list[torch.Tensor]:
-        """Return tensors consumed only by prior estimation."""
-        return [recon.tensor for recon in self.prior]
-
-    def with_training_as_prior(self) -> SideInformationBundle:
-        """Return a bundle that also exposes training reconstructions to prior estimation."""
-        return SideInformationBundle(
-            training=self.training,
-            prior=(*self.prior, *self.training),
-            target=self.target,
-        )
-
-
-class BinsCodecRecord(CompressionRecord):
-    """Compression record with quantized-bin rate diagnostics."""
-
-    def __init__(self, round_id: int, client_id: int, bins_per_plane: int | None, method: str) -> None:
-        super().__init__(round_id, client_id, method)
-        self.bins_per_plane: int | None = bins_per_plane
-        self.prior_rate: float | None = None
-        self.marginal_rate: float | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        result = super().to_dict()
-        result.update({
-            "bins_per_plane": self.bins_per_plane,
-            "prior_rate": self.prior_rate,
-            "marginal_rate": self.marginal_rate,
-        })
-        return result
-
-
-class CancerRecord(BinsCodecRecord):
+class CancerRecord(CompressionRecord):
     """Compression record for one Cancer protocol client-round."""
 
     def __init__(self, round_id: int, client_id: int, method: str = "cancer",
                  phase: str | None = None, round_type: str | None = None,
                  bits_per_plane: int | None = None, num_planes: int | None = None) -> None:
-        assert method == "cancer", "CancerRecord must be used by method 'cancer'"
-        super().__init__(round_id, client_id, bits_per_plane, method)
+        super().__init__(round_id, client_id, method)
         self.phase: str | None = phase
         self.round_type: str | None = round_type
+        self.bins_per_plane: int | None = bits_per_plane
         self.num_planes: int | None = num_planes
+        self.prior_rate: float | None = None
+        self.marginal_rate: float | None = None
         self.encoder_decoder_size: float | None = None
         self.meta_data_size: float | None = None
 
@@ -219,37 +182,148 @@ class CancerCodec(IdentityCodec):
 
     def __init__(
         self,
-        fl_cfg: FLConfig,
-        binary_prot: bool = False,
-        quantizer_kwargs: dict[str, Any] | None = None
+        c_cfg: CancerConfig | None = None,
+        quantizer_kwargs: dict[str, Any] | None = None,
+        codec_name: str = "cancer",
     ) -> None:
-        super().__init__(fl_cfg)
+        super().__init__(codec_name)
+
+        self.c_cfg = c_cfg if c_cfg is not None else CancerConfig()
+        assert not self.c_cfg.debug_load_state, (
+            "CancerConfig.debug_load_state requires FLConfig paths and is not supported by codec names."
+        )
         if quantizer_kwargs is None:
-            quantizer_kwargs = {'norm_slices': False, 'outlier_threshold': False}
-
-        self.fl_cfg = fl_cfg
-        self.num_clients = fl_cfg.num_clients
-
-        self.c_cfg = build_cancer_config_for_fl(fl_cfg, binary_prot)
+            assert not self.c_cfg.use_model_slices, (
+                "CancerCodec requires quantizer_kwargs['norm_slices'] when use_model_slices is enabled. "
+                "Use create_codec(...) with a StateDictManager or add no_model_slices to the codec name."
+            )
+            quantizer_kwargs = {
+                'norm_slices': None,
+                'outlier_threshold': self.c_cfg.outlier_threshold
+                if self.c_cfg.outlier_threshold is not None else False,
+            }
 
         self.quantizer_kwargs = quantizer_kwargs
 
         # Per-client reconstruction histories
-        self.srvr_past_reconst: list[list[SideInformationTensor]] = [[] for _ in range(self.num_clients)]
-        self.client_past_reconst: list[list[SideInformationTensor]] = [[] for _ in range(self.num_clients)]
+        self.srvr_past_reconst: list[list[SideInformationTensor]] = []
+        self.client_past_reconst: list[list[SideInformationTensor]] = []
 
         # Frozen state for frozen phase
-        self.frozen_quantizers: list[WZQuantizerCancer | None] = [None] * self.num_clients
+        self.frozen_quantizers: list[WZQuantizerCancer | None] = []
+
+    @staticmethod
+    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
+        """Validate Cancer protocol option tokens and their manual order."""
+        seen_categories: set[str] = set()
+        previous_order = -1
+        for token in option_tokens:
+            category = _cancer_option_category(token)
+            assert category not in seen_categories, f"Cancer codec option category {category!r} appears more than once."
+            seen_categories.add(category)
+
+            order_index = _CANCER_OPTION_ORDER.index(category)
+            expected = "|".join(_CANCER_OPTION_ORDER)
+            assert order_index >= previous_order, (
+                f"Cancer codec options must follow this manual order: {expected}; got {option_tokens!r}."
+            )
+            previous_order = order_index
+
+            if category == "outlier":
+                _parse_outlier_threshold(token)
+
+    @classmethod
+    def create_from_codec_name(
+        cls,
+        codec_name: str,
+        protocol_name: str,
+        option_tokens: Sequence[str],
+        sd_manager: StateDictManager | None,
+    ) -> IdentityCodec:
+        """Create a Cancer protocol codec variant from a validated codec name."""
+        assert protocol_name == "cancer"
+
+        c_cfg = CancerConfig()
+        variant = "cancer"
+        for token in option_tokens:
+            if token in _CANCER_VARIANT_TOKENS:
+                variant = _CANCER_VARIANT_TOKENS[token]
+            elif token == "binary":
+                c_cfg.binary_protocol = True
+            elif token == "mid_rate":
+                c_cfg.mid_rate_protocol = True
+            elif token == "no_model_slices":
+                c_cfg.use_model_slices = False
+            elif token.startswith("outlier="):
+                c_cfg.outlier_threshold = _parse_outlier_threshold(token)
+            else:
+                assert False, f"Unknown Cancer codec option token: {token!r}."
+
+        if c_cfg.binary_protocol:
+            c_cfg.routine_phase = tuple((phase_type, 2, 1) for phase_type, _, _ in c_cfg.routine_phase)
+        if c_cfg.mid_rate_protocol:
+            c_cfg.routine_phase = tuple((phase_type, 2, 2) for phase_type, _, _ in c_cfg.routine_phase)
+
+        norm_slices = None
+        if c_cfg.use_model_slices:
+            assert sd_manager is not None, "StateDictManager is required when CancerConfig.use_model_slices is enabled."
+            norm_slices = sd_manager.get_slices()
+        quantizer_kwargs = {
+            "norm_slices": norm_slices,
+            "outlier_threshold": c_cfg.outlier_threshold if c_cfg.outlier_threshold is not None else False,
+        }
+
+        if variant == "cancer":
+            return cls(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "temporal_only":
+            from FL_code.other_protocols.SingleTypeCodecs import TemporalCodec
+            return TemporalCodec(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "retrain_only":
+            from FL_code.other_protocols.SingleTypeCodecs import RetrainCodec
+            return RetrainCodec(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "non_wz_learned_worker":
+            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
+            return SingleTypeCodec('TMM', c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "non_wz_learned_server":
+            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
+            return SingleTypeCodec('RMM', c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "debug_cancerwithboundcalc":
+            from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
+            return CancerWithBoundCalc(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        assert False, f"Unknown Cancer codec variant: {variant!r}."
+
+    def _ensure_client_state(self, client_id: int) -> None:
+        while len(self.srvr_past_reconst) <= client_id:
+            self.srvr_past_reconst.append([])
+            self.client_past_reconst.append([])
+            self.frozen_quantizers.append(None)
+
+    @staticmethod
+    def _base_round_type(round_type: str) -> tuple[str, bool, bool]:
+        """Return the executable round type and marginal-prior modifiers."""
+        include_training_si_in_prior = len(round_type) == 3
+        assert not include_training_si_in_prior or round_type[2] == "M", (
+            "Three-letter round types must end with M."
+        )
+
+        force_marginal_loss = len(round_type) != 1
+        if force_marginal_loss:
+            assert round_type[1] == "M" and round_type[0] in ("T", "R"), (
+                f"Invalid marginal round type: {round_type}"
+            )
+            return round_type[0], force_marginal_loss, include_training_si_in_prior
+        return round_type, force_marginal_loss, include_training_si_in_prior
 
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
+        self._ensure_client_state(client_id)
         is_warmup = round_id < len(cfg.warmup_phase)
         temp = (round_id - len(cfg.warmup_phase)) % len(cfg.routine_phase)
         round_type, round_bpp, round_np = cfg.warmup_phase[round_id] if is_warmup else cfg.routine_phase[temp]
         phase = "warmup" if is_warmup else "routine"
 
         return CancerRecord(
-            round_id=round_id, client_id=client_id, method="cancer", phase=phase,
+            round_id=round_id, client_id=client_id, method=self.codec_name, phase=phase,
             round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
 
     def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
@@ -257,20 +331,17 @@ class CancerCodec(IdentityCodec):
         assert record.round_type is not None
         assert record.bins_per_plane is not None
         assert record.num_planes is not None
-        
-        round_type = record.round_type
+
         client_idx = record.client_id
+        round_type, force_marginal_loss, include_training_si_in_prior = self._base_round_type(record.round_type)
+        self._ensure_client_state(client_idx)
 
-        remove_si = len(round_type) == 3
-        assert not remove_si or round_type[2] == "M", "Three-letter round types must end with M."
-        force_marginal_loss = len(round_type) != 1
-        if force_marginal_loss:
-            assert round_type[1] == "M" and round_type[0] in ("T", "R"), f"Invalid marginal round type: {round_type}"
-            round_type = round_type[0]
+        training_recons: tuple[SideInformationTensor, ...] = ()
+        prior_recons: tuple[SideInformationTensor, ...] = ()
+        target: torch.Tensor | None = None
 
-        if round_type == "P": # Pretrained
-            bundle = SideInformationBundle(
-                prior=tuple(recon for history in self.srvr_past_reconst for recon in history))
+        if round_type == "P":
+            prior_recons = tuple(recon for history in self.srvr_past_reconst for recon in history)
         elif round_type == "R":
             target_recon = self.srvr_past_reconst[client_idx][-1]
             training_recons = tuple(
@@ -278,41 +349,34 @@ class CancerCodec(IdentityCodec):
                 for cid, history in enumerate(self.srvr_past_reconst)
                 for recon in (history[:-1] if cid == client_idx else history)
             )
-            bundle = SideInformationBundle(
-                training=training_recons,
-                prior=(target_recon,),
-                target=target_recon.tensor,
-            )
-            assert len(bundle.training) == min(
-                record.round_id * self.num_clients + client_idx - 1,
-                self.c_cfg.max_side_info_count * self.num_clients - 1
+            prior_recons = (target_recon,)
+            target = target_recon.tensor
+            client_count = len(self.srvr_past_reconst)
+            assert len(training_recons) == min(
+                record.round_id * client_count + client_idx - 1,
+                self.c_cfg.max_side_info_count * client_count - 1
             ), "Retrain side-information count does not match protocol schedule."
-        elif round_type == "T": # Temporal
+        elif round_type == "T":
             training_recons = tuple(self.client_past_reconst[client_idx])
-            bundle = SideInformationBundle(
-                training=training_recons,
-                prior=training_recons,
-                target=delta_vec,
-            )
+            prior_recons = training_recons
+            target = delta_vec
         else:
-            raise ValueError(f"Invalid round type for training: {round_type}")
+            assert False, f"Invalid round type for training: {round_type}"
 
-        if remove_si:
-            bundle = bundle.with_training_as_prior()
+        if include_training_si_in_prior:
+            prior_recons = (*prior_recons, *training_recons)
 
         quantizer = WZQuantizerCancer(
-            c_cfg=self.c_cfg, fl_cfg=self.fl_cfg, num_planes=record.num_planes,
-            bins_per_plane=record.bins_per_plane, si_size=len(bundle.training),
-            marginal_loss=force_marginal_loss, **self.quantizer_kwargs,
-            extra_si_for_prior=bundle.prior_tensors
+            c_cfg=self.c_cfg, num_planes=record.num_planes,
+            bins_per_plane=record.bins_per_plane, si_size=len(training_recons),
+            marginal_loss=force_marginal_loss or round_type == "P", **self.quantizer_kwargs,
+            extra_si_for_prior=[recon.tensor for recon in prior_recons]
         )
 
         # Load pretrained weights or train the model
-        if self.c_cfg.debug_load_state:
-            quantizer.coding_model.eval()
-        elif round_type != "P":
-            assert bundle.target is not None
-            quantizer.train_model(bundle.target, bundle.training_tensors)
+        if round_type != "P":
+            assert target is not None
+            quantizer.train_model(target, [recon.tensor for recon in training_recons])
         else:
             weight_path = Path(self.c_cfg.pretrain_pth_dir) / (
                 f"bpp{record.bins_per_plane}_np{record.num_planes}_pretrained_wzq_rnn.pth"
@@ -326,56 +390,27 @@ class CancerCodec(IdentityCodec):
         torch.cuda.empty_cache()
 
     def _compress(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict:
-        if self.c_cfg.debug_load_state:
-            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
-            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
-            if self.fl_cfg.debug_continue_from_saved_data and not codec_state_path.exists():
-                self.c_cfg.debug_load_state = False
-                if self.fl_cfg.debug_continue_then_save:
-                    self.fl_cfg.debug_save_train_data = True
+        self._ensure_client_state(record.client_id)
+        assert record.round_type is not None
 
-        if record.round_type != 'F':
+        if record.round_type != "F":
             self._train_quantizer_or_load(delta_vec, record)
 
         quantizer = self.frozen_quantizers[record.client_id]
-
-        if self.c_cfg.debug_load_state:
-            print(f"Debug load state for R{record.round_id}C{record.client_id} -- loading quantizer state from disk")
-            assert not self.fl_cfg.debug_save_train_data
-            q_state = torch.load(codec_state_path)
-
-            quantizer.coding_model.load_state_dict(q_state['coding_model'])
-            quantizer.side_info_list_used = q_state['side_info_list_used']
-            quantizer.extra_si_for_prior = q_state['extra_si_for_prior']
-            prior = q_state['prior']
+        assert quantizer is not None, f"Missing quantizer for client {record.client_id}."
 
         bins, prep_metadata = quantizer.encoding_process(delta_vec)
 
         # Build payload
         payload = self._build_payload(bins, prep_metadata, quantizer, record)
 
-        # Add prior info to record for analysis
-        if not self.c_cfg.debug_load_state:
-            prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
+        prior = quantizer._get_posterior(delta_vec, bins_vec_save_compute=bins)
         record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins, quantizer.num_planes)
 
         # Compute marginal prior for comparison
         m_prior = PriorCalculator.compute_marginal_prior(
             bins, quantizer.bins_per_plane, quantizer.num_planes)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins, quantizer.num_planes)
-
-        if self.fl_cfg.debug_save_train_data:
-            codec_state_path = self.fl_cfg.debug_data_folder / self.c_cfg.debug_save_codec_state
-            assert not codec_state_path.exists() or len(list(codec_state_path.iterdir())) != 0
-            codec_state_path.mkdir(parents=True, exist_ok=True)
-            codec_state_path = codec_state_path / f'round_{record.round_id}_client_{record.client_id}.pt'
-            q_state = {
-                'coding_model': quantizer.coding_model.state_dict(),
-                'side_info_list_used': quantizer.side_info_list_used,
-                'extra_si_for_prior': quantizer.extra_si_for_prior,
-                'prior': prior,
-            }
-            torch.save(q_state, codec_state_path)
 
         return payload
 
@@ -391,7 +426,8 @@ class CancerCodec(IdentityCodec):
         }
 
         # Include model states for tracking overhead size
-        if record.round_type in ['P', 'T']:
+        assert record.round_type is not None
+        if record.round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
             # if it's a T round, clients sending the decoder state as well
             # for P rounds, decoder is sent to clients so they have reconstruction of non-side-info case
             payload['decoder_state'] = quantizer.coding_model.decoder.state_dict()
@@ -406,6 +442,7 @@ class CancerCodec(IdentityCodec):
 
     def _decompress(self, payload: dict, record: CancerRecord) -> torch.Tensor:
         client_idx = record.client_id
+        self._ensure_client_state(client_idx)
         quantizer = self.frozen_quantizers[client_idx]
         assert quantizer is not None, f"Missing quantizer for client {client_idx}."
         reconst = quantizer.decoding_process(payload["payload_content"])
@@ -416,7 +453,7 @@ class CancerCodec(IdentityCodec):
         )
 
         assert record.round_type is not None
-        if record.round_type[0] in ("T", "P"):
+        if record.round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
             self._update_history(
                 self.client_past_reconst[client_idx], reconst, owner="client",
                 round_id=record.round_id, client_id=client_idx
@@ -453,7 +490,7 @@ if __name__ == "__main__":
     # Uncomment to test with preprocessing
     print('Using Cancer codec WITH vec_slices and outlier handling...\n')
     codec = CancerCodec(
-        FLConfig(num_clients=num_clients),
+        CancerConfig(),
         quantizer_kwargs = {'norm_slices': [slice(i, None, 3) for i in range(3)], 'outlier_threshold': False}
     )
 

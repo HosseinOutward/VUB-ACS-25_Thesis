@@ -494,7 +494,7 @@ class CancerWithBoundCalc(CancerCodec):
             return payload
 
         max_samples = 1_000_000
-        folder_path = self.fl_cfg.records_dir + '/wz_bounds/'
+        folder_path = self.c_cfg.records_dir / 'wz_bounds'
         os.makedirs(folder_path, exist_ok=True)
 
         quantizer = self.frozen_quantizers[record.client_id]
@@ -517,7 +517,7 @@ class CancerWithBoundCalc(CancerCodec):
         )
 
         np.savez_compressed(
-            folder_path + f'bound_rid{record.round_id}_cid{record.client_id}.npz',
+            folder_path / f'bound_rid{record.round_id}_cid{record.client_id}.npz',
             dist_v=bound_dict['D'], rate_v=bound_dict['R'],)
 
         return payload

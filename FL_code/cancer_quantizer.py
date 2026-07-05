@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from FL_code.prior_calculator import PriorCalculator
-from FL_code.run_fl import FLConfig
 from FL_code.utils import create_training_progress_bar
 from FL_code.brent_wz_models import EncoderDecoderLayeredRNN
 
@@ -68,7 +67,7 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
 
 
 class WZQuantizerCancer:
-    def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int,
+    def __init__(self, c_cfg: 'CancerConfig', num_planes: int,
                  bins_per_plane: int, si_size: int, marginal_loss: bool = False,
                  norm_slices: list[slice] | bool | None = False,
                  outlier_threshold: float | bool = False,
@@ -80,7 +79,6 @@ class WZQuantizerCancer:
         self.extra_si_for_prior = extra_si_for_prior
 
         self.c_cfg: 'CancerConfig' = c_cfg
-        self.fl_cfg: FLConfig = fl_cfg
 
         self.no_si: bool = (si_size == 0)
         if self.no_si and not marginal_loss:
@@ -218,7 +216,7 @@ class WZQuantizerCancer:
 
             qz_model = self.get_new_RNN_model(num_planes, bins_per_plane, len(si_trans[0]), marginal_loss)
             qz_loss = self._train_model_single_attempt(
-                qz_model, x_prep, si_trans, self.fl_cfg, self.c_cfg,
+                qz_model, x_prep, si_trans, self.c_cfg,
                 num_planes, self.wmspe_denom, batch_size, return_loss=True)
             if qz_loss is None or np.isnan(qz_loss) or np.isinf(qz_loss):
                 continue
@@ -240,15 +238,15 @@ class WZQuantizerCancer:
     @staticmethod
     def _train_model_single_attempt(
             rnn_model:EncoderDecoderLayeredRNN, x_prep: torch.Tensor, si_trans: torch.Tensor,
-            fl_cfg: FLConfig, c_cfg: 'CancerConfig', num_planes:int, mspe_denom:float, batch_size: int = 50_000,
+            c_cfg: 'CancerConfig', num_planes:int, mspe_denom:float, batch_size: int = 50_000,
             return_loss=False) -> float|None:
         # Enable TF32 for faster matmul on Ampere+ GPUs
-        if fl_cfg.tf32:
+        if c_cfg.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
 
         # Use fused AdamW for better performance
-        optimizer = torch.optim.AdamW(rnn_model.parameters(), fused=fl_cfg.fused_optimizer,
+        optimizer = torch.optim.AdamW(rnn_model.parameters(), fused=c_cfg.fused_optimizer,
                                       lr=c_cfg.lr, weight_decay=1e-4)
 
         scheduler = torch.optim.lr_scheduler.StepLR(
@@ -260,7 +258,7 @@ class WZQuantizerCancer:
         rnn_model.train()
 
         # Mixed precision training with GradScaler
-        use_amp = fl_cfg.mixed_precision and torch.cuda.is_available()
+        use_amp = c_cfg.mixed_precision and torch.cuda.is_available()
         scaler = torch.amp.GradScaler('cuda') if use_amp else None
 
         # Single progress bar for all training
@@ -269,7 +267,7 @@ class WZQuantizerCancer:
         pbar = create_training_progress_bar(
             total_iterations,
             desc="Training Quantizer",
-            disable=not fl_cfg.training_progress_bar
+            disable=not c_cfg.training_progress_bar
         )
 
         epoch_loss:float = float('inf')
@@ -303,14 +301,14 @@ class WZQuantizerCancer:
                     loss.backward()
                     optimizer.step()
 
-                if fl_cfg.training_progress_bar:
+                if c_cfg.training_progress_bar:
                     pbar.set_postfix({
                         'loss': f'{loss.item():.2f}',
                     })
                     pbar.update(1)
             scheduler.step()
 
-        if fl_cfg.training_progress_bar:
+        if c_cfg.training_progress_bar:
             pbar.close()
 
         # Move back to CPU and cleanup
@@ -532,31 +530,27 @@ if __name__ == "__main__":
 
     print("\n1. Without side info - pretrained model (P)")
     quantizer = WZQuantizerCancer(
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=8, si_size=0,)
+        c_cfg=CancerConfig(), num_planes=3, bins_per_plane=8, si_size=0,)
     quantizer.coding_model.load_state_dict(torch.load(pretrained_path), strict=False)
     test(quantizer)
 
     print("\n2. With side info - marginal model (M)")
     quantizer = WZQuantizerCancer(
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=len(side_info), marginal_loss=True
+        c_cfg=CancerConfig(), num_planes=3, bins_per_plane=16, si_size=len(side_info), marginal_loss=True
     )
     quantizer.train_model(y, si_raw_list=side_info, batch_size=500_000)
     test(quantizer)
 
     print("\n2.B Without side info - marginal model (M)")
     quantizer = WZQuantizerCancer(
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=0,
+        c_cfg=CancerConfig(), num_planes=3, bins_per_plane=16, si_size=0,
     )
     quantizer.train_model(y, si_raw_list=None, batch_size=500_000)
     test(quantizer)
 
     print("\n3. Training quantizer with side info (R or T)...")
     quantizer = WZQuantizerCancer(
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=len(side_info)
+        c_cfg=CancerConfig(), num_planes=3, bins_per_plane=16, si_size=len(side_info)
     )
     quantizer.train_model(y, si_raw_list=side_info, batch_size=500_000)
     test(quantizer)
@@ -572,8 +566,7 @@ if __name__ == "__main__":
 
     print("\n5. With side info + vec_slices + outlier handling...")
     quantizer_advanced = WZQuantizerCancer(
-        c_cfg=CancerConfig(), fl_cfg=FLConfig(num_clients=1),
-        num_planes=3, bins_per_plane=16, si_size=len(side_info),
+        c_cfg=CancerConfig(), num_planes=3, bins_per_plane=16, si_size=len(side_info),
         norm_slices=[slice(i, None, 3) for i in range(3)],
         outlier_threshold=1.4
     )
