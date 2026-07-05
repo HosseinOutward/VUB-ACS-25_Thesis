@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
 
-from FL_code.cancer_protocol import CancerCodec
-
-if TYPE_CHECKING:
-    from FL_code.run_fl import FLConfig
+from FL_code.cancer_protocol import CancerCodec, CancerConfig
 
 
 class SingleTypeCodec(CancerCodec):
@@ -17,10 +14,11 @@ class SingleTypeCodec(CancerCodec):
     def __init__(
         self,
         single_letter: str,
-        fl_cfg: FLConfig,
-        quantizer_kwargs: dict[str, Any] | None = None
+        c_cfg: CancerConfig,
+        quantizer_kwargs: dict[str, Any] | None = None,
+        codec_name: str = "cancer",
     ) -> None:
-        super().__init__(fl_cfg, quantizer_kwargs)
+        super().__init__(c_cfg, quantizer_kwargs, codec_name)
         self.c_cfg.warmup_phase = tuple(
             (single_letter if phase_type != 'P' else 'P', bins_per_plane, num_planes)
             for phase_type, bins_per_plane, num_planes in self.c_cfg.warmup_phase
@@ -43,10 +41,11 @@ class TemporalCodec(SingleTypeCodec):
 
     def __init__(
         self,
-        fl_cfg: FLConfig,
-        quantizer_kwargs: dict[str, Any] | None = None
+        c_cfg: CancerConfig,
+        quantizer_kwargs: dict[str, Any] | None = None,
+        codec_name: str = "cancer|temporal_only",
     ) -> None:
-        super().__init__('T', fl_cfg, quantizer_kwargs)
+        super().__init__('T', c_cfg, quantizer_kwargs, codec_name)
 
 
 class RetrainCodec(SingleTypeCodec):
@@ -54,10 +53,11 @@ class RetrainCodec(SingleTypeCodec):
 
     def __init__(
         self,
-        fl_cfg: FLConfig,
-        quantizer_kwargs: dict[str, Any] | None = None
+        c_cfg: CancerConfig,
+        quantizer_kwargs: dict[str, Any] | None = None,
+        codec_name: str = "cancer|retrain_only",
     ) -> None:
-        super().__init__('R', fl_cfg, quantizer_kwargs)
+        super().__init__('R', c_cfg, quantizer_kwargs, codec_name)
 
 
 # class CancerSemiMarginal(CancerCodec):

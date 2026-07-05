@@ -15,8 +15,7 @@ import itertools
 
 
 from FL_code.codec import create_codec
-from FL_code.cancer_protocol import CancerCodec, CancerConfig
-from FL_code.run_fl import FLConfig
+from FL_code.cancer_protocol import CancerCodec
 
 # import pydevd_pycharm
 # pydevd_pycharm.settrace('ETROFLOCK', port=32112,
@@ -50,7 +49,7 @@ NOISE_POWER = 0.1
 
 # Define codec and quantizer configurations to test
 CODEC_NAMES = []
-CODEC_NAMES += ['cancer_basic_norm']
+CODEC_NAMES += ['cancer|no_model_slices']
 MODEL_TYPES = []
 MODEL_TYPES += ['M','TM','T','R','RM']
 QUANTIZER_SETTINGS = []
@@ -147,15 +146,8 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     side_info = torch.randn(DATA_SIZE)
     signal = side_info + torch.randn(DATA_SIZE) * np.sqrt(NOISE_POWER)
 
-    fl_cfg = FLConfig(
-        codec=config.codec_name,
-        codec_options={"use_model_slices": False},
-        num_clients=1,
-        training_progress_bar=True,
-        compile_mode=False,
-    )
-
-    codec: CancerCodec = create_codec(fl_cfg, None)
+    codec: CancerCodec = create_codec(config.codec_name, None)
+    codec.c_cfg.training_progress_bar = True
 
     codec.c_cfg.warmup_phase = ((config.model_type, config.bins_per_plane, config.num_planes),)
 

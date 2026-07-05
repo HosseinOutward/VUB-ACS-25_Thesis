@@ -26,7 +26,6 @@ project_root = script_dir.parent.parent  # -> VUB-ACS-25_Thesis/FL_code
 
 from FL_code.codec import create_codec
 from FL_code.cancer_protocol import CancerCodec
-from FL_code.run_fl import FLConfig
 
 # ============== EXPERIMENT CONFIG ==============
 # Test configuration
@@ -42,14 +41,15 @@ MEAN_DRIFT_PER_ITER = 0.05  # How much mean shifts each iteration
 STD_DRIFT_PER_ITER = 0.02   # How much std changes each iteration
 
 # Codec configuration (single config to test)
-CODEC_NAME = 'non_wz_learned_worker'
+CODEC_NAME = 'cancer|non_wz_worker|no_model_slices'
 # ===============================================
 
 
-def setup_codec(fl_cfg) -> CancerCodec:
+def setup_codec(codec_name: str) -> CancerCodec:
     """Initialize codec with custom configuration for long-term testing."""
-    codec: CancerCodec = create_codec(fl_cfg, None)
+    codec: CancerCodec = create_codec(codec_name, None)
     codec.c_cfg.pretrain_pth_dir = str(project_root / "data/pre_trained_pth")+'/'
+    codec.c_cfg.training_progress_bar = True
     return codec
 
 
@@ -62,15 +62,7 @@ def run_long_term_test(out_path: Path):
     torch.manual_seed(42)
     np.random.seed(42)
 
-    fl_cfg = FLConfig(
-        codec=CODEC_NAME,
-        codec_options={"use_model_slices": False},
-        num_clients=1,
-        training_progress_bar=True,
-        compile_mode=False,
-    )
-
-    codec = setup_codec(fl_cfg)
+    codec = setup_codec(CODEC_NAME)
     client_id = 0
 
     # Initialize side information

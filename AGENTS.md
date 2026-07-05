@@ -28,12 +28,12 @@ These standards apply to every module unless a more specific local instruction s
 
 - **Use Pydantic v2** when data contracts or structured configuration models are needed. not for functions or code data handling.
 - **Use full type hints** on every function signature and class attribute.
-- **Use future annotations.** Add `from __future__ import annotations` at the top of every Python file.
-- **Use `pathlib.Path` for filesystem paths.** Do not pass paths around as `str`.
+- **Use advanced python syntax**, for example, `pathlib.Path` for filesystem paths over raw `str`, and many other uses of tools given by python and common libraries.
 - **Write concise docstrings.** Public functions need a one-paragraph docstring. Each shared data contract needs a class-level docstring explaining what it represents and who produces and consumes it.
 - **Comments explain why, not what.** Comment only when intent is non-obvious, such as a conditional field requirement or cache ordering. Do not narrate self-evident code.
 - **Fail loudly and clearly.** Hidden behavior is worse than a visible failure. On error, raise with a message that names the offending file, field, or stage. Avoid silent fallbacks and unnecessary recovery logic.
 - **No bare `except`.** Catch specific exceptions only when handling them is useful. Use assertions for internal assumptions.
+- **rasising errors** Instead of if-raises, use asserts where its a valid replacement. also only use the asserts where either an assumption has to be checked, or some future error will happen which might not be clear. for the latter, this means avoid asserts just to make a custom text for fail, when its already obvious. instead use it where downstream fails are not clear or worse, not even caught.
 - **No global mutable state.** Pass `Config` and other dependencies explicitly. Do not introduce module-level mutable singletons.
 - **Avoid needless abstraction.** Do not add tiny one-use functions or renaming-only helpers. Add abstractions only when they remove real duplication or make a complex concept easier to reason about.
 - **Keep control flow shallow.** Avoid unnecessary nested loops and conditionals. Prefer direct, readable logic.

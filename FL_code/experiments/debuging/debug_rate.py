@@ -7,7 +7,6 @@ import numpy as np
 
 from FL_code.cancer_quantizer import WZQuantizerCancer
 from FL_code.cancer_protocol import CancerConfig
-from FL_code.run_fl import FLConfig
 from FL_code.prior_calculator import PriorCalculator
 
 # Config
@@ -27,9 +26,9 @@ side_info = [base.clone()]
 # Create and train quantizer
 print("Training quantizer...")
 c_cfg = CancerConfig()
-fl_cfg = FLConfig(num_clients=1, training_progress_bar=True, compile_mode=False)
+c_cfg.training_progress_bar = True
 quantizer = WZQuantizerCancer(
-    c_cfg=c_cfg, fl_cfg=fl_cfg, num_planes=NP, bins_per_plane=BPP, si_size=len(side_info))
+    c_cfg=c_cfg, num_planes=NP, bins_per_plane=BPP, si_size=len(side_info))
 quantizer.train_model(y, side_info)
 
 prep_y,_ = quantizer.get_x_data(y)
