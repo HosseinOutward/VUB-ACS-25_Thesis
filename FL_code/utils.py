@@ -1,8 +1,10 @@
 from __future__ import annotations
+import json
+from pathlib import Path
 import random
 import sys
 from collections import OrderedDict
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -13,6 +15,10 @@ from tqdm.auto import tqdm
 
 from FL_code.models import FLModelTemplate, initialize_model
 from FL_code.dataset import create_dataloader
+
+if TYPE_CHECKING:
+    from FL_code.run_fl import FLConfig
+
 
 
 def create_training_progress_bar(
@@ -53,6 +59,7 @@ def get_device(device_id: int = 0) -> torch.device:
         torch.cuda.set_device(device)
         torch.backends.cudnn.benchmark = True
         return device
+    print(' ********* USING CPU ********* ')
     return torch.device("cpu")
 
 
@@ -80,11 +87,24 @@ def setup_fl_worker(
     test_loader = create_dataloader(X_test, y_test, cfg, device, is_train=False)
 
     train_loader = None
-    if X_train is not None and client_id is not None:
+    has_training_tensors = X_train is not None or y_train is not None
+    has_client_partition = client_id is not None or num_clients is not None
+
+    if has_training_tensors:
+        if X_train is None or y_train is None:
+            raise ValueError(f"{role}: X_train and y_train must be provided together.")
+        if client_id is None or num_clients is None:
+            raise ValueError(f"{role}: training tensors require client_id and num_clients.")
+        assert X_train is not None
+        assert y_train is not None
+        assert client_id is not None
+        assert num_clients is not None
         train_loader = create_dataloader(
             X_train, y_train, cfg, device, is_train=True,
             client_id=client_id, num_clients=num_clients
         )
+    elif has_client_partition:
+        raise ValueError(f"{role}: client_id and num_clients require training tensors.")
 
     sd_manager = StateDictManager(model)
 
@@ -113,6 +133,8 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batche
         if x.ndim == 4 and model.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
         model(x)
+    model.eval()  # Set back to eval mode after recalibration
+    torch.cuda.empty_cache()  # Clear cache to free memory after recalibration
 
 
 def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
@@ -206,6 +228,21 @@ class StateDictManager:
 
         return state_dict
 
+    def load_trainable_state(
+        self,
+        model: nn.Module,
+        trainable_state: dict[str, torch.Tensor]
+    ) -> None:
+        """Load exactly the trainable parameters tracked by this manager."""
+        expected_keys = set(self.keys)
+        received_keys = set(trainable_state.keys())
+        if received_keys != expected_keys:
+            missing = sorted(expected_keys - received_keys)
+            extra = sorted(received_keys - expected_keys)
+            raise KeyError(f"Trainable state keys mismatch. Missing={missing}, extra={extra}.")
+
+        model.load_state_dict(trainable_state, strict=True)
+
     def get_slices(self) -> list[slice]:
         slices = []
         offset = 0
@@ -231,3 +268,65 @@ class StateDictManager:
     ) -> None:
         for key in self.keys:
             state_dict[key].add_(delta[key].to(state_dict[key].device))
+
+
+def _prepare_records_dir(cfg: FLConfig) -> None:
+    """Create the numbered run directory and save configuration snapshots."""
+    run_name = cfg.run_name if cfg.run_name is not None else cfg.codec
+
+    records_root = Path(cfg.records_dir)
+    records_root.mkdir(exist_ok=True, parents=True)
+    existing_names = {path.name for path in records_root.iterdir()}
+    run_num = 1
+    while any(name == f"run{run_num}" or name.startswith(f"run{run_num}_") for name in existing_names):
+        run_num += 1
+
+    run_dir = records_root / f"run{run_num}_{run_name}"
+    run_dir.mkdir()
+    cfg.records_dir = run_dir
+
+    write_fl_config_snapshot(cfg, run_dir)
+
+
+def write_fl_config_snapshot(cfg: FLConfig, save_dir: Path) -> None:
+    """Write the FL configuration snapshot used by records and debug replay."""
+    save_dir.mkdir(exist_ok=True, parents=True)
+    with (save_dir / "fl_config.json").open("w") as f:
+        json.dump(cfg.model_dump(mode="json"), f, indent=2)
+
+
+def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
+    """Assert that saved debug data was produced with the same non-codec FL configuration."""
+    config_path = save_dir / "fl_config.json"
+    with config_path.open() as f:
+        saved_config = json.load(f)
+
+    current_config = cfg.model_dump(mode="json")
+    _DEBUG_CONFIG_IGNORED_FIELDS = frozenset({
+        "codec",
+        "run_name",
+        "records_dir",
+        "master_port",
+        "debug_save_train_data",
+        "debug_load_from_saved_data",
+    })
+    for field in _DEBUG_CONFIG_IGNORED_FIELDS:
+        saved_config.pop(field, None)
+        current_config.pop(field, None)
+
+    assert saved_config == current_config, (
+        f"Debug data in {save_dir} was saved with a different FLConfig: "
+        f"{_format_config_mismatch(saved_config, current_config)}"
+    )
+
+
+def _format_config_mismatch(saved_config: dict[str, Any], current_config: dict[str, Any]) -> str:
+    differing_fields = sorted(
+        field
+        for field in saved_config.keys() | current_config.keys()
+        if saved_config.get(field) != current_config.get(field)
+    )
+    return "; ".join(
+        f"{field}: saved={saved_config.get(field)!r}, current={current_config.get(field)!r}"
+        for field in differing_fields
+    )

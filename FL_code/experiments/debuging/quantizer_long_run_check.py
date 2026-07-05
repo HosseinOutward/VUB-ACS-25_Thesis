@@ -42,7 +42,7 @@ MEAN_DRIFT_PER_ITER = 0.05  # How much mean shifts each iteration
 STD_DRIFT_PER_ITER = 0.02   # How much std changes each iteration
 
 # Codec configuration (single config to test)
-CODEC_NAME = 'non_wz_learned_basic_norm'
+CODEC_NAME = 'non_wz_learned_worker'
 # ===============================================
 
 
@@ -62,8 +62,13 @@ def run_long_term_test(out_path: Path):
     torch.manual_seed(42)
     np.random.seed(42)
 
-    fl_cfg = FLConfig(num_clients=1, training_progress_bar=True, compile_mode=False)
-    fl_cfg.codec = CODEC_NAME
+    fl_cfg = FLConfig(
+        codec=CODEC_NAME,
+        codec_options={"use_model_slices": False},
+        num_clients=1,
+        training_progress_bar=True,
+        compile_mode=False,
+    )
 
     codec = setup_codec(fl_cfg)
     client_id = 0
@@ -244,4 +249,3 @@ if __name__ == '__main__':
         plot_longrun_results(csv_path)
     else:
         print(f"❌ No data found at {csv_path}")
-

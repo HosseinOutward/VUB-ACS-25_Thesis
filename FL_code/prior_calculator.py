@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
+import hashlib
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from FL_code.run_fl import FLConfig
 from FL_code.brent_wz_models import EncoderDecoderLayeredRNN
 from FL_code.utils import create_training_progress_bar
 
@@ -137,7 +136,7 @@ class PriorCalculator:
         num_batches = (total_samples + batch_size - 1) // batch_size
         pbar = create_training_progress_bar(
             c_cfg.train_epochs * num_batches,
-            disable=not FLConfig().training_progress_bar,
+            disable=not c_cfg.training_progress_bar,
             desc="Prior Model")
 
         for epoch in range(c_cfg.train_epochs):

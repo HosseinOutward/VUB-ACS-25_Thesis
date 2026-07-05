@@ -1,7 +1,8 @@
 from __future__ import annotations
+
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import csv
 import pickle
@@ -10,8 +11,8 @@ import gzip
 import torch
 import numpy as np
 
-from FL_code.run_fl import FLConfig
-from FL_code.utils import StateDictManager
+if TYPE_CHECKING:
+    from FL_code.utils import StateDictManager
 
 
 def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
@@ -128,15 +129,11 @@ class CompressionRecord:
 
         return result
 
-    def save_to_csv(self, save_dir: Path | str | None = None) -> None:
-        """Append record to CSV file. If save_dir is None, skip saving."""
-        if save_dir is None:
-            return
+    def append_record_to_csv(self, save_dir: Path) -> None:
+        """Append record to CSV file."""
+        save_dir.mkdir(exist_ok=True, parents=True)
 
-        save_path = Path(save_dir)
-        save_path.mkdir(exist_ok=True, parents=True)
-
-        csv_file = save_path / "compression_records.csv"
+        csv_file = save_dir / "compression_records.csv"
         record_dict = self.to_dict()
 
         # Check if file exists to determine if we need to write headers
@@ -151,12 +148,32 @@ class CompressionRecord:
 
 # --- Compression Codecs --- #
 class IdentityCodec:
-    def __init__(self, fl_cfg: FLConfig) -> None:
-        self.fl_cfg = fl_cfg
+    OPTION_ORDER: tuple[str, ...] = ()
+
+    def __init__(self, codec_name: str = "identity") -> None:
+        self.codec_name = codec_name
+
+    @staticmethod
+    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
+        """Validate identity codec name options."""
+        assert not option_tokens, f"identity codec does not accept options: {option_tokens!r}."
+
+    @classmethod
+    def create_from_codec_name(
+        cls,
+        codec_name: str,
+        protocol_name: str,
+        option_tokens: Sequence[str],
+        sd_manager: StateDictManager | None,
+    ) -> IdentityCodec:
+        """Create an identity codec from a validated codec name."""
+        assert protocol_name == "identity"
+        assert not option_tokens
+        return cls(codec_name=codec_name)
 
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create a metrics record for one client-round compression."""
-        return CompressionRecord(round_id, client_id, method="identity")
+        return CompressionRecord(round_id, client_id, method=self.codec_name)
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         """Encode one flattened model delta into a transport payload."""
@@ -212,9 +229,27 @@ class IdentityCodec:
 class BasicCompressionCodec(IdentityCodec):
     """Basic compression: float16 + gzip. Extends IdentityCodec."""
 
+    @staticmethod
+    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
+        """Validate basic codec name options."""
+        assert not option_tokens, f"basic codec does not accept options: {option_tokens!r}."
+
+    @classmethod
+    def create_from_codec_name(
+        cls,
+        codec_name: str,
+        protocol_name: str,
+        option_tokens: Sequence[str],
+        sd_manager: StateDictManager | None,
+    ) -> BasicCompressionCodec:
+        """Create a basic compression codec from a validated codec name."""
+        assert protocol_name == "basic"
+        assert not option_tokens
+        return cls(codec_name=codec_name)
+
     def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create a metrics record for basic float16 compression."""
-        return CompressionRecord(round_id, client_id, method="basic")
+        return CompressionRecord(round_id, client_id, method=self.codec_name)
 
     def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         delta_fp16 = delta_vec.to(torch.float16)
@@ -224,82 +259,67 @@ class BasicCompressionCodec(IdentityCodec):
         return payload_content.to(torch.float32)
 
 
-def create_codec(fl_cfg: FLConfig, sd_manager: StateDictManager | None) -> IdentityCodec:
-    """Create codec instance."""
-    codec_name = fl_cfg.codec.lower()
+# --- Codec Name Parsing --- #
+def parse_and_validate_codec_name(codec_name: str) -> tuple[str, tuple[str, ...]]:
+    """Validate a codec name and return protocol plus ordered option tokens."""
+    assert isinstance(codec_name, str), f"codec must be a string; got {type(codec_name).__name__}."
+    assert codec_name, "codec must be a non-empty string."
+    assert codec_name == codec_name.strip(), f"codec={codec_name!r} must not contain leading or trailing whitespace."
+    tokens = codec_name.split("|")
+    assert all(token != "" for token in tokens), f"codec={codec_name!r} contains an empty protocol or option token."
+    protocol_name, *option_tokens = tokens
+    protocol_name, option_tokens = protocol_name, tuple(option_tokens)
 
-    codec: IdentityCodec | None = None
+    protocol_class = get_protocol_class(protocol_name)
+    protocol_class.validate_codec_tokens(option_tokens)
 
-    if codec_name == "identity":
-        codec = IdentityCodec(fl_cfg)
-    elif codec_name == "basic":
-        codec = BasicCompressionCodec(fl_cfg)
-    elif codec_name == "split":
+    return protocol_name, option_tokens
+
+
+def get_protocol_class(protocol_name: str) -> type[IdentityCodec]:
+    """Return the protocol class selected by a codec-name protocol token."""
+    if protocol_name == "identity":
+        return IdentityCodec
+    if protocol_name == "basic":
+        return BasicCompressionCodec
+    if protocol_name == "split":
         from FL_code.other_protocols.n_split_protocol import NSplitCodec
-        split_name = fl_cfg.run_name or fl_cfg.codec
-        assert split_name.endswith("_split_codec") and split_name.split("_", 1)[0].isdigit(), (
-            "Split codec requires an input name like '3_split_codec'."
-        )
-        codec = NSplitCodec(fl_cfg, int(split_name.split("_", 1)[0]))
-    else:
-        from FL_code.cancer_protocol import build_cancer_config_for_fl
-        c_cfg = build_cancer_config_for_fl(fl_cfg)
+        return NSplitCodec
+    if protocol_name == "cancer":
+        from FL_code.cancer_protocol import CancerCodec
+        return CancerCodec
+    assert False, f"Unknown codec protocol={protocol_name!r}."
 
-        norm_slices = None
-        if c_cfg.use_model_slices:
-            assert sd_manager is not None, "StateDictManager is required when CancerConfig.use_model_slices is enabled."
-            norm_slices = sd_manager.get_slices()
-        quantizer_kwargs = {
-            "norm_slices": norm_slices,
-            "outlier_threshold": c_cfg.outlier_threshold if c_cfg.outlier_threshold is not None else False,
-        }
-        binary_prot = c_cfg.binary_protocol
 
-        if codec_name == "debug_cancerwithboundcalc":
-            from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
-            codec = CancerWithBoundCalc(fl_cfg, binary_prot, quantizer_kwargs)
-
-        elif codec_name == "non_wz_learned_worker":
-            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
-            codec = SingleTypeCodec('TMM', fl_cfg, binary_prot, quantizer_kwargs)
-        elif codec_name == "non_wz_learned_server":
-            from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
-            codec = SingleTypeCodec('RMM', fl_cfg, binary_prot, quantizer_kwargs)
-
-        elif codec_name == "temporal_only":
-            from FL_code.other_protocols.SingleTypeCodecs import TemporalCodec
-            codec = TemporalCodec(fl_cfg, binary_prot, quantizer_kwargs)
-        elif codec_name == "retrain_only":
-            from FL_code.other_protocols.SingleTypeCodecs import RetrainCodec
-            codec = RetrainCodec(fl_cfg, binary_prot, quantizer_kwargs)
-
-        elif codec_name == "cancer":
-            from FL_code.cancer_protocol import CancerCodec
-            codec = CancerCodec(fl_cfg, binary_prot, quantizer_kwargs)
-
-    if codec is None:
-        raise NotImplementedError(f"Codec '{codec_name}' not implemented.")
-
-    return codec
+def create_codec(codec_name: str, sd_manager: StateDictManager | None) -> IdentityCodec:
+    """Create a codec from a protocol-owned, validated codec name."""
+    protocol_name, option_tokens = parse_and_validate_codec_name(codec_name)
+    protocol_class = get_protocol_class(protocol_name)
+    return protocol_class.create_from_codec_name(codec_name, protocol_name, option_tokens, sd_manager)
 
 
 def simulate_compression(
     codec: IdentityCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
-    model_size: int | None = None, save_dir: Path | str | None = "compression_logs",
-    server_eval_metrics: dict[str, float] | None = None, worker_eval_metrics: Sequence[float] | None = None,
-    metric_keys: list[str] | None = None) -> torch.Tensor:
+    model_size: int, save_dir: Path,
+    server_eval_metrics: dict[str, float], worker_eval_metrics: Sequence[float],
+    metric_keys: list[str]) -> torch.Tensor:
     """Simulate client encoding and server decoding for one flattened delta."""
     # Create record for this compression operation
     record = codec.create_record(round_id, client_id)
     record.model_size = model_size
-    record.global_eval_metrics = server_eval_metrics or {}
+    record.global_eval_metrics = server_eval_metrics
 
     # Restructure worker metrics to match server metrics structure
-    if worker_eval_metrics and metric_keys:
-        num_metrics = len(metric_keys)
-        train_metrics = {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)}
-        test_metrics = {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)}
-        record.worker_eval_metrics = {'train': train_metrics, 'test': test_metrics}
+    num_metrics = len(metric_keys)
+    expected_len = num_metrics * 2
+    assert len(worker_eval_metrics) == expected_len, (
+        f"worker_eval_metrics must contain {expected_len} "
+        f"values for {num_metrics} metric keys; "
+        f"got {len(worker_eval_metrics)}."
+    )
+    train_metrics = {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)}
+    test_metrics = {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)}
+    record.worker_eval_metrics = {'train': train_metrics, 'test': test_metrics}
 
     # Encode (client-side simulation)
     payload = codec.encode(delta_vec, record)
@@ -307,6 +327,6 @@ def simulate_compression(
     # Decode (server-side)
     reconstructed = codec.decode(payload, record)
 
-    record.save_to_csv(save_dir)
+    record.append_record_to_csv(save_dir)
 
     return reconstructed

@@ -21,22 +21,20 @@ SBATCH_DIR="sbatch/generated"
 LOG_DIR="sbatch/sbatch_log"
 
 # ---------- Your tuple list (edit here) ----------
-# Format: ("codec" port)
-# identity, basic, ?_split_codec (2,3,...), debug_CancerWithBoundCalc
-# non_wz_learned, cancer (_w_outlier, _basic_norm, _binary)
+# Format: "codec|port|extra run_fl.py args"
 JOBS=(
-  "retrain_only 29580"
-  "retrain_only_binary 29605"
-  "cancer_basic_norm 29620"
-  "cancer_w_outlier 29640"
+  "retrain_only|29580|"
+  "retrain_only|29605|--cancer-binary-protocol --run-name retrain_only_binary"
+  "cancer|29620|--cancer-no-model-slices --run-name cancer_basic_norm"
+  "cancer|29640|--cancer-outlier-threshold 1.6 --run-name cancer_w_outlier"
 
-#  "temporal_only 29505"
-#  "temporal_only_binary 29520"
-#  "cancer_save 29540"
-#  "cancer_binary 29560"
+#  "temporal_only|29505|"
+#  "temporal_only|29520|--cancer-binary-protocol --run-name temporal_only_binary"
+#  "cancer|29540|--run-name cancer_save"
+#  "cancer|29560|--cancer-binary-protocol --run-name cancer_binary"
 
-#  "non_wz_learned 29660"
-#  "non_wz_learned_binary 29680"
+#  "non_wz_learned_worker|29660|"
+#  "non_wz_learned_worker|29680|--cancer-binary-protocol --run-name non_wz_learned_worker_binary"
 )
 
 # ---------- Safety checks ----------
@@ -59,8 +57,7 @@ echo "Generating + submitting ${#JOBS[@]} jobs..."
 echo
 
 for entry in "${JOBS[@]}"; do
-  codec="$(awk '{print $1}' <<<"$entry")"
-  port="$(awk '{print $2}' <<<"$entry")"
+  IFS='|' read -r codec port extra_args <<<"$entry"
 
   if [[ -z "${codec}" || -z "${port}" ]]; then
     echo "Skipping malformed entry: '$entry'"
@@ -94,7 +91,7 @@ for entry in "${JOBS[@]}"; do
 set -euo pipefail
 
 source "${VENV_ACTIVATE}"
-${PYTHON_CMD} --codec "${codec}" --master-port "${port}"
+${PYTHON_CMD} --codec "${codec}" --master-port "${port}" ${extra_args}
 EOF
 
   chmod +x "$sbatch_file"
