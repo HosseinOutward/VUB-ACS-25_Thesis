@@ -6,6 +6,8 @@ import torch
 
 from FL_code.cancer_protocol import CancerConfig, BinsCodecRecord
 from FL_code.codec import IdentityCodec
+from FL_code.codec_registry import require_int_codec_option
+from FL_code.protocol_records import BinsCodecRecord
 from FL_code.prior_calculator import PriorCalculator
 
 

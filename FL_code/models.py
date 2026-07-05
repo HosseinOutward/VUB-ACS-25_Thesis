@@ -117,7 +117,4 @@ def initialize_model(cfg: FLConfig, device: torch.device) -> FLModelTemplate:
         if cfg.cudnn_benchmark:
             torch.backends.cudnn.benchmark = True
 
-        if cfg.compile_mode:
-            model = torch.compile(model, mode=cfg.compile_mode)
-
     return model

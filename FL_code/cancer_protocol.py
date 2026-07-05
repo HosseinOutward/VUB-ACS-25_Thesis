@@ -46,17 +46,22 @@ Each round has a type that determines quantizer training and side information us
 from __future__ import annotations
 
 import gc
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.codec import IdentityCodec, CompressionRecord, get_obj_compressed_size
+from FL_code.codec import IdentityCodec, get_obj_compressed_size
+from FL_code.codec_registry import optional_bool_codec_option, reject_unknown_codec_options
 from FL_code.prior_calculator import PriorCalculator
-from FL_code.run_fl import FLConfig
+from FL_code.protocol_records import BinsCodecRecord
+
+if TYPE_CHECKING:
+    from FL_code.run_fl import FLConfig
+    from FL_code.utils import StateDictManager
 
 
 # ============================================================================

@@ -147,8 +147,13 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     side_info = torch.randn(DATA_SIZE)
     signal = side_info + torch.randn(DATA_SIZE) * np.sqrt(NOISE_POWER)
 
-    fl_cfg = FLConfig(codec=config.codec_name ,num_clients=1,
-                      training_progress_bar=True, compile_mode=False)
+    fl_cfg = FLConfig(
+        codec=config.codec_name,
+        codec_options={"use_model_slices": False},
+        num_clients=1,
+        training_progress_bar=True,
+        compile_mode=False,
+    )
 
     codec: CancerCodec = create_codec(fl_cfg, None)
 
@@ -339,4 +344,3 @@ if __name__ == '__main__':
         plot_rate_comparison(csv_path)
     else:
         print(f"❌ No data found at {csv_path}")
-

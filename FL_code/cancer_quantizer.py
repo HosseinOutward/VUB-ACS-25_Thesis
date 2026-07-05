@@ -69,7 +69,8 @@ def get_outlier_factor(grad_flat_normal: torch.Tensor, outlier_threshold: float)
 
 class WZQuantizerCancer:
     def __init__(self, c_cfg: 'CancerConfig', fl_cfg: FLConfig, num_planes: int,
-                 bins_per_plane: int, si_size: int, marginal_loss=False, norm_slices: list[slice] | bool | None = False,
+                 bins_per_plane: int, si_size: int, marginal_loss: bool = False,
+                 norm_slices: list[slice] | bool | None = False,
                  outlier_threshold: float | bool = False,
                  extra_si_for_prior: list[torch.Tensor] | tuple[torch.Tensor, ...] = ()) -> None:
         # Data preprocessing parameters - defaults to single slice (no partitioning)
@@ -82,7 +83,8 @@ class WZQuantizerCancer:
         self.fl_cfg: FLConfig = fl_cfg
 
         self.no_si: bool = (si_size == 0)
-        marginal_loss = marginal_loss or self.no_si
+        if self.no_si and not marginal_loss:
+            raise ValueError("si_size=0 requires marginal_loss=True; no-SI quantizers must be explicit.")
         self.coding_model: EncoderDecoderLayeredRNN = self.get_new_RNN_model(
             num_planes, bins_per_plane, si_size, marginal_loss)
 
@@ -255,14 +257,7 @@ class WZQuantizerCancer:
         train_dataset = torch.utils.data.TensorDataset(x_prep, si_trans)
 
         rnn_model.cuda()
-
-        # Compile model for JIT optimization (PyTorch 2.0+)
-        if fl_cfg.compile_mode and hasattr(torch, 'compile'):
-            compiled_model = torch.compile(rnn_model, mode=fl_cfg.compile_mode)
-        else:
-            compiled_model = rnn_model
-
-        compiled_model.train()
+        rnn_model.train()
 
         # Mixed precision training with GradScaler
         use_amp = fl_cfg.mixed_precision and torch.cuda.is_available()

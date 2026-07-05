@@ -39,7 +39,7 @@ DATASET_CONFIG = {
 
 def precompute_dataset_to_shared(
     dataset_name: str,
-    data_folder: Path | str,
+    data_folder: Path,
     split: str,
     dtype: torch.dtype = torch.float32,
     fraction: float | None = None
@@ -67,7 +67,7 @@ def precompute_dataset_to_shared(
     if is_train:
         perm = torch.randperm(len(y))
         X, y = X[perm], y[perm]
-        if fraction:
+        if fraction is not None:
             n = int(len(y) * fraction)
             X, y = X[:n], y[:n]
 

@@ -5,7 +5,8 @@ import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
 from FL_code.utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
-from FL_code.codec import create_codec, simulate_compression
+from FL_code.codec import simulate_compression
+from FL_code.codec import create_codec
 
 
 def run_federated_server(
@@ -36,7 +37,8 @@ def run_federated_server(
         loaded_state_dict = torch.load(delta_data_path)
         model.load_state_dict(loaded_state_dict)
 
-    codec = create_codec(cfg, sd_manager)
+    codec = create_codec(cfg.codec, sd_manager)
+
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using codec: {codec.__class__.__name__}")
 
@@ -46,11 +48,11 @@ def run_federated_server(
             recalibrate_batchnorm(model, test_loader)
 
         metrics = evaluate(model, test_loader)
-        metric_keys = list(metrics.keys())
+
+        # --- Print metrics and check for termination ----
         ending_round = (rnd_i == cfg.rounds)
         label = 'Final' if ending_round else f'Start of Round {rnd_i:03d}'
         print(f"[Server] {label} - {format_metrics(metrics)}")
-
         if ending_round:
             print("[Server] Training complete.")
             break
@@ -83,17 +85,17 @@ def run_federated_server(
             dist.recv(delta_vec, src=client_rank + 1)
 
             # Receive worker eval metrics (train + test, dynamically sized)
-            num_metrics = len(metric_keys)
+            num_metrics = len(list(metrics.keys()))
             worker_metrics_vec = torch.zeros(num_metrics * 2, dtype=torch.float32)
             dist.recv(worker_metrics_vec, src=client_rank + 1)
 
-            # Simulate compression and reconstruct
-            # recon_delta_vec = delta_vec
+            # ***************** Simulate compression and reconstruct *****************
+            # recon_delta_vec = delta_vec 
             recon_delta_vec = simulate_compression(
                codec, delta_vec, rcvd_client_id, rnd_i,
                model_size=sd_manager.param_count,
                save_dir=cfg.records_dir, server_eval_metrics=metrics,
-               worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=metric_keys)
+               worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=list(metrics.keys()))
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))
 
