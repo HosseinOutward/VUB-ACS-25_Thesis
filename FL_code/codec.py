@@ -63,9 +63,11 @@ def make_serializable(item: Any) -> Any:
 
 def compress_data_list(data_list: Any) -> bytes:
     """Compress data using pickle and gzip."""
+    # Level 1: gzip here only estimates payload size on the server's critical path,
+    # and higher levels barely shrink float payloads while costing much more time.
     return gzip.compress(
         pickle.dumps(make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL),
-        compresslevel=6,
+        compresslevel=1,
     )
 
 
@@ -90,7 +92,7 @@ class HistoryEntry:
     round_id: int
     client_id: int
     access: Access
-    process: str
+    round_type: str | None
 
 
 class ReconstructionHistory:
@@ -124,7 +126,6 @@ class ReconstructionHistory:
     def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
         """Commit a reconstructed tensor to every ledger allowed to retain it."""
         assert reconst.dtype == torch.float16 and reconst.device == torch.device("cpu")
-        # assert record.round_type is not None
         if access is Access.NONE:
             return
 
@@ -133,7 +134,7 @@ class ReconstructionHistory:
             round_id=record.round_id,
             client_id=record.client_id,
             access=access,
-            process=None,
+            round_type=getattr(record, "round_type", None),
         )
         if self._keep_server:
             self._add_entry(self._server, entry)
@@ -184,7 +185,7 @@ class ReconstructionHistory:
 class CompressionRecord:
     """Record for compression metrics. Stores all attributes for CSV export."""
 
-    def __init__(self, round_id: int, client_id: int, method: str = "identity") -> None:
+    def __init__(self, round_id: int, client_id: int, method: str = "base") -> None:
         self.round_id: int = round_id
         self.client_id: int = client_id
 
@@ -205,12 +206,11 @@ class CompressionRecord:
         self.w_mean_of_vec: float | None = None
         self.wmape: float | None = None
         self.wmspe_sqrt: float | None = None
-        self._og_delta_vec: torch.Tensor | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert record attributes to a flat CSV-ready dictionary."""
         skipped_fields = {
-            "global_eval_metrics", "worker_eval_metrics", "_og_delta_vec"}
+            "global_eval_metrics", "worker_eval_metrics"}
         result = {
             key: value
             for key, value in vars(self).items()
@@ -265,16 +265,23 @@ class CompressionRecord:
 
 
 # --- Compression Codecs --- #
-class IdentityCodec:
+class BaseCodec:
+    """Base codec: raw float32 through the shared pickle+gzip transport.
+
+    Subclasses override `_compress`/`_decompress`; the reported sizes always
+    include the generic serialization, so this is a gzip baseline, not a
+    bit-exact identity rate.
+    """
+
     OPTION_ORDER: tuple[str, ...] = ()
 
-    def __init__(self, codec_name: str = "identity") -> None:
+    def __init__(self, codec_name: str = "base") -> None:
         self.codec_name = codec_name
 
     @staticmethod
     def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
-        """Validate identity codec name options."""
-        assert not option_tokens, f"identity codec does not accept options: {option_tokens!r}."
+        """Validate base codec name options."""
+        assert not option_tokens, f"base codec does not accept options: {option_tokens!r}."
 
     @classmethod
     def create_from_codec_name(
@@ -283,9 +290,9 @@ class IdentityCodec:
         protocol_name: str,
         option_tokens: Sequence[str],
         sd_manager: StateDictManager | None,
-    ) -> IdentityCodec:
-        """Create an identity codec from a validated codec name."""
-        assert protocol_name == "identity"
+    ) -> BaseCodec:
+        """Create a base codec from a validated codec name."""
+        assert protocol_name == "base"
         assert not option_tokens
         return cls(codec_name=codec_name)
 
@@ -306,31 +313,13 @@ class IdentityCodec:
         assert record.model_size is not None and record.model_size > 0, "CompressionRecord.model_size is bad."
         record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
 
-        record._og_delta_vec = delta_vec.clone()
-
         return payload
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        """Decode one transport payload and populate reconstruction metrics."""
+        """Decode one transport payload into a reconstructed delta vector."""
         payload_content = decompress_data_list(payload)
         res = self._decompress(payload_content, record)
         assert res.dtype == torch.float32 and res.device == torch.device('cpu')
-
-        delta_vec = record._og_delta_vec
-        assert delta_vec is not None, "CompressionRecord is missing original delta vector for metric calculation."
-        record._og_delta_vec = None
-
-        record.mse = torch.mean((res - delta_vec) ** 2).item()
-        record.mape = torch.mean(torch.abs(res - delta_vec) / (torch.abs(delta_vec) + 1e-8)).item() * 100
-        record.mspe_sqrt = torch.sqrt(torch.mean(
-            (res - delta_vec) ** 2 / (delta_vec ** 2 + 1e-8))).item() * 100
-
-        record.w_mean_of_vec = torch.abs(delta_vec).mean().item()
-        w = record.w_mean_of_vec
-        assert w != 0.0, "CompressionRecord weighted metrics require a non-zero mean absolute delta vector."
-        record.wmape = torch.mean(torch.abs(res - delta_vec)).item()/w * 100
-        record.wmspe_sqrt = float(np.sqrt(record.mse))/w * 100
-
         return res
 
     # Methods to be overridden by subclasses
@@ -344,8 +333,8 @@ class IdentityCodec:
         return payload_content
 
 
-class BasicCompressionCodec(IdentityCodec):
-    """Basic compression: float16 + gzip. Extends IdentityCodec."""
+class BasicCompressionCodec(BaseCodec):
+    """Basic compression: float16 + gzip. Extends BaseCodec."""
 
     @staticmethod
     def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
@@ -386,7 +375,7 @@ def parse_and_validate_codec_name(codec_name: str) -> tuple[str, tuple[str, ...]
     tokens = codec_name.split("|")
     assert all(token != "" for token in tokens), f"codec={codec_name!r} contains an empty protocol or option token."
     protocol_name, *option_tokens = tokens
-    protocol_name, option_tokens = protocol_name, tuple(option_tokens)
+    option_tokens = tuple(option_tokens)
 
     protocol_class = get_protocol_class(protocol_name)
     protocol_class.validate_codec_tokens(option_tokens)
@@ -394,10 +383,10 @@ def parse_and_validate_codec_name(codec_name: str) -> tuple[str, tuple[str, ...]
     return protocol_name, option_tokens
 
 
-def get_protocol_class(protocol_name: str) -> type[IdentityCodec]:
+def get_protocol_class(protocol_name: str) -> type[BaseCodec]:
     """Return the protocol class selected by a codec-name protocol token."""
-    if protocol_name == "identity":
-        return IdentityCodec
+    if protocol_name == "base":
+        return BaseCodec
     if protocol_name == "basic":
         return BasicCompressionCodec
     if protocol_name == "split":
@@ -409,15 +398,39 @@ def get_protocol_class(protocol_name: str) -> type[IdentityCodec]:
     assert False, f"Unknown codec protocol={protocol_name!r}."
 
 
-def create_codec(codec_name: str, sd_manager: StateDictManager | None) -> IdentityCodec:
+def create_codec(codec_name: str, sd_manager: StateDictManager | None) -> BaseCodec:
     """Create a codec from a protocol-owned, validated codec name."""
     protocol_name, option_tokens = parse_and_validate_codec_name(codec_name)
     protocol_class = get_protocol_class(protocol_name)
     return protocol_class.create_from_codec_name(codec_name, protocol_name, option_tokens, sd_manager)
 
 
+def record_reconstruction_metrics(
+    original: torch.Tensor,
+    reconstructed: torch.Tensor,
+    record: CompressionRecord,
+) -> None:
+    """Populate distortion metrics for one reconstructed delta."""
+    assert original.shape == reconstructed.shape, (
+        f"Reconstruction shape mismatch: got {tuple(reconstructed.shape)}, expected {tuple(original.shape)}."
+    )
+    error = reconstructed - original
+    record.mse = torch.mean(error ** 2).item()
+    record.mape = torch.mean(torch.abs(error) / (torch.abs(original) + 1e-8)).item() * 100
+    record.mspe_sqrt = torch.sqrt(torch.mean(error ** 2 / (original ** 2 + 1e-8))).item() * 100
+
+    record.w_mean_of_vec = torch.abs(original).mean().item()
+    if record.w_mean_of_vec == 0.0:
+        record.wmape = None
+        record.wmspe_sqrt = None
+        return
+
+    record.wmape = torch.mean(torch.abs(error)).item() / record.w_mean_of_vec * 100
+    record.wmspe_sqrt = float(np.sqrt(record.mse)) / record.w_mean_of_vec * 100
+
+
 def simulate_compression(
-    codec: IdentityCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
+    codec: BaseCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
     model_size: int, save_dir: Path,
     server_eval_metrics: dict[str, float], worker_eval_metrics: Sequence[float],
     metric_keys: list[str]) -> torch.Tensor:
@@ -444,6 +457,10 @@ def simulate_compression(
     
     # Decode (server-side)
     reconstructed = codec.decode(payload, record)
+    assert reconstructed.numel() == model_size, (
+        f"{codec.__class__.__name__} reconstructed {reconstructed.numel()} values; expected {model_size}."
+    )
+    record_reconstruction_metrics(delta_vec, reconstructed, record)
 
     record.append_record_to_csv(save_dir)
 

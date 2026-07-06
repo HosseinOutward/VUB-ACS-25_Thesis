@@ -6,6 +6,7 @@ import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
+from FL_code.run_fl import FLConfig
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -18,6 +19,10 @@ from FL_code.dataset import create_dataloader
 
 if TYPE_CHECKING:
     from FL_code.run_fl import FLConfig
+
+# Canonical key order for evaluate() results. Client and server exchange worker
+# metrics as a flat tensor, so both sides must agree on this exact order.
+EVAL_METRIC_KEYS: tuple[str, ...] = ("loss", "acc", "f1", "auc")
 
 
 
@@ -95,10 +100,6 @@ def setup_fl_worker(
             raise ValueError(f"{role}: X_train and y_train must be provided together.")
         if client_id is None or num_clients is None:
             raise ValueError(f"{role}: training tensors require client_id and num_clients.")
-        assert X_train is not None
-        assert y_train is not None
-        assert client_id is not None
-        assert num_clients is not None
         train_loader = create_dataloader(
             X_train, y_train, cfg, device, is_train=True,
             client_id=client_id, num_clients=num_clients
@@ -129,7 +130,7 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batche
         x: torch.Tensor
         if i >= max_batches:
             break
-        x = x.to(model.device)
+        x = x.to(model.device, non_blocking=True)
         if x.ndim == 4 and model.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
         model(x)
@@ -148,11 +149,10 @@ def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
 
     with torch.inference_mode():
         for x, y in loader:
-            x = x.to(model.device)
-            y = y.to(model.device)
+            x = x.to(model.device, non_blocking=True)
+            y = y.to(model.device, non_blocking=True)
 
-            use_channels_last = next(model.parameters()).is_contiguous(memory_format=torch.channels_last)
-            if use_channels_last:
+            if x.ndim == 4 and model.cfg.channels_last:
                 x = x.contiguous(memory_format=torch.channels_last)
 
             logits = model(x)
@@ -187,12 +187,17 @@ def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
     else:
         auc = roc_auc_score(y_true, y_probs, multi_class='ovr', average='macro')
 
-    return {
+    metrics = {
         "loss": avg_loss,
         "acc": accuracy,
         "f1": f1,
         "auc": auc
     }
+    assert tuple(metrics) == EVAL_METRIC_KEYS, (
+        f"evaluate() metric keys {tuple(metrics)} diverged from EVAL_METRIC_KEYS {EVAL_METRIC_KEYS}; "
+        "client/server exchange worker metrics positionally and would silently mislabel them."
+    )
+    return metrics
 
 
 class StateDictManager:
@@ -210,14 +215,25 @@ class StateDictManager:
 
         self.param_count = sum(self.numels)
 
+        # State entries the workers never train via backprop: BatchNorm buffers
+        # (running_mean, running_var, num_batches_tracked) plus any frozen params.
+        # These are never transmitted in either direction; each node recomputes
+        # them from its own local data (BN recalibration). Kept explicit here,
+        # unused for now, until their handling is decided.
+        tracked = set(self.keys)
+        self.non_backprop_state_keys: list[str] = [key for key in model.state_dict() if key not in tracked]
+
     def flatten(self, state_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         flat_list = []
         for key in self.keys:
             param = state_dict[key]
             flat_list.append(param.cpu().detach().reshape(-1))
-        return torch.cat(flat_list, out=None)
+        return torch.cat(flat_list)
 
     def unflatten(self, flat_vector: torch.Tensor) -> OrderedDict[str, torch.Tensor]:
+        assert flat_vector.numel() == self.param_count, (
+            f"Flat trainable vector has {flat_vector.numel()} values; expected {self.param_count}."
+        )
         state_dict: OrderedDict[str, torch.Tensor] = OrderedDict()
         offset = 0
 
@@ -234,6 +250,7 @@ class StateDictManager:
         trainable_state: dict[str, torch.Tensor]
     ) -> None:
         """Load exactly the trainable parameters tracked by this manager."""
+        parameters = dict(model.named_parameters())
         expected_keys = set(self.keys)
         received_keys = set(trainable_state.keys())
         if received_keys != expected_keys:
@@ -241,7 +258,15 @@ class StateDictManager:
             extra = sorted(received_keys - expected_keys)
             raise KeyError(f"Trainable state keys mismatch. Missing={missing}, extra={extra}.")
 
-        model.load_state_dict(trainable_state, strict=True)
+        with torch.no_grad():
+            for key in self.keys:
+                target = parameters[key]
+                value = trainable_state[key]
+                assert value.shape == target.shape, (
+                    f"Trainable state shape mismatch for {key}: "
+                    f"got {tuple(value.shape)}, expected {tuple(target.shape)}."
+                )
+                target.copy_(value.to(device=target.device, dtype=target.dtype))
 
     def get_slices(self) -> list[slice]:
         slices = []
@@ -263,11 +288,19 @@ class StateDictManager:
 
     def apply_delta_inplace(
         self,
-        state_dict: dict[str, torch.Tensor],
+        model: nn.Module,
         delta: dict[str, torch.Tensor]
     ) -> None:
-        for key in self.keys:
-            state_dict[key].add_(delta[key].to(state_dict[key].device))
+        parameters = dict(model.named_parameters())
+        with torch.no_grad():
+            for key in self.keys:
+                target = parameters[key]
+                value = delta[key]
+                assert value.shape == target.shape, (
+                    f"Delta shape mismatch for {key}: "
+                    f"got {tuple(value.shape)}, expected {tuple(target.shape)}."
+                )
+                target.add_(value.to(device=target.device, dtype=target.dtype))
 
 
 def _prepare_records_dir(cfg: FLConfig) -> None:
@@ -302,11 +335,15 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
         saved_config = json.load(f)
 
     current_config = cfg.model_dump(mode="json")
+    # Fields that cannot affect the saved training data, so replays may differ in them.
     _DEBUG_CONFIG_IGNORED_FIELDS = frozenset({
         "codec",
         "run_name",
         "records_dir",
         "master_port",
+        "master_addr",
+        "num_loader_workers",
+        "training_progress_bar",
         "debug_save_train_data",
         "debug_load_from_saved_data",
     })
@@ -330,3 +367,22 @@ def _format_config_mismatch(saved_config: dict[str, Any], current_config: dict[s
         f"{field}: saved={saved_config.get(field)!r}, current={current_config.get(field)!r}"
         for field in differing_fields
     )
+
+
+def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Tensor, cfg: FLConfig) -> None:
+    """Assert every evaluated split has all classes required by AUC metrics."""
+    assert cfg.num_classes is not None, "cfg.num_classes must be set before class-coverage validation."
+    expected_classes = set(range(cfg.num_classes))
+    test_classes = set(torch.unique(y_test).tolist())
+    assert test_classes == expected_classes, (
+        f"Test split classes do not match model classes: got {sorted(test_classes)}, "
+        f"expected {sorted(expected_classes)}."
+    )
+
+    perm = torch.randperm(len(y_train), generator=torch.Generator().manual_seed(cfg.seed))
+    for client_id in range(cfg.num_clients):
+        client_classes = set(torch.unique(y_train[perm[client_id::cfg.num_clients]]).tolist())
+        assert client_classes == expected_classes, (
+            f"Client {client_id} train split classes do not match model classes: "
+            f"got {sorted(client_classes)}, expected {sorted(expected_classes)}."
+        )

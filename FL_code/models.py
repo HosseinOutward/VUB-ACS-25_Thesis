@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-import math
 import torch
 from torch import optim as optim, nn as nn
 from torch.utils.data import DataLoader
@@ -36,17 +35,9 @@ class FLModelTemplate(nn.Module, ABC):
 
         for batch in dataloader:
             optimizer.zero_grad()
-
-            loss = None
             with torch.amp.autocast("cuda", enabled=self.cfg.mixed_precision):
-                for i in range(self.cfg.single_batch_accum_grad_steps):
-                    mini_batch_size = math.ceil(self.cfg.batch_size / self.cfg.single_batch_accum_grad_steps)
-                    part_of_batch = tuple(b[i*mini_batch_size:(i+1)*mini_batch_size] for b in batch)
-                    pob_loss = self.training_step(part_of_batch)
-                    loss = loss + pob_loss if loss is not None else pob_loss
-
+                loss = self.training_step(batch)
             scaler.scale(loss).backward()
-
             scaler.step(optimizer)
             scaler.update()
 
@@ -71,7 +62,8 @@ class ResNetFLModel(FLModelTemplate):
         )
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        x, y = batch[0].to(self.device), batch[1].to(self.device)
+        x = batch[0].to(self.device, non_blocking=True)
+        y = batch[1].to(self.device, non_blocking=True)
         if self.cfg.channels_last:
             x = x.contiguous(memory_format=torch.channels_last)
 
@@ -110,11 +102,7 @@ def initialize_model(cfg: FLConfig, device: torch.device) -> FLModelTemplate:
                     if param.ndim == 4:
                         param.data = param.data.contiguous(memory_format=torch.channels_last)
 
-        if cfg.tf32:
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-
-        if cfg.cudnn_benchmark:
-            torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     return model

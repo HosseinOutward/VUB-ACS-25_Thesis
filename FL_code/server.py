@@ -29,7 +29,7 @@ def run_federated_server(
 
     if cfg.debug_save_train_data:
         delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas / f'_initial_model.pt'
-        delta_data_path.parent.mkdir(parents=True)
+        delta_data_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), delta_data_path)
     if cfg.debug_load_from_saved_data:
         delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas / f'_initial_model.pt'
@@ -45,7 +45,7 @@ def run_federated_server(
     for rnd_i in range(cfg.rounds + 1):
         # ---- Recalibrate then evaluate global model ----
         if cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, test_loader)
+            recalibrate_batchnorm(model, test_loader, cfg.bn_recalib_batches)
 
         metrics = evaluate(model, test_loader)
 
@@ -117,4 +117,4 @@ def _aggregate_and_update(model, grads_list, sample_counts, sd_manager: StateDic
         for grad_dict, weight in zip(grads_list[1:], weights[1:]):
             aggregated_delta[key].add_(grad_dict[key], alpha=weight)
 
-    sd_manager.apply_delta_inplace(model.state_dict(), aggregated_delta)
+    sd_manager.apply_delta_inplace(model, aggregated_delta)

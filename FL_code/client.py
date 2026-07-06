@@ -4,7 +4,8 @@ import torch
 import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
-from FL_code.utils import set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics
+from FL_code.utils import (
+    EVAL_METRIC_KEYS, set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics)
 
 
 def run_federated_client(
@@ -29,13 +30,15 @@ def run_federated_client(
     optimizer = model.configure_optimizer()
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.mixed_precision)
 
+    # Reused receive buffers; dist.broadcast overwrites them in place each round.
+    round_signal = torch.zeros(1, dtype=torch.long)
+    vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
+
     curr_rnd_i = 0
     while True:
         # ---- Receive updated global model from server ----
-        # Get current round number
-        srvr_rnd = torch.zeros(1, dtype=torch.long)
-        dist.broadcast(srvr_rnd, src=0)
-        srvr_rnd = srvr_rnd.item()
+        dist.broadcast(round_signal, src=0)
+        srvr_rnd = round_signal.item()
 
         # Check if training is complete
         if srvr_rnd == -1:
@@ -43,20 +46,15 @@ def run_federated_client(
             print(f"[Client {client_id}] Training complete. Shutting down.")
             break
 
+        assert srvr_rnd == curr_rnd_i, f"Round mismatch: expected {curr_rnd_i}, got {srvr_rnd}"
         print(f"[Client {client_id}] Starting round {curr_rnd_i}")
 
         # Get model state dict
-        vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
         dist.broadcast(vec_srvr_sd, src=0)
         sd_manager.load_trainable_state(model, sd_manager.unflatten(vec_srvr_sd))
 
         # Reset optimizer state after loading new parameters from server (optional)
         # optimizer.state = defaultdict(dict)
-
-        if cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
-
-        assert srvr_rnd == curr_rnd_i, f"Round mismatch: expected {curr_rnd_i}, got {srvr_rnd}"
 
         # ---- Train the local model ----
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
@@ -78,19 +76,24 @@ def run_federated_client(
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 
-        # ---- Evaluate local model post-training ----
-        train_metrics = evaluate(model, train_loader)
-        test_metrics = evaluate(model, test_loader)
-        print(f"[Client {client_id}] Post-training - {format_metrics(test_metrics, 'Test')} "
-              f"| {format_metrics(train_metrics, 'Train')}")
+        # ---- Evaluate local model post-training (skipped rounds report NaN) ----
+        run_local_eval = (curr_rnd_i % cfg.client_eval_every_n_rounds == 0) or (curr_rnd_i == cfg.rounds - 1)
+        if run_local_eval:
+            train_metrics = evaluate(model, train_loader)
+            test_metrics = evaluate(model, test_loader)
+            print(f"[Client {client_id}] Post-training - {format_metrics(test_metrics, 'Test')} "
+                  f"| {format_metrics(train_metrics, 'Train')}")
+        else:
+            train_metrics = dict.fromkeys(EVAL_METRIC_KEYS, float("nan"))
+            test_metrics = dict.fromkeys(EVAL_METRIC_KEYS, float("nan"))
 
         # ---- Send model delta to server ----
         delta = sd_manager.compute_delta(post_train_state, pre_train_state)
         delta_vec = sd_manager.flatten(delta).cpu().contiguous()
 
         # Flatten worker eval metrics (train first, then test)
-        metric_keys = list(train_metrics.keys())
-        worker_metrics_list = [train_metrics[k] for k in metric_keys] + [test_metrics[k] for k in metric_keys]
+        worker_metrics_list = [train_metrics[k] for k in EVAL_METRIC_KEYS] + \
+                              [test_metrics[k] for k in EVAL_METRIC_KEYS]
         worker_metrics_vec = torch.tensor(worker_metrics_list, dtype=torch.float32)
 
         dist.send(torch.tensor([client_id, curr_rnd_i], dtype=torch.long), dst=0)
