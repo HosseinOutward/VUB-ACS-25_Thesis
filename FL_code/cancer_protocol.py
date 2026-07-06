@@ -59,7 +59,7 @@ from FL_code.codec import (
     Access,
     CompressionRecord,
     HistoryEntry,
-    IdentityCodec,
+    BaseCodec,
     ReconstructionHistory,
     get_obj_compressed_size,
 )
@@ -174,7 +174,7 @@ class CancerRecord(CompressionRecord):
 # ============================================================================
 # Cancer Codec Implementation
 # ============================================================================
-class CancerCodec(IdentityCodec):
+class CancerCodec(BaseCodec):
     """Cancer protocol codec coordinating WZ quantizers and side-information histories."""
 
     def __init__(
@@ -235,7 +235,7 @@ class CancerCodec(IdentityCodec):
         protocol_name: str,
         option_tokens: Sequence[str],
         sd_manager: StateDictManager | None,
-    ) -> IdentityCodec:
+    ) -> BaseCodec:
         """Create a Cancer protocol codec variant from a validated codec name."""
         assert protocol_name == "cancer"
 

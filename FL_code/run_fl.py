@@ -5,7 +5,8 @@ import os
 from datetime import timedelta
 from typing import Any
 
-from FL_code.utils import _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
+from FL_code.dataset import _force_class_coverage
+from FL_code.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -32,22 +33,22 @@ class FLConfig(BaseModel):
     num_clients: int = 5
     num_loader_workers: int = 3
     data_folder: Path = Path("data")
-    rounds: int = 50
+    rounds: int = 60
     local_epochs: int = 5
     batch_size: int = 500
-    single_batch_accum_grad_steps: int = 1 # chop down the above batch into smaller pieces and combine grads.
     lr: float = 1e-3
     weight_decay: float = 1e-4
     seed: int = 43
 
     recalibrate_bn: bool = True
     bn_recalib_batches: int = 100
+    # Clients evaluate their local train/test metrics only on rounds divisible by
+    # this interval (and always on the final round); skipped rounds record NaN.
+    client_eval_every_n_rounds: int = 1
 
     # Memory and performance optimizations
     channels_last: bool = True
-    cudnn_benchmark: bool = True
     fused_optimizer: bool = True
-    tf32: bool = True  # TF32 on Ampere+ GPUs
     mixed_precision: bool = True  # AMP
 
     training_progress_bar: bool = False
@@ -89,6 +90,7 @@ class FLConfig(BaseModel):
             "change behavior when saved debug files are missing.")
         assert self.dataset_fraction is None or 0.0 < self.dataset_fraction < 1.0, (
             "dataset_fraction must be None or a value in (0.0, 1.0).")
+        assert self.client_eval_every_n_rounds > 0, "client_eval_every_n_rounds must be positive."
         return self
 
 
@@ -105,11 +107,13 @@ def _worker(
     import sys
     import traceback as tb
 
-    # Set up process group
-    dist.init_process_group(backend="nccl", init_method='env://',
-            timeout=timedelta(minutes=75), world_size=world_size, rank=rank)
-
     role = "Server" if rank == 0 else f"Client {rank - 1}"
+    if cfg.debug_mode:
+        assert cfg.num_clients == 3 and cfg.local_epochs == 1 and cfg.dataset_fraction is not None
+
+    # Set up process group
+    dist.init_process_group(backend="gloo", init_method='env://',
+            timeout=timedelta(minutes=75), world_size=world_size, rank=rank)
 
     try:
         if rank == 0:
@@ -174,14 +178,22 @@ if __name__ == "__main__":
 
     from FL_code.dataset import precompute_dataset_to_shared
     X_train, y_train = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,
-                                                    "train", torch.float32, cfg.dataset_fraction)
+                                                    "train", torch.float32, cfg.dataset_fraction, cfg.seed)
     X_test, y_test = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,
-                                                  "test", torch.float32, cfg.dataset_fraction)
+                                                  "test", torch.float32, cfg.dataset_fraction, cfg.seed)
 
-    cfg.num_classes = torch.unique(y_train).numel()
+    # Union of both splits so a fraction dropping a class from one split is still detected.
+    cfg.num_classes = int(torch.cat([y_train, y_test]).unique().numel())
+    if cfg.dataset_fraction is not None:
+        _force_class_coverage(y_train, y_test, cfg)
+    _assert_class_coverage_before_spawn(y_train, y_test, cfg)
 
     debug_delta_dir = cfg.debug_data_folder / cfg.debug_save_deltas
     if cfg.debug_save_train_data:
+        assert not debug_delta_dir.exists() or not any(debug_delta_dir.iterdir()), (
+            f"debug_save_train_data refuses to write into non-empty {debug_delta_dir}; "
+            f"remove stale saved deltas first."
+        )
         write_fl_config_snapshot(cfg, debug_delta_dir)
     if cfg.debug_load_from_saved_data:
         assert_debug_fl_config_matches(cfg, debug_delta_dir)

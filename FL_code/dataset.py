@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from FL_code.run_fl import FLConfig
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import SVHN, CIFAR10
@@ -42,7 +43,8 @@ def precompute_dataset_to_shared(
     data_folder: Path,
     split: str,
     dtype: torch.dtype = torch.float32,
-    fraction: float | None = None
+    fraction: float | None = None,
+    seed: int | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Precompute dataset preprocessing and store in shared memory."""
     dataset_name = dataset_name.upper()
@@ -63,18 +65,24 @@ def precompute_dataset_to_shared(
         X = torch.from_numpy(ds.data).float().permute(0, 3, 1, 2).div_(255.0)
         y = torch.tensor(ds.targets, dtype=torch.long)
 
-    # Shuffle and apply fraction for training
-    if is_train:
-        perm = torch.randperm(len(y))
+    # Train is always shuffled; test only needs shuffling when a fraction is
+    # taken, so the subset is not biased by the original file order.
+    if is_train or fraction is not None:
+        generator = torch.Generator()
+        if seed is not None:
+            generator.manual_seed(seed)
+        perm = torch.randperm(len(y), generator=generator)
         X, y = X[perm], y[perm]
         if fraction is not None:
+            # Clone so share_memory_ ships only the subset, not the full-size storage
+            # the [:n] view would otherwise keep alive.
             n = int(len(y) * fraction)
-            X, y = X[:n], y[:n]
+            X, y = X[:n].clone(), y[:n].clone()
 
-    # Normalize
+    # Normalize in place to avoid transient full-size copies of the dataset
     mean = torch.tensor(cfg['mean']).view(1, 3, 1, 1)
     std = torch.tensor(cfg['std']).view(1, 3, 1, 1)
-    X = ((X - mean) / std).to(dtype)
+    X = X.sub_(mean).div_(std).to(dtype)
 
     X.share_memory_()
     y.share_memory_()
@@ -115,3 +123,35 @@ def create_dataloader(
             pin_memory=(device.type == "cuda"),
             num_workers=0
         )
+
+
+def _force_class_coverage(y_train: torch.Tensor, y_test: torch.Tensor, cfg: FLConfig) -> None:
+    """Brute-force label flips so fractioned debug splits still cover every class.
+
+    Subsetting via dataset_fraction can drop classes from the test split or from a
+    client's train partition, which breaks the AUC metrics downstream. This flips a
+    few labels of the most frequent class to the missing ones — deliberately wrong
+    labels, acceptable only for fraction-reduced debug runs.
+    """
+    assert cfg.num_classes is not None
+    expected_classes = set(range(cfg.num_classes))
+
+    def flip_missing(y: torch.Tensor, positions: torch.Tensor, split_name: str) -> None:
+        labels = y[positions]
+        missing = sorted(expected_classes - set(torch.unique(labels).tolist()))
+        if not missing:
+            return
+        donor_class = int(torch.bincount(labels, minlength=cfg.num_classes).argmax())
+        donor_positions = positions[labels == donor_class]
+        assert len(donor_positions) > len(missing), (
+            f"Cannot repair class coverage for {split_name}: {len(donor_positions)} samples of "
+            f"donor class {donor_class} cannot cover {len(missing)} missing classes."
+        )
+        for donor_pos, missing_class in zip(donor_positions.tolist(), missing):
+            y[donor_pos] = missing_class
+        print(f"[Debug] Flipped {len(missing)} label(s) in {split_name} to cover missing classes {missing}.")
+
+    flip_missing(y_test, torch.arange(len(y_test)), "test split")
+    perm = torch.randperm(len(y_train), generator=torch.Generator().manual_seed(cfg.seed))
+    for client_id in range(cfg.num_clients):
+        flip_missing(y_train, perm[client_id::cfg.num_clients], f"client {client_id} train partition")

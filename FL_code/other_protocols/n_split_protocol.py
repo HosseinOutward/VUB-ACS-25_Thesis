@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from FL_code.cancer_protocol import CancerConfig
-from FL_code.codec import CompressionRecord, IdentityCodec
+from FL_code.codec import CompressionRecord, BaseCodec
 from FL_code.prior_calculator import PriorCalculator
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ class NSplitRecord(CompressionRecord):
         return result
 
 
-class NSplitCodec(IdentityCodec):
+class NSplitCodec(BaseCodec):
     """Baseline codec that quantizes values by percentile split points."""
 
     OPTION_ORDER: tuple[str, ...] = ("points",)
