@@ -49,13 +49,20 @@ import gc
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 from pydantic import BaseModel, ConfigDict
 
 from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.codec import CompressionRecord, IdentityCodec, get_obj_compressed_size
+from FL_code.codec import (
+    Access,
+    CompressionRecord,
+    HistoryEntry,
+    IdentityCodec,
+    ReconstructionHistory,
+    get_obj_compressed_size,
+)
 from FL_code.prior_calculator import PriorCalculator
 
 if TYPE_CHECKING:
@@ -133,16 +140,6 @@ def _parse_outlier_threshold(token: str) -> float:
     return threshold
 
 
-class SideInformationTensor(BaseModel):
-    """A side-information tensor with explicit ownership and data-flow metadata."""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    tensor: torch.Tensor
-    owner: Literal["server", "client"]
-    round_id: int
-    client_id: int
-
-
 class CancerRecord(CompressionRecord):
     """Compression record for one Cancer protocol client-round."""
 
@@ -205,9 +202,8 @@ class CancerCodec(IdentityCodec):
 
         self.quantizer_kwargs = quantizer_kwargs
 
-        # Per-client reconstruction histories
-        self.srvr_past_reconst: list[list[SideInformationTensor]] = []
-        self.client_past_reconst: list[list[SideInformationTensor]] = []
+        self.reconstruction_history = ReconstructionHistory(self.c_cfg.max_side_info_count)
+        self._history_warmup_finished: bool = False
 
         # Frozen state for frozen phase
         self.frozen_quantizers: list[WZQuantizerCancer | None] = []
@@ -293,9 +289,7 @@ class CancerCodec(IdentityCodec):
         assert False, f"Unknown Cancer codec variant: {variant!r}."
 
     def _ensure_client_state(self, client_id: int) -> None:
-        while len(self.srvr_past_reconst) <= client_id:
-            self.srvr_past_reconst.append([])
-            self.client_past_reconst.append([])
+        while len(self.frozen_quantizers) <= client_id:
             self.frozen_quantizers.append(None)
 
     @staticmethod
@@ -314,10 +308,28 @@ class CancerCodec(IdentityCodec):
             return round_type[0], force_marginal_loss, include_training_si_in_prior
         return round_type, force_marginal_loss, include_training_si_in_prior
 
+    def _reconstruction_access(self, record: CancerRecord) -> Access:
+        """Return the visibility of the reconstruction produced by this round."""
+        assert record.round_type is not None
+        round_type = self._base_round_type(record.round_type)[0]
+        if round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
+            return Access.SHARED
+        if round_type in {"R", "F"}:
+            return Access.SERVER
+        return Access.NONE
+
     def create_record(self, round_id: int, client_id: int) -> CancerRecord:
         cfg = self.c_cfg
         self._ensure_client_state(client_id)
         is_warmup = round_id < len(cfg.warmup_phase)
+        if not is_warmup and not self._history_warmup_finished:
+            _history_access = lambda round_type_s: {
+                    "P": Access.SERVER, "R": Access.SERVER, "T": Access.SHARED
+                }.get(self._base_round_type(round_type_s)[0], Access.NONE)
+            self.reconstruction_history.finish_warmup(
+                [_history_access(round_type) for round_type, _, _ in cfg.routine_phase])
+            self._history_warmup_finished = True
+
         temp = (round_id - len(cfg.warmup_phase)) % len(cfg.routine_phase)
         round_type, round_bpp, round_np = cfg.warmup_phase[round_id] if is_warmup else cfg.routine_phase[temp]
         phase = "warmup" if is_warmup else "routine"
@@ -336,28 +348,29 @@ class CancerCodec(IdentityCodec):
         round_type, force_marginal_loss, include_training_si_in_prior = self._base_round_type(record.round_type)
         self._ensure_client_state(client_idx)
 
-        training_recons: tuple[SideInformationTensor, ...] = ()
-        prior_recons: tuple[SideInformationTensor, ...] = ()
+        training_recons: tuple[HistoryEntry, ...] = ()
+        prior_recons: tuple[HistoryEntry, ...] = ()
         target: torch.Tensor | None = None
 
         if round_type == "P":
-            prior_recons = tuple(recon for history in self.srvr_past_reconst for recon in history)
+            prior_recons = self.reconstruction_history.view(Access.SERVER, record)
         elif round_type == "R":
-            target_recon = self.srvr_past_reconst[client_idx][-1]
+            target_recon = self.reconstruction_history.latest_for_client(Access.SERVER, record)
+            server_recons = self.reconstruction_history.view(Access.SERVER, record)
             training_recons = tuple(
                 recon
-                for cid, history in enumerate(self.srvr_past_reconst)
-                for recon in (history[:-1] if cid == client_idx else history)
+                for recon in server_recons
+                if recon is not target_recon
             )
             prior_recons = (target_recon,)
             target = target_recon.tensor
-            client_count = len(self.srvr_past_reconst)
+            client_count = max((entry.client_id for entry in server_recons), default=-1) + 1
             assert len(training_recons) == min(
                 record.round_id * client_count + client_idx - 1,
                 self.c_cfg.max_side_info_count * client_count - 1
             ), "Retrain side-information count does not match protocol schedule."
         elif round_type == "T":
-            training_recons = tuple(self.client_past_reconst[client_idx])
+            training_recons = self.reconstruction_history.view(Access.SHARED, record)
             prior_recons = training_recons
             target = delta_vec
         else:
@@ -427,7 +440,8 @@ class CancerCodec(IdentityCodec):
 
         # Include model states for tracking overhead size
         assert record.round_type is not None
-        if record.round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
+        round_type = self._base_round_type(record.round_type)[0]
+        if round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
             # if it's a T round, clients sending the decoder state as well
             # for P rounds, decoder is sent to clients so they have reconstruction of non-side-info case
             payload['decoder_state'] = quantizer.coding_model.decoder.state_dict()
@@ -446,34 +460,13 @@ class CancerCodec(IdentityCodec):
         quantizer = self.frozen_quantizers[client_idx]
         assert quantizer is not None, f"Missing quantizer for client {client_idx}."
         reconst = quantizer.decoding_process(payload["payload_content"])
-
-        self._update_history(
-            self.srvr_past_reconst[client_idx], reconst, owner="server",
-            round_id=record.round_id, client_id=client_idx
+        self.reconstruction_history.commit(
+            reconst.detach().to(device="cpu", dtype=torch.float16),
+            record,
+            self._reconstruction_access(record),
         )
 
-        assert record.round_type is not None
-        if record.round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
-            self._update_history(
-                self.client_past_reconst[client_idx], reconst, owner="client",
-                round_id=record.round_id, client_id=client_idx
-            )
-
         return reconst
-
-    def _update_history(
-        self,
-        history: list[SideInformationTensor],
-        item: torch.Tensor,
-        owner: Literal["server", "client"],
-        round_id: int,
-        client_id: int
-    ) -> None:
-        history.append(SideInformationTensor(
-            tensor=item.to(torch.float16), owner=owner, round_id=round_id, client_id=client_id
-        ))
-        if len(history) > self.c_cfg.max_side_info_count:
-            history.pop(0)
 
 
 if __name__ == "__main__":

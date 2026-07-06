@@ -15,7 +15,7 @@ import itertools
 
 
 from FL_code.codec import create_codec
-from FL_code.cancer_protocol import CancerCodec
+from FL_code.cancer_protocol import Access, CancerCodec, CancerRecord
 
 # import pydevd_pycharm
 # pydevd_pycharm.settrace('ETROFLOCK', port=32112,
@@ -156,12 +156,16 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     temp = signal + torch.randn(DATA_SIZE) * np.sqrt(NOISE_POWER)
     possible_si = [side_info.clone().to(torch.float16), temp]
     if config.model_type in ['T', 'TM']:
-        codec.client_past_reconst[0] = [possible_si[0]]
+        seed_record = CancerRecord(-1, 0, config.codec_name, phase="seed", round_type="T")
+        codec.reconstruction_history.seed(possible_si[0], seed_record, Access.SHARED)
     elif config.model_type in ['R', 'RM']:
-        codec.srvr_past_reconst[0] = possible_si
+        for seed_round, seed_tensor in enumerate(possible_si):
+            seed_record = CancerRecord(seed_round, 0, config.codec_name, phase="seed", round_type="R")
+            codec.reconstruction_history.seed(seed_tensor, seed_record, Access.SERVER)
         record.round_id = 2
     elif config.model_type == 'M':
-        codec.srvr_past_reconst[0] = [possible_si[0]]
+        seed_record = CancerRecord(-1, 0, config.codec_name, phase="seed", round_type="P")
+        codec.reconstruction_history.seed(possible_si[0], seed_record, Access.SERVER)
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")
 
