@@ -1,11 +1,13 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from FL_code.run_fl import FLConfig
 import torch
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.datasets import SVHN, CIFAR10
+
+if TYPE_CHECKING:
+    from FL_code.run_fl import FLConfig
 
 
 class SharedTensorDataset(Dataset):
@@ -35,6 +37,10 @@ DATASET_CONFIG = {
         'mean': [0.4914, 0.4822, 0.4465],
         'std': [0.2470, 0.2435, 0.2616],
     },
+    'SYNTHETIC': {
+        'mean': [0.0, 0.0, 0.0],
+        'std': [1.0, 1.0, 1.0],
+    },
 }
 
 
@@ -56,7 +62,12 @@ def precompute_dataset_to_shared(
     data_path = Path(data_folder)
 
     # Load dataset
-    if dataset_name == 'SVHN':
+    if dataset_name == 'SYNTHETIC':
+        sample_count = 2_000 if is_train else 800
+        generator = torch.Generator().manual_seed((seed or 0) + (0 if is_train else 1))
+        X = torch.randn(sample_count, 3, 32, 32, generator=generator)
+        y = torch.arange(sample_count, dtype=torch.long) % 10
+    elif dataset_name == 'SVHN':
         ds = SVHN(root=data_path / "SVHN", split=split, download=False)
         X = torch.from_numpy(ds.data).float().div_(255.0)
         y = torch.tensor(ds.labels, dtype=torch.long)

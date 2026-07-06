@@ -25,7 +25,7 @@ class FLConfig(BaseModel):
     run_name: str | None = None
 
     model_name: str = "resnet18"  # resnet18, resnet50, resnet56
-    dataset_name: str = "SVHN"    # SVHN, CIFAR10
+    dataset_name: str = "SVHN"    # SVHN, CIFAR10, SYNTHETIC
     num_classes: int | None = None
 
     debug_mode: bool = False
@@ -148,9 +148,20 @@ if __name__ == "__main__":
     ap.add_argument("--model", type=str, default=FLConfig.model_fields["model_name"].default,
                     choices=['resnet18', 'resnet50', 'resnet56'])
     ap.add_argument("--dataset", type=str, default=FLConfig.model_fields["dataset_name"].default,
-                    choices=['SVHN', 'CIFAR10'])
+                    choices=['SVHN', 'CIFAR10', 'SYNTHETIC'])
     ap.add_argument("--master-port", type=str, default=FLConfig.model_fields["master_port"].default)
     ap.add_argument("--debug-mode", "--debug_mode", action="store_true", default=False)
+    ap.add_argument("--rounds", type=int, default=FLConfig.model_fields["rounds"].default)
+    ap.add_argument("--num-clients", type=int, default=FLConfig.model_fields["num_clients"].default)
+    ap.add_argument("--local-epochs", type=int, default=FLConfig.model_fields["local_epochs"].default)
+    ap.add_argument("--batch-size", type=int, default=FLConfig.model_fields["batch_size"].default)
+    ap.add_argument("--dataset-fraction", type=float, default=FLConfig.model_fields["dataset_fraction"].default)
+    ap.add_argument("--records-dir", type=Path, default=FLConfig.model_fields["records_dir"].default)
+    ap.add_argument("--data-folder", type=Path, default=FLConfig.model_fields["data_folder"].default)
+    ap.add_argument("--debug-save-train-data", action="store_true", default=False)
+    ap.add_argument("--debug-load-from-saved-data", action="store_true", default=False)
+    ap.add_argument("--debug-data-folder", type=Path, default=FLConfig.model_fields["debug_data_folder"].default)
+    ap.add_argument("--debug-save-deltas", type=str, default=FLConfig.model_fields["debug_save_deltas"].default)
     args = ap.parse_args()
 
     cfg = FLConfig(
@@ -160,6 +171,17 @@ if __name__ == "__main__":
         dataset_name=args.dataset,
         master_port=args.master_port,
         debug_mode=args.debug_mode,
+        rounds=args.rounds,
+        num_clients=args.num_clients,
+        local_epochs=args.local_epochs,
+        batch_size=args.batch_size,
+        dataset_fraction=args.dataset_fraction,
+        records_dir=args.records_dir,
+        data_folder=args.data_folder,
+        debug_save_train_data=args.debug_save_train_data,
+        debug_load_from_saved_data=args.debug_load_from_saved_data,
+        debug_data_folder=args.debug_data_folder,
+        debug_save_deltas=args.debug_save_deltas,
     )
 
     if cfg.debug_mode:
