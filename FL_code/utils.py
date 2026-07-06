@@ -6,7 +6,6 @@ import sys
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
-from FL_code.run_fl import FLConfig
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
