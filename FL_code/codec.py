@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 import csv
 import pickle
 import gzip
+import tempfile
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 import numpy as np
@@ -15,16 +18,16 @@ if TYPE_CHECKING:
     from FL_code.utils import StateDictManager
 
 
-def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
-    """Return the serialized storage size estimate for tensors and payload objects."""
+def _get_obj_storage_size(obj: Any) -> int:
+    """Return the in-memory payload size for tensor-like compression objects."""
     if isinstance(obj, torch.Tensor):
         return obj.element_size() * obj.nelement()
     if isinstance(obj, np.ndarray):
         return obj.nbytes
     if isinstance(obj, (list, tuple)):
-        return sum(get_obj_compressed_size(x, with_compression=False) for x in obj)
-    if isinstance(obj, dict):
-        return sum(get_obj_compressed_size(v, with_compression=False) for v in obj.values())
+        return sum(_get_obj_storage_size(x) for x in obj)
+    if isinstance(obj, Mapping):
+        return sum(_get_obj_storage_size(v) for v in obj.values())
     if hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
         return len(obj) * (obj._dtype.bitwidth // 8)
     if isinstance(obj, bytes):
@@ -34,44 +37,147 @@ def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
     raise TypeError(f"Unsupported object type: {type(obj)}")
 
 
+def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
+    """Return the compressed serialized size, or raw tensor-like storage size."""
+    if not with_compression or isinstance(obj, bytes):
+        return _get_obj_storage_size(obj)
+    return len(compress_data_list(obj))
+
+
 def make_serializable(item: Any) -> Any:
-    """Convert tensors and coder objects into pickle-friendly values."""
-    if isinstance(item, np.ndarray):
-        return item
-    if isinstance(item, (np.integer, np.floating)):
-        return item.item()
-    if isinstance(item, (int, float, str, bytes)):
-        return item
+    """Normalize payload values that pickle should not store as-is."""
     if isinstance(item, torch.Tensor):
         return item.cpu()
+    if hasattr(item, '_dtype') and hasattr(item, '__len__'):
+        return np.array(item, dtype=np.dtype(str(item._dtype)))
+    if isinstance(item, (np.integer, np.floating)):
+        return item.item()
     if isinstance(item, OrderedDict):
         return OrderedDict((key, make_serializable(value)) for key, value in item.items())
     if isinstance(item, Mapping):
         return {key: make_serializable(value) for key, value in item.items()}
     if isinstance(item, (list, tuple)):
         return [make_serializable(x) for x in item]
-    if hasattr(item, '_dtype') and hasattr(item, '__len__'):
-        numpy_dtype = np.dtype(str(item._dtype))
-        return np.array(item, dtype=numpy_dtype)
-    if item is None:
-        return None
-    raise TypeError(f"Unsupported type for serialization: {type(item)}.")
+    return item
 
 
 def compress_data_list(data_list: Any) -> bytes:
     """Compress data using pickle and gzip."""
-    serializable_list = make_serializable(data_list)
-
-    pickled_data = pickle.dumps(serializable_list, protocol=pickle.HIGHEST_PROTOCOL)
-    compressed_data = gzip.compress(pickled_data, compresslevel=6)
-    return compressed_data
+    return gzip.compress(
+        pickle.dumps(make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL),
+        compresslevel=6,
+    )
 
 
 def decompress_data_list(compressed_data: bytes) -> Any:
     """Decompress data."""
-    decompressed_data = gzip.decompress(compressed_data)
-    data_list = pickle.loads(decompressed_data)
-    return data_list
+    return pickle.loads(gzip.decompress(compressed_data))
+
+
+# --- Compression Record --- #
+class Access(Enum):
+    """Which reconstructed-gradient history entries a process may inspect."""
+
+    NONE = "none"
+    SHARED = "shared"
+    SERVER = "server"
+
+@dataclass(frozen=True, slots=True)
+class HistoryEntry:
+    """One reconstructed delta committed by the codec after a successful decode."""
+
+    tensor: torch.Tensor
+    round_id: int
+    client_id: int
+    access: Access
+    process: str
+
+
+class ReconstructionHistory:
+    """Owns reconstructed-gradient history and enforces decoder-side visibility."""
+
+    def __init__(self, max_per_client: int) -> None:
+        self.max_per_client: int = max_per_client
+        self._server: dict[int, list[HistoryEntry]] = {}
+        self._shared: dict[int, list[HistoryEntry]] = {}
+        self._keep_server: bool = True
+        self._keep_shared: bool = True
+
+    def finish_warmup(self, routine_accesses: Sequence[Access]) -> None:
+        """Discard ledgers that the repeating routine phase will never read."""
+        routine_plan = tuple(routine_accesses)
+        assert all(isinstance(access, Access) for access in routine_plan), (
+            "Routine history access plan must contain Access values.")
+        self._set_retention(
+            server=Access.SERVER in routine_plan,
+            shared=Access.SHARED in routine_plan,
+        )
+
+    def _set_retention(self, *, server: bool, shared: bool) -> None:
+        self._keep_server = server
+        self._keep_shared = shared
+        if not server:
+            self._server.clear()
+        if not shared:
+            self._shared.clear()
+
+    def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
+        """Commit a reconstructed tensor to every ledger allowed to retain it."""
+        assert reconst.dtype == torch.float16 and reconst.device == torch.device("cpu")
+        # assert record.round_type is not None
+        if access is Access.NONE:
+            return
+
+        entry = HistoryEntry(
+            tensor=reconst,
+            round_id=record.round_id,
+            client_id=record.client_id,
+            access=access,
+            process=None,
+        )
+        if self._keep_server:
+            self._add_entry(self._server, entry)
+        if access is Access.SHARED and self._keep_shared:
+            self._add_entry(self._shared, entry)
+
+    def view(self, access: Access, record: CompressionRecord) -> tuple[HistoryEntry, ...]:
+        """Return the history entries visible to the requested process."""
+        if access is Access.NONE:
+            return ()
+        if access is Access.SHARED:
+            assert record.client_id in self._shared, (
+                f"No shared reconstruction history exists for client {record.client_id}."
+            )
+            return tuple(self._shared[record.client_id])
+        assert access is Access.SERVER, f"Unknown access policy: {access!r}."
+        entries = [entry for ledger in self._server.values() for entry in ledger]
+        return tuple(sorted(entries, key=lambda entry: (entry.round_id, entry.client_id)))
+
+    def latest_for_client(self, access: Access, record: CompressionRecord) -> HistoryEntry:
+        """Return the latest visible entry for the record's client."""
+        assert access is Access.SERVER, "Client-specific latest lookup is only defined for server history."
+        assert record.client_id in self._server and self._server[record.client_id], (
+            f"No server reconstruction history exists for client {record.client_id}."
+        )
+        return self._server[record.client_id][-1]
+
+    def seed(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
+        """Insert externally prepared side information for diagnostics or experiments."""
+        tensor = reconst.detach().to(device="cpu", dtype=torch.float16)
+        self.commit(tensor, record, access)
+
+    def tensor_ledgers(self, access: Access) -> list[list[torch.Tensor]]:
+        """Return a tensor-only snapshot of one internal ledger for diagnostics."""
+        assert access in {Access.SERVER, Access.SHARED}, f"Cannot snapshot access policy: {access!r}."
+        history = self._server if access is Access.SERVER else self._shared
+        max_client_id = max(history, default=-1)
+        return [[entry.tensor for entry in history.get(client_id, [])] for client_id in range(max_client_id + 1)]
+
+    def _add_entry(self, history: dict[int, list[HistoryEntry]], entry: HistoryEntry) -> None:
+        ledger = history.setdefault(entry.client_id, [])
+        ledger.append(entry)
+        if len(ledger) > self.max_per_client:
+            ledger.pop(0)
 
 
 # --- Compression Record --- #
@@ -81,12 +187,16 @@ class CompressionRecord:
     def __init__(self, round_id: int, client_id: int, method: str = "identity") -> None:
         self.round_id: int = round_id
         self.client_id: int = client_id
+
         self.codec_class_used: str = method
+
         self.compressed_bytes: float | None = None
         self.basic_raw_bytes: float | None = None
         self.compression_ratio: float | None = None
+
         self.global_eval_metrics: dict[str, float] = {}
         self.worker_eval_metrics: dict[str, dict[str, float]] = {}
+
         self.entropy_real_rate: float | None = None
         self.model_size: int | None = None
         self.mse: float | None = None
@@ -98,25 +208,13 @@ class CompressionRecord:
         self._og_delta_vec: torch.Tensor | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert record to dictionary using class attributes."""
+        """Convert record attributes to a flat CSV-ready dictionary."""
+        skipped_fields = {
+            "global_eval_metrics", "worker_eval_metrics", "_og_delta_vec"}
         result = {
-            'round_id': self.round_id,
-            'client_id': self.client_id,
-            'codec_class_used': self.codec_class_used,
-
-            'wmape': self.wmape,
-            'wmspe_sqrt': self.wmspe_sqrt,
-            'mse': self.mse,
-            'mape': self.mape,
-            'mspe_sqrt': self.mspe_sqrt,
-
-            'w_mean_of_vec': self.w_mean_of_vec,
-            'model_size': self.model_size,
-
-            'compressed_bytes': self.compressed_bytes,
-            'basic_raw_bytes': self.basic_raw_bytes,
-            'compression_ratio': self.compression_ratio,
-            'entropy_real_rate': self.entropy_real_rate,
+            key: value
+            for key, value in vars(self).items()
+            if not key.startswith("_") and key not in skipped_fields
         }
         # Add global eval metrics with prefix
         for key, value in self.global_eval_metrics.items():
@@ -130,18 +228,38 @@ class CompressionRecord:
         return result
 
     def append_record_to_csv(self, save_dir: Path) -> None:
-        """Append record to CSV file."""
+        """Append record to CSV file, expanding the header when new metrics appear."""
         save_dir.mkdir(exist_ok=True, parents=True)
 
         csv_file = save_dir / "compression_records.csv"
         record_dict = self.to_dict()
+        fieldnames = list(record_dict)
+        rows_to_rewrite = None
 
-        # Check if file exists to determine if we need to write headers
-        file_exists = csv_file.exists()
+        if csv_file.exists():
+            with csv_file.open(newline='') as f:
+                reader = csv.DictReader(f)
+                fieldnames = list(reader.fieldnames or ())
+                new_fieldnames = [key for key in record_dict if key not in fieldnames]
+                if new_fieldnames:
+                    fieldnames += new_fieldnames
+                    rows_to_rewrite = [*reader, record_dict]
+
+        if rows_to_rewrite is not None:
+            with tempfile.NamedTemporaryFile(
+                'w', newline='', dir=save_dir, prefix=f".{csv_file.stem}.",
+                suffix=".tmp", delete=False
+            ) as temp_file:
+                temp_path = Path(temp_file.name)
+                writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows_to_rewrite)
+            temp_path.replace(csv_file)
+            return
 
         with csv_file.open('a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=record_dict.keys())
-            if not file_exists:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if f.tell() == 0:
                 writer.writeheader()
             writer.writerow(record_dict)
 
@@ -178,12 +296,12 @@ class IdentityCodec:
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         """Encode one flattened model delta into a transport payload."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
-        record.basic_raw_bytes = get_obj_compressed_size(compress_data_list(delta_vec), with_compression=False) / (1024 ** 2)
+        record.basic_raw_bytes = get_obj_compressed_size(delta_vec, with_compression=False) / (1024 ** 2)
 
         payload_content = self._compress(delta_vec, record)
         payload = compress_data_list(payload_content)
 
-        record.compressed_bytes = get_obj_compressed_size(payload, with_compression=False) / (1024 ** 2)
+        record.compressed_bytes = len(payload) / (1024 ** 2)
         record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
         assert record.model_size is not None and record.model_size > 0, "CompressionRecord.model_size is bad."
         record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
