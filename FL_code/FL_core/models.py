@@ -1,10 +1,10 @@
-from __future__ import annotations, nn
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import torch
-from torch import optim as optim, nn as nn
+from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision.models import resnet18, resnet50
 

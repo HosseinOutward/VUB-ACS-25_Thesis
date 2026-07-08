@@ -88,7 +88,7 @@ if __name__ == '__main__':
         client_deltas = [base_vector + torch.normal(0.0, 0.1, size=(vector_size,)) for _ in range(num_clients)]
 
         for ci, d_v in enumerate(client_deltas):
-            record = codec.create_record(round_id, ci)
+            record = codec.create_codec_record(round_id, ci)
             record.model_size = d_v.shape[0]
             payload = codec.encode(d_v, record)
             reconst = codec.decode(payload, record)

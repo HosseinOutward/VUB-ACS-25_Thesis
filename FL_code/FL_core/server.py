@@ -5,8 +5,7 @@ import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
 from .utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
-from .codec import simulate_compression
-from .codec import create_codec
+from .codec import simulate_compression, create_codec
 
 
 def run_federated_server(

@@ -33,7 +33,7 @@ def run_workflow():
         for client_id in range(num_clients):
             delta = base_gradient + torch.randn(n) * 0.05
 
-            record = codec.create_record(round_id, client_id)
+            record = codec.create_codec_record(round_id, client_id)
             record.model_size = n
 
             payload = codec.encode(delta, record)
