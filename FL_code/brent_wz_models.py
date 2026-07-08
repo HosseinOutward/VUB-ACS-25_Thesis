@@ -6,7 +6,20 @@ import torch.nn.functional as F
 from torch.nn import LSTM, GRU
 from functools import partial
 import numpy as np
-import rans.rANSCoder as rans
+
+try:
+    import rans.rANSCoder as rans
+except ModuleNotFoundError:
+    class _MissingRans:
+        class Encoder:
+            def __init__(self) -> None:
+                raise ModuleNotFoundError("rans.rANSCoder is required for entropy_encode.")
+
+        class Decoder:
+            def __init__(self, *_args, **_kwargs) -> None:
+                raise ModuleNotFoundError("rans.rANSCoder is required for entropy_decode.")
+
+    rans = _MissingRans()
 
 
 class CustomRNN(nn.Module):

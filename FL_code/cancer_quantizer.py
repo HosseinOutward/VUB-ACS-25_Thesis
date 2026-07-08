@@ -352,23 +352,33 @@ class WZQuantizerCancer:
         bins = self._encoding_process(grad_prep)
         return bins, prep_metadata
 
-    def _encoding_process(self, grad_prep: torch.Tensor, batch_size: int = 500_000) -> torch.Tensor:
+    def _encoding_process(
+        self,
+        grad_prep: torch.Tensor,
+        batch_size: int = 500_000,
+        indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         # return torch.round(grad_vector*1000).to(torch.int16)
 
         assert grad_prep.shape[0] == self.si_vec_size
+        input_size = self.si_vec_size if indices is None else indices.numel()
 
         def func(start_i, end_idx):
-            x_batch = grad_prep[start_i:end_idx].cuda()
+            batch_selection = (
+                slice(start_i, end_idx)
+                if indices is None else indices[start_i:end_idx].to(device=grad_prep.device)
+            )
+            x_batch = grad_prep[batch_selection].cuda()
             bins_list, _ = self.coding_model.encode(x_batch)
             bins_list = torch.stack(bins_list)
             assert torch.unique(bins_list).size(0) <= self.coding_model.bins_per_plane ** self.coding_model.num_planes
             return bins_list.cpu()
-        bins = self._batch_loop(func, self.coding_model, self.si_vec_size, batch_size)
+        bins = self._batch_loop(func, self.coding_model, input_size, batch_size)
 
         dtype = torch.uint8 if self.bins_per_plane < 2**8 else torch.uint16
 
         assert self.num_planes == bins.shape[0]
-        assert bins.shape[1] == self.si_vec_size
+        assert bins.shape[1] == input_size
 
         return bins.to(dtype)
 
@@ -377,24 +387,10 @@ class WZQuantizerCancer:
         # return torch.from_numpy(quantized_data).float()/1000.0
 
         bins, (norm_factors, outlier_param) = payload_content
-        si_trans = self.get_si_data()
 
         assert self.num_planes == bins.shape[0]
         assert bins.shape[1] == self.si_vec_size
-        assert len(si_trans) == self.si_vec_size
-        assert si_trans.shape[1] == self.si_count
-        b_p_p = self.bins_per_plane
-        assert bins.float().max() < b_p_p
-
-        def func(start_i, end_idx):
-            bins_batch = bins[:, start_i:end_idx].cuda()
-            si_batch = si_trans[start_i:end_idx].cuda()
-
-            codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins_batch]
-            reconstructs_batch = self.coding_model.decode(codes, si_batch)[-1]
-
-            return reconstructs_batch.cpu()
-        all_reconstructs = self._batch_loop(func, self.coding_model, self.si_vec_size, batch_size)
+        all_reconstructs = self._decoding_process_prep(bins, batch_size)
 
         grad_prep = all_reconstructs.squeeze()
 
@@ -404,6 +400,36 @@ class WZQuantizerCancer:
         grad_raw = self._post_process(grad_prep, norm_factors, outlier_param)
 
         return grad_raw
+
+    def _decoding_process_prep(
+        self,
+        bins: torch.Tensor,
+        batch_size: int = 500_000,
+        indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        si_trans = self.get_si_data()
+        input_size = self.si_vec_size if indices is None else indices.numel()
+
+        assert self.num_planes == bins.shape[0]
+        assert bins.shape[1] == input_size
+        assert len(si_trans) == self.si_vec_size
+        assert si_trans.shape[1] == self.si_count
+        b_p_p = self.bins_per_plane
+        assert bins.float().max() < b_p_p
+
+        def func(start_i, end_idx):
+            batch_selection = (
+                slice(start_i, end_idx)
+                if indices is None else indices[start_i:end_idx].to(device=si_trans.device)
+            )
+            bins_batch = bins[:, start_i:end_idx].cuda()
+            si_batch = si_trans[batch_selection].cuda()
+
+            codes = [F.one_hot(b.to(int), num_classes=b_p_p) for b in bins_batch]
+            reconstructs_batch = self.coding_model.decode(codes, si_batch)[-1]
+
+            return reconstructs_batch.cpu()
+        return self._batch_loop(func, self.coding_model, input_size, batch_size)
 
     def _get_posterior(self, x_raw: torch.Tensor, bins_vec_save_compute: torch.Tensor = None):
         data_hash_str = PriorCalculator.get_hash(x_raw)
@@ -502,6 +528,18 @@ class WZQuantizerCancer:
                 recons_prep[v_slc] = recons_prep[v_slc] * norm_fact + grav_center
 
         return recons_prep
+
+    def _post_process_indexed(
+        self,
+        recons_raw: torch.Tensor,
+        norm_factors: torch.Tensor,
+        outlier_param: tuple,
+        indices: torch.Tensor,
+        vector_size: int,
+    ) -> torch.Tensor:
+        full_recons = torch.zeros(vector_size, dtype=recons_raw.dtype)
+        full_recons[indices] = recons_raw
+        return self._post_process(full_recons, norm_factors, outlier_param)[indices]
 
 
 if __name__ == "__main__":

@@ -37,6 +37,11 @@ Each round has a type that determines quantizer training and side information us
     - Training target: the last reconstruction from server side-info
     - Training side-info: all of client's own past reconstructions except for the one used for target
 
+'S' - SAMPLED RETRAIN:
+    - Implemented by SampledCancerCodec in sampled_cancer_protocol.py
+    - Similar to R, but trains from all server reconstructions and updates only the
+      encoder head from a sampled first-pass payload before coding the rest
+
 'F' - FROZEN:
     - NO training; reuses the last trained quantizer
 
@@ -92,6 +97,11 @@ class CancerConfig(BaseModel):
     tau_rate: float = 10.0
     quantizer_train_repeats: int = 3
     prior_train_repeats: int = 3
+    sampled_round_fraction: float = 0.02
+    sampled_round_min_count: int = 1_024
+    sampled_round_max_count: int = 50_000
+    sampled_head_train_epochs: int = 10
+    sampled_head_lr: float = 1e-3
 
     debug_save_codec_state: str = 'quantizer_state'
     debug_load_state: bool = False
@@ -111,6 +121,7 @@ _CANCER_VARIANT_TOKENS: Mapping[str, str] = MappingProxyType({
     "retrain_only": "retrain_only",
     "non_wz_worker": "non_wz_learned_worker",
     "non_wz_server": "non_wz_learned_server",
+    "sampled": "sampled",
     "bound_calc": "debug_cancerwithboundcalc",
 })
 _CANCER_RATE_TOKENS = frozenset({"binary", "mid_rate"})
@@ -283,6 +294,9 @@ class CancerCodec(BaseCodec):
         if variant == "non_wz_learned_server":
             from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             return SingleTypeCodec('RMM', c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
+        if variant == "sampled":
+            from FL_code.sampled_cancer_protocol import SampledCancerCodec
+            return SampledCancerCodec(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
         if variant == "debug_cancerwithboundcalc":
             from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
             return CancerWithBoundCalc(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
@@ -314,7 +328,7 @@ class CancerCodec(BaseCodec):
         round_type = self._base_round_type(record.round_type)[0]
         if round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
             return Access.SHARED
-        if round_type in {"R", "F"}:
+        if round_type in {"R", "S", "F"}:
             return Access.SERVER
         return Access.NONE
 
@@ -324,7 +338,7 @@ class CancerCodec(BaseCodec):
         is_warmup = round_id < len(cfg.warmup_phase)
         if not is_warmup and not self._history_warmup_finished:
             _history_access = lambda round_type_s: {
-                    "P": Access.SERVER, "R": Access.SERVER, "T": Access.SHARED
+                    "P": Access.SERVER, "R": Access.SERVER, "S": Access.SERVER, "T": Access.SHARED
                 }.get(self._base_round_type(round_type_s)[0], Access.NONE)
             self.reconstruction_history.finish_warmup(
                 [_history_access(round_type) for round_type, _, _ in cfg.routine_phase])
