@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import csv
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 import numpy as np
 
-from FL_code.FL_core.utils import compress_data_list, decompress_data_list, get_obj_compressed_size
+from FL_code.FL_core.utils import _get_obj_storage_size, compress_data_list, decompress_data_list
 
 if TYPE_CHECKING:
     from .utils import StateDictManager
@@ -95,51 +95,75 @@ class ReconstructionHistory:
 
 # --- Record Row Data --- #
 class CompressionRecord:
-    """Record for compression metrics. Stores all attributes for CSV export."""
+    """Base metrics row for one client-round, produced by a concrete round codec."""
 
-    def __init__(self, round_id: int, client_id: int, method: str = "base") -> None:
+    round_id: int
+    client_id: int
+
+    round_acronym: ClassVar[str]
+    round_cfg_acronym: str | None
+    protocol_name: str | None = None
+
+    model_size: int | None = None
+    encode_seconds: float | None = None
+    decode_seconds: float | None = None
+    final_bytes: float | None = None
+    global_eval_metrics: dict[str, float] | None = None
+    worker_eval_metrics: dict[str, dict[str, float]] | None = None
+
+    mse: float | None = None
+    mape: float | None = None
+    mspe_sqrt: float | None = None
+    w_mean_of_vec: float | None = None
+    wmape: float | None = None
+    wmspe_sqrt: float | None = None
+
+    def __init_subclass__(cls) -> None:
+        """Require concrete record classes to declare their round acronym."""
+        super().__init_subclass__()
+        assert hasattr(cls, "round_acronym")
+
+    def __init__(
+        self,
+        round_id: int,
+        client_id: int,
+        round_cfg_acronym: str | None,
+    ) -> None:
         self.round_id: int = round_id
         self.client_id: int = client_id
-
-        self.codec_class_used: str = method
-
-        self.compressed_bytes: float | None = None
-        self.basic_raw_bytes: float | None = None
-        self.compression_ratio: float | None = None
-        self.encode_seconds: float | None = None
-        self.decode_seconds: float | None = None
-
-        self.global_eval_metrics: dict[str, float] = {}
-        self.worker_eval_metrics: dict[str, dict[str, float]] = {}
-
-        self.entropy_real_rate: float | None = None
-        self.model_size: int | None = None
-        self.mse: float | None = None
-        self.mape: float | None = None
-        self.mspe_sqrt: float | None = None
-        self.w_mean_of_vec: float | None = None
-        self.wmape: float | None = None
-        self.wmspe_sqrt: float | None = None
+        self.round_cfg_acronym: str | None = round_cfg_acronym
 
     def to_dict(self) -> dict[str, Any]:
         """Convert record attributes to a flat CSV-ready dictionary."""
         skipped_fields = {
             "global_eval_metrics", "worker_eval_metrics"}
-        result = {
+        result: dict[str, Any] = {"round_acronym": self.round_acronym} | {
             key: value
             for key, value in vars(self).items()
             if not key.startswith("_") and key not in skipped_fields
         }
         # Add global eval metrics with prefix
-        for key, value in self.global_eval_metrics.items():
-            result[f'global_eval_{key}'] = value
+        if self.global_eval_metrics is not None:
+            for key, value in self.global_eval_metrics.items():
+                result[f'global_eval_{key}'] = value
 
         # Add worker eval metrics with split prefix (e.g., train_loss, test_acc)
-        for split, metrics in self.worker_eval_metrics.items():
-            for metric_key, metric_value in metrics.items():
-                result[f'{split}_{metric_key}'] = metric_value
+        if self.worker_eval_metrics is not None:
+            for split, metrics in self.worker_eval_metrics.items():
+                for metric_key, metric_value in metrics.items():
+                    result[f'{split}_{metric_key}'] = metric_value
 
         return result
+
+    def update_record_fields(self, updates: Mapping[str, Any]) -> None:
+        """Update unset record fields with known non-null values."""
+        unknown_fields = {field_name for field_name in updates if not hasattr(self, field_name)}
+        assert not unknown_fields, f"Unknown record fields: {tuple(unknown_fields)}."
+        for field_name, value in updates.items():
+            assert getattr(self, field_name) is None, (
+                f"CompressionRecord.{field_name} is already set before update.")
+            assert value is not None, f"CompressionRecord.{field_name} replacement must not be None."
+            setattr(self, field_name, value)
 
     def append_record_to_csv(self, save_dir: Path) -> None:
         """Append record to CSV file, expanding the header when new metrics appear."""
@@ -178,186 +202,173 @@ class CompressionRecord:
             writer.writerow(record_dict)
 
 
-# --- Compression Codecs --- #
-class BaseCodec:
-    """Base codec: raw float32 through the shared pickle+gzip transport.
+# --- Round Codecs and Protocols --- #
+class BaseRoundCodec:
+    """One-round compressor selected by a protocol schedule."""
 
-    Subclasses override `_compress`/`_decompress`; the reported sizes always
-    include the generic serialization, so this is a gzip baseline, not a
-    bit-exact identity rate.
-    """
+    record_class: ClassVar[type[CompressionRecord]]
+    round_acronym: ClassVar[str]
+    round_cfg_acronym: ClassVar[str|None]
 
-    OPTION_ORDER: tuple[str, ...] = ()
-    record_class: type[CompressionRecord] = CompressionRecord
+    def __init_subclass__(cls) -> None:
+        """Require concrete round codecs to declare their record type and round acronym."""
+        super().__init_subclass__()
+        assert hasattr(cls, "record_class")
+        assert hasattr(cls, "round_acronym")
+        assert hasattr(cls, "round_cfg_acronym")
 
-    def __init__(self, codec_name: str = "base") -> None:
-        self.codec_name = codec_name
-
-    @staticmethod
-    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
-        """Validate base codec name options."""
-        assert not option_tokens, f"base codec does not accept options: {option_tokens!r}."
-
-    @classmethod
-    def create_from_codec_name(
-        cls,
-        codec_name: str,
-        protocol_name: str,
-        option_tokens: Sequence[str],
-        sd_manager: StateDictManager | None,
-    ) -> BaseCodec:
-        """Create a base codec from a validated codec name."""
-        assert protocol_name == "base"
-        assert not option_tokens
-        return cls(codec_name=codec_name)
-
-    def create_codec_record(self, round_id: int, client_id: int, **record_inputs: Any) -> CompressionRecord:
-        """Create a codec-owned metrics record for one client-round compression."""
-        record = self.record_class(
+    def create_round_record(self, round_id: int, client_id: int) -> CompressionRecord:
+        """Create this round codec's metrics record for one client-round compression."""
+        return self.record_class(
             round_id=round_id,
             client_id=client_id,
-            method=self.codec_name,
+            round_cfg_acronym=self.round_cfg_acronym
         )
-        unknown_inputs = record_inputs.keys() - vars(record).keys()
-        assert not unknown_inputs, f"Unknown record input fields: {tuple(unknown_inputs)}."
-        vars(record).update(record_inputs)
-        return record
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        """Encode one flattened model delta into a transport payload."""
-        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device('cpu')
-        record.basic_raw_bytes = get_obj_compressed_size(delta_vec, with_compression=False) / (1024 ** 2)
-
-        payload_content = self._compress(delta_vec, record)
-        payload = compress_data_list(payload_content)
-
-        record.compressed_bytes = len(payload) / (1024 ** 2)
-        record.compression_ratio = record.basic_raw_bytes / record.compressed_bytes
-        assert record.model_size is not None and record.model_size > 0, "CompressionRecord.model_size is bad."
-        record.entropy_real_rate = record.compressed_bytes * (1024**2) * 8 / record.model_size
-
-        return payload
+        raise NotImplementedError
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
-        """Decode one transport payload into a reconstructed delta vector."""
-        payload_content = decompress_data_list(payload)
-        res = self._decompress(payload_content, record)
-        assert res.dtype == torch.float32 and res.device == torch.device('cpu')
-        return res
-
-    # Methods to be overridden by subclasses
-    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        """Compress a delta vector before generic payload serialization."""
-        return delta_vec
-
-    # Methods to be overridden by subclasses
-    def _decompress(self, payload_content: Any, record: CompressionRecord) -> torch.Tensor:
-        """Reconstruct a delta vector from decoded payload content."""
-        return payload_content
+        raise NotImplementedError
 
 
-# --- Codec Name Parsing and factory --- #
-def parse_and_validate_codec_name(codec_name: str) -> tuple[str, tuple[str, ...]]:
-    """Validate a codec name and return protocol plus ordered option tokens."""
-    assert isinstance(codec_name, str), f"codec must be a string; got {type(codec_name).__name__}."
-    assert codec_name, "codec must be a non-empty string."
-    assert codec_name == codec_name.strip(), f"codec={codec_name!r} must not contain leading or trailing whitespace."
-    tokens = codec_name.split("|")
-    assert all(token != "" for token in tokens), f"codec={codec_name!r} contains an empty protocol or option token."
-    protocol_name, *option_tokens = tokens
-    option_tokens = tuple(option_tokens)
+class BaseProtocol:
+    """Protocol schedule that selects the round codec used for each training round."""
 
-    protocol_class = get_protocol_class(protocol_name)
-    protocol_class.validate_codec_tokens(option_tokens)
+    warmup_round_codecs: ClassVar[tuple[type[BaseRoundCodec], ...]]
+    routine_round_codecs: ClassVar[tuple[type[BaseRoundCodec], ...]]
+    protocol_name: str
 
-    return protocol_name, option_tokens
+    def __init_subclass__(cls) -> None:
+        """Require concrete protocols to declare their warmup and routine round codec plans."""
+        super().__init_subclass__()
+        assert hasattr(cls, "warmup_round_codecs")
+        assert hasattr(cls, "routine_round_codecs")
+        assert hasattr(cls, "protocol_name")
+        assert cls.routine_round_codecs
 
-
-def get_protocol_class(protocol_name: str) -> type[BaseCodec]:
-    """Return the protocol class selected by a codec-name protocol token."""
-    if protocol_name == "base":
-        return BaseCodec
-    if protocol_name == "split":
-        from FL_code.other_protocols.n_split_protocol import NSplitCodec
-        return NSplitCodec
-    if protocol_name == "cancer":
-        from FL_code.cancer_protocol import CancerCodec
-        return CancerCodec
-    assert False, f"Unknown codec protocol={protocol_name!r}."
+    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
+        """Create the round codec selected by this protocol schedule."""
+        if round_id < len(self.warmup_round_codecs):
+            rc_acronym = self.warmup_round_codecs[round_id]
+        else:
+            routine_idx = (round_id - len(self.warmup_round_codecs)) % len(self.routine_round_codecs)
+            rc_acronym = self.routine_round_codecs[routine_idx]
+        round_codec_class = rc_acronym
+        return round_codec_class()
 
 
-def create_codec(codec_name: str, sd_manager: StateDictManager | None) -> BaseCodec:
-    """Create a codec from a protocol-owned, validated codec name."""
-    protocol_name, option_tokens = parse_and_validate_codec_name(codec_name)
-    protocol_class = get_protocol_class(protocol_name)
-    return protocol_class.create_from_codec_name(codec_name, protocol_name, option_tokens, sd_manager)
+def create_protocol(protocol_name: str) -> BaseProtocol:
+    """Create a validated protocol schedule."""
+    parse_and_validate_protocol(protocol_name)
+    return DemoProtocol()
+
+
+def parse_and_validate_protocol(protocol_name: str) -> str:
+    """Validate a protocol name and return its canonical protocol token."""
+    raise NotImplemented
+    assert isinstance(protocol_name, str), f"protocol must be a string; got {type(protocol_name).__name__}."
+    assert protocol_name, "protocol must be a non-empty string."
+    assert protocol_name == protocol_name.strip(), (
+        f"protocol={protocol_name!r} must not contain leading or trailing whitespace.")
+    assert protocol_name == "demo", f"Unknown protocol={protocol_name!r}."
+    return protocol_name
 
 
 def record_reconstruction_metrics(
     original: torch.Tensor,
     reconstructed: torch.Tensor,
-) -> dict[str, float | None]:
+) -> dict[str, float]:
     """Return distortion metrics for one reconstructed delta."""
     assert original.shape == reconstructed.shape, (
-        f"Reconstruction shape mismatch: got {tuple(reconstructed.shape)}, expected {tuple(original.shape)}."
-    )
+        f"Reconstruction shape mismatch: got {tuple(reconstructed.shape)}, expected {tuple(original.shape)}.")
     error = reconstructed - original
     mse = torch.mean(error ** 2).item()
     w_mean_of_vec = torch.abs(original).mean().item()
-    metrics: dict[str, float | None] = {
+    assert w_mean_of_vec > 0, "Weight Gradients are suspiciously all zero."
+    metrics: dict[str, float] = {
         "mse": mse,
         "mape": torch.mean(torch.abs(error) / (torch.abs(original) + 1e-8)).item() * 100,
         "mspe_sqrt": torch.sqrt(torch.mean(error ** 2 / (original ** 2 + 1e-8))).item() * 100,
         "w_mean_of_vec": w_mean_of_vec,
-        "wmape": None,
-        "wmspe_sqrt": None,
+        "wmape": torch.mean(torch.abs(error)).item() / w_mean_of_vec * 100,
+        "wmspe_sqrt": float(np.sqrt(mse)) / w_mean_of_vec * 100,
     }
-    if w_mean_of_vec == 0.0:
-        return metrics
-
-    metrics["wmape"] = torch.mean(torch.abs(error)).item() / w_mean_of_vec * 100
-    metrics["wmspe_sqrt"] = float(np.sqrt(mse)) / w_mean_of_vec * 100
     return metrics
 
 
 def simulate_compression(
-    codec: BaseCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
-    model_size: int, save_dir: Path,
+    protocol: BaseProtocol, delta_vec: torch.Tensor, client_id: int, round_id: int,
+    sd_manager: StateDictManager, save_dir: Path,
     server_eval_metrics: dict[str, float], worker_eval_metrics: Sequence[float],
     metric_keys: Sequence[str]
 ) -> torch.Tensor:
     """Simulate client encoding and server decoding for one flattened delta."""
+    model_size = sd_manager.param_count
     num_metrics = len(metric_keys)
     expected_len = num_metrics * 2
     assert len(worker_eval_metrics) == expected_len
 
-    record = codec.create_codec_record(
-        round_id,
-        client_id,
-        model_size=model_size,
-        global_eval_metrics=server_eval_metrics,
-        worker_eval_metrics={
+    round_codec = protocol.create_round_codec(round_id, client_id)
+
+    record = round_codec.create_round_record(round_id, client_id)
+
+    start_time = time.perf_counter()
+    payload = round_codec.encode(delta_vec, record)
+    encode_seconds = time.perf_counter() - start_time
+
+    start_time = time.perf_counter()
+    reconstructed = round_codec.decode(payload, record)
+    decode_seconds = time.perf_counter() - start_time
+    assert reconstructed.numel() == model_size
+
+    record.update_record_fields({
+        "protocol_name": protocol.protocol_name,
+        "model_size": model_size,
+        "global_eval_metrics": server_eval_metrics,
+        "worker_eval_metrics": {
             'train': {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)},
             'test': {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)},
         },
-    )
 
-    # Encode (client-side simulation)
-    start_time = time.perf_counter()
-    payload = codec.encode(delta_vec, record)
-    record.encode_seconds = time.perf_counter() - start_time
-    
-    # Decode (server-side)
-    start_time = time.perf_counter()
-    reconstructed = codec.decode(payload, record)
-    record.decode_seconds = time.perf_counter() - start_time
-
-    assert reconstructed.numel() == model_size, (
-        f"{codec.__class__.__name__} reconstructed {reconstructed.numel()} values; expected {model_size}.")
+        "final_bytes": _get_obj_storage_size(payload),
+        "encode_seconds": encode_seconds,
+        "decode_seconds": decode_seconds,
+    })
     
     recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
-    vars(record).update(recons_error_and_metric)
+    record.update_record_fields(recons_error_and_metric)
 
     record.append_record_to_csv(save_dir)
 
     return reconstructed
+
+
+# --- Demo Round Codec and Protocol --- #
+class RCDemo(BaseRoundCodec):
+    """Round codec that serializes raw float32 deltas with the shared gzip transport."""
+
+    class RecordDemo(CompressionRecord):
+        round_acronym = "gzip"
+        compression_method: str | None = None
+    record_class = RecordDemo
+    round_acronym = record_class.round_acronym
+    round_cfg_acronym = None
+
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
+        """Encode one raw float32 delta into f16, pickle then gzip."""
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        payload = compress_data_list(delta_vec.to(torch.float16))
+        record.update_record_fields({"compression_method": "gzip_level_1"})
+        return payload
+
+    def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
+        """Decode one raw float32 delta from pickle plus gzip."""
+        reconstructed = decompress_data_list(payload)
+        return reconstructed
+
+
+class DemoProtocol(BaseProtocol):
+    warmup_round_codecs= ()
+    routine_round_codecs= (RCDemo,)
+    protocol_name: str = "demo"

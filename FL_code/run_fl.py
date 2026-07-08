@@ -8,12 +8,12 @@ from typing import Any
 from FL_code.FL_core.dataset import _force_class_coverage
 from FL_code.FL_core.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
 import torch
-import torch.multiprocessing as mp
 import torch.distributed as dist
+from torch.multiprocessing.spawn import start_processes
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from FL_code.FL_core.codec import parse_and_validate_codec_name
+from FL_code.FL_core.codec import parse_and_validate_protocol
 
 
 class FLConfig(BaseModel):
@@ -21,7 +21,7 @@ class FLConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", validate_assignment=True)
 
-    codec: str
+    protocol: str
     run_name: str | None = None
 
     model_name: str = "resnet18"  # resnet18, resnet50, resnet56
@@ -42,9 +42,7 @@ class FLConfig(BaseModel):
 
     recalibrate_bn: bool = True
     bn_recalib_batches: int = 100
-    # Clients evaluate their local train/test metrics only on rounds divisible by
-    # this interval (and always on the final round); skipped rounds record NaN.
-    client_eval_every_n_rounds: int = 1
+    client_eval_every_n_rounds: int = 1 # client evaluation on test data frequency in rounds
 
     # Memory and performance optimizations
     channels_last: bool = True
@@ -66,16 +64,16 @@ class FLConfig(BaseModel):
     debug_continue_then_save: bool = False
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """Prevent changing the codec name after configuration creation."""
+        """Prevent changing the configured protocol after configuration creation."""
         assert not (
-            name == "codec" and "codec" in self.__dict__ and self.__dict__["codec"] != value
-        ), "FLConfig.codec is immutable after construction."
+            name == "protocol" and "protocol" in self.__dict__ and self.__dict__["protocol"] != value
+        ), "FLConfig.protocol is immutable after construction."
         super().__setattr__(name, value)
 
     @model_validator(mode="after")
     def validate_explicit_configuration(self) -> FLConfig:
         """Reject contradictory options that would otherwise change behavior implicitly."""
-        parse_and_validate_codec_name(self.codec)
+        parse_and_validate_protocol(self.protocol)
         if self.debug_mode:
             object.__setattr__(self, "num_clients", 3)
             object.__setattr__(self, "local_epochs", 1)
@@ -143,7 +141,7 @@ def _worker(
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--codec", type=str, required=True)
+    ap.add_argument("--protocol", type=str, required=True)
     ap.add_argument("--run-name", type=str, default=None)
     ap.add_argument("--model", type=str, default=FLConfig.model_fields["model_name"].default,
                     choices=['resnet18', 'resnet50', 'resnet56'])
@@ -165,7 +163,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     cfg = FLConfig(
-        codec=args.codec,
+        protocol=args.protocol,
         run_name=args.run_name,
         model_name=args.model,
         dataset_name=args.dataset,
@@ -220,12 +218,13 @@ if __name__ == "__main__":
     if cfg.debug_load_from_saved_data:
         assert_debug_fl_config_matches(cfg, debug_delta_dir)
 
-    print(f'[MAIN] {cfg.codec}')
+    print(f'[MAIN] {cfg.protocol}')
 
-    # Spawn distributed processes
-    mp.spawn(
+    # Start distributed processes with spawn semantics.
+    start_processes(
         _worker,
         args=(cfg.num_clients + 1, cfg, X_train, y_train, X_test, y_test),
         nprocs=cfg.num_clients + 1,
-        join=True
+        join=True,
+        start_method="spawn",
     )
