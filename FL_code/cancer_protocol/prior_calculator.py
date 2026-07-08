@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from FL_code.brent_wz_models import EncoderDecoderLayeredRNN
-from FL_code.utils import create_training_progress_bar
+from .brent_wz_models import EncoderDecoderLayeredRNN
+from FL_code.FL_core.utils import create_training_progress_bar
 
 class PriorCalculator:
     @staticmethod
@@ -59,7 +59,7 @@ class PriorCalculator:
         training_tau: float | bool = False,
         batch_size: int = 500_000
     ) -> torch.Tensor:
-        from FL_code.cancer_quantizer import WZQuantizerCancer
+        from .cancer_quantizer import WZQuantizerCancer
 
         training_mode = training_tau is not False
 

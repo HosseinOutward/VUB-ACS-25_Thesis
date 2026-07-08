@@ -24,7 +24,7 @@ from pathlib import Path
 script_dir = Path(__file__).resolve().parent
 project_root = script_dir.parent.parent  # -> VUB-ACS-25_Thesis/FL_code
 
-from FL_code.codec import create_codec
+from FL_code.FL_core.codec import create_codec
 from FL_code.cancer_protocol import CancerCodec
 
 # ============== EXPERIMENT CONFIG ==============

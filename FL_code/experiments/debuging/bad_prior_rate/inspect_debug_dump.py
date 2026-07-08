@@ -13,8 +13,8 @@ import torch
 import torch.nn.functional as F
 # import numpy as np
 
-from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.prior_calculator import PriorCalculator
+from FL_code.cancer_protocol.cancer_quantizer import WZQuantizerCancer
+from FL_code.cancer_protocol.prior_calculator import PriorCalculator
 from FL_code.cancer_protocol import CancerConfig
 # from FL_reworked.brent_wz_models import EncoderDecoderLayeredRNN
 

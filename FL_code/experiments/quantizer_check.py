@@ -14,7 +14,7 @@ from typing import List, Dict
 import itertools
 
 
-from FL_code.codec import create_codec
+from FL_code.FL_core.codec import create_codec
 from FL_code.cancer_protocol import Access, CancerCodec, CancerRecord
 
 # import pydevd_pycharm

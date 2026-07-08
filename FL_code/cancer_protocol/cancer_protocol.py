@@ -59,8 +59,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.codec import (
+from .cancer_quantizer import WZQuantizerCancer
+from FL_code.FL_core.codec import (
     Access,
     CompressionRecord,
     HistoryEntry,
@@ -68,10 +68,10 @@ from FL_code.codec import (
     ReconstructionHistory,
     get_obj_compressed_size,
 )
-from FL_code.prior_calculator import PriorCalculator
+from .prior_calculator import PriorCalculator
 
 if TYPE_CHECKING:
-    from FL_code.utils import StateDictManager
+    from FL_code.FL_core.utils import StateDictManager
 
 
 # ============================================================================
@@ -295,7 +295,7 @@ class CancerCodec(BaseCodec):
             from FL_code.other_protocols.SingleTypeCodecs import SingleTypeCodec
             return SingleTypeCodec('RMM', c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
         if variant == "sampled":
-            from FL_code.sampled_cancer_protocol import SampledCancerCodec
+            from .sampled_cancer_protocol import SampledCancerCodec
             return SampledCancerCodec(c_cfg, quantizer_kwargs=quantizer_kwargs, codec_name=codec_name)
         if variant == "debug_cancerwithboundcalc":
             from FL_code.experiments.rd_mspe_wz import CancerWithBoundCalc
