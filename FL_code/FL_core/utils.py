@@ -1,6 +1,8 @@
 from __future__ import annotations
 from collections.abc import Mapping
+import gzip
 import json
+import pickle
 from pathlib import Path
 import random
 import sys
@@ -307,7 +309,7 @@ class StateDictManager:
 
 def _prepare_records_dir(cfg: FLConfig) -> None:
     """Create the numbered run directory and save configuration snapshots."""
-    run_name = cfg.run_name if cfg.run_name is not None else cfg.codec
+    run_name = cfg.run_name if cfg.run_name is not None else cfg.protocol
 
     records_root = Path(cfg.records_dir)
     records_root.mkdir(exist_ok=True, parents=True)
@@ -331,7 +333,7 @@ def write_fl_config_snapshot(cfg: FLConfig, save_dir: Path) -> None:
 
 
 def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
-    """Assert that saved debug data was produced with the same non-codec FL configuration."""
+    """Assert that saved debug data was produced with the same non-protocol FL configuration."""
     config_path = save_dir / "fl_config.json"
     with config_path.open() as f:
         saved_config = json.load(f)
@@ -339,7 +341,7 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
     current_config = cfg.model_dump(mode="json")
     # Fields that cannot affect the saved training data, so replays may differ in them.
     _DEBUG_CONFIG_IGNORED_FIELDS = frozenset({
-        "codec",
+        "protocol",
         "run_name",
         "records_dir",
         "master_port",
@@ -390,46 +392,31 @@ def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Ten
         )
 
 
-def _get_obj_storage_size(obj: Any) -> int:
-    """Return the in-memory payload size for tensor-like compression objects."""
+def _get_obj_storage_size(obj: Any) -> float:
+    """Return the in-memory payload size for tensor-like compression objects in MB."""
+    res: int | float | None = None
     if isinstance(obj, torch.Tensor):
-        return obj.element_size() * obj.nelement()
-    if isinstance(obj, np.ndarray):
-        return obj.nbytes
-    if isinstance(obj, (list, tuple)):
-        return sum(_get_obj_storage_size(x) for x in obj)
-    if isinstance(obj, Mapping):
-        return sum(_get_obj_storage_size(v) for v in obj.values())
-    if hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
-        return len(obj) * (obj._dtype.bitwidth // 8)
-    if isinstance(obj, bytes):
-        return len(obj)
-    if obj is None:
-        return 1
-    raise TypeError(f"Unsupported object type: {type(obj)}")
-
-
-def compress_data_list(data_list: Any) -> bytes:
-    """Compress data using pickle and gzip."""
-    # Level 1: gzip here only estimates payload size on the server's critical path,
-    # and higher levels barely shrink float payloads while costing much more time.
-    return gzip.compress(
-        pickle.dumps(make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL),
-        compresslevel=1,
-    )
-
-
-def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
-    """Return the compressed serialized size, or raw tensor-like storage size."""
-    if not with_compression or isinstance(obj, bytes):
-        return _get_obj_storage_size(obj)
-    return len(compress_data_list(obj))
-
+        res = obj.element_size() * obj.nelement()
+    elif isinstance(obj, np.ndarray):
+        res = obj.nbytes
+    elif isinstance(obj, (list, tuple)):
+        res = sum(_get_obj_storage_size(x) for x in obj)
+    elif isinstance(obj, Mapping):
+        res = sum(_get_obj_storage_size(v) for v in obj.values())
+    elif hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
+        res = len(obj) * (obj._dtype.bitwidth // 8)
+    elif isinstance(obj, bytes):
+        res = len(obj)
+    elif obj is None:
+        res = 1
+    assert res is not None
+    return res / (1024**2)  # Return size in MB
 
 def make_serializable(item: Any) -> Any:
     """Normalize payload values that pickle should not store as-is."""
     if isinstance(item, torch.Tensor):
-        return item.cpu()
+        assert item.device.type == 'cpu'
+        return item
     if hasattr(item, '_dtype') and hasattr(item, '__len__'):
         return np.array(item, dtype=np.dtype(str(item._dtype)))
     if isinstance(item, (np.integer, np.floating)):
@@ -441,6 +428,12 @@ def make_serializable(item: Any) -> Any:
     if isinstance(item, (list, tuple)):
         return [make_serializable(x) for x in item]
     return item
+
+
+def compress_data_list(data_list: Any) -> bytes:
+    """Compress data using pickle and gzip."""
+    return gzip.compress(pickle.dumps(
+        make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL), compresslevel=1,)
 
 
 def decompress_data_list(compressed_data: bytes) -> Any:

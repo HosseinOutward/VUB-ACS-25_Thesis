@@ -5,7 +5,7 @@ import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
 from .utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
-from .codec import simulate_compression, create_codec
+from .codec import simulate_compression, create_protocol
 
 
 def run_federated_server(
@@ -21,7 +21,7 @@ def run_federated_server(
     set_global_seed(cfg.seed)
     num_clients = world_size - 1
 
-    model, device, test_loader, _, sd_manager = setup_fl_worker(
+    model, _, test_loader, _, sd_manager = setup_fl_worker(
         cfg, "Server", device_id=0,
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
@@ -36,10 +36,10 @@ def run_federated_server(
         loaded_state_dict = torch.load(delta_data_path)
         model.load_state_dict(loaded_state_dict)
 
-    codec = create_codec(cfg.codec, sd_manager)
+    protocol = create_protocol(cfg.protocol)
 
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
-    print(f"[Server] Using codec: {codec.__class__.__name__}")
+    print(f"[Server] Using protocol: {protocol.__class__.__name__}")
 
     for rnd_i in range(cfg.rounds + 1):
         # ---- Recalibrate then evaluate global model ----
@@ -91,8 +91,8 @@ def run_federated_server(
             # ***************** Simulate compression and reconstruct *****************
             # recon_delta_vec = delta_vec 
             recon_delta_vec = simulate_compression(
-               codec, delta_vec, rcvd_client_id, rnd_i,
-               model_size=sd_manager.param_count,
+               protocol, delta_vec, rcvd_client_id, rnd_i,
+               sd_manager=sd_manager,
                save_dir=cfg.records_dir, server_eval_metrics=metrics,
                worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=list(metrics.keys()))
 

@@ -31,7 +31,7 @@ These standards apply to every module unless a more specific local instruction s
 - **Keep code to a minimum** Common thread among below standards too, is to make use of dynamic approaches, judgment of if an extra code had any real impact or use, and if an extra function and class needed to be made. Less is always better mostly since it helps with readibilty and debugging. all else is secondary.
 - **Write concise docstrings.** Public functions need a one-paragraph docstring. Each shared data contract needs a class-level docstring explaining what it represents and who produces and consumes it.
 - **Comments explain why, not what.** Comment only when intent is non-obvious, such as a conditional field requirement or cache ordering. Do not narrate self-evident code.
-- **Fail loudly and clearly.** Hidden behavior is worse than a visible failure. On error, raise with a message that names the offending file, field, or stage. Avoid silent fallbacks and unnecessary recovery logic.
+- **Fail loudly and clearly.** Hidden behavior is worse than a visible failure. On error, raise with a message that names the offending file, field, or stage. Avoid silent fallbacks, (backward) compatibility logic, and unnecessary recovery logic.
 - **No bare `except`.** Catch specific exceptions only when handling them is useful. Use assertions for internal assumptions.
 - **rasising errors** Instead of if-raises, use asserts where its a valid replacement. also only use the asserts where either an assumption has to be checked, or some future error will happen which might not be clear. for the latter, this means avoid asserts just to make a custom text for fail, when its already obvious. instead use it where downstream fails are not clear or worse, not even caught.
 - **No global mutable state.** Pass `Config` and other dependencies explicitly. Do not introduce module-level mutable singletons.
@@ -54,10 +54,11 @@ These standards apply to every module unless a more specific local instruction s
 
 ---
 
-## 3. Agent Workflow
-
-- Read the relevant code before editing. Match existing patterns unless there is a clear reason to change them.
-- Keep edits narrowly scoped to the user request.
-- Do not modify experiment records, notebooks, generated figures, pretrained weights, or LaTeX outputs unless the user explicitly asks.
-- Preserve user changes in the working tree. Never revert unrelated edits.
-- Prefer focused verification: run the smallest useful test, script, import check, or compile check that exercises the changed code.
+## 3. Checks when writing
+1. Does this need to exist?   → no: skip it (YAGNI)
+2. Already in this codebase?  → reuse it, don't rewrite
+3. Stdlib does it?            → use it
+4. Native platform feature?   → use it
+5. Installed dependency?      → use it
+6. Fit in one line?           → one line
+7. Only then: the minimum that works
