@@ -10,9 +10,9 @@ import torch.nn.functional as F
 
 from .cancer_protocol import CancerCodec, CancerConfig, CancerRecord
 from .cancer_quantizer import WZQuantizerCancer
-from FL_code.FL_core.codec import Access, CompressionRecord, get_obj_compressed_size, record_reconstruction_metrics
+from FL_code.FL_core.codec import Access, CompressionRecord, record_reconstruction_metrics
 from .prior_calculator import PriorCalculator
-from FL_code.FL_core.utils import create_training_progress_bar
+from FL_code.FL_core.utils import create_training_progress_bar, get_obj_compressed_size
 
 
 class SampledCancerRecord(CancerRecord):
@@ -273,6 +273,8 @@ class SampledWZQuantizerCancer(WZQuantizerCancer):
 class SampledCancerCodec(CancerCodec):
     """Cancer protocol variant with S rounds that sample first, retrain the encoder head, then finish coding."""
 
+    record_class: type[SampledCancerRecord] = SampledCancerRecord
+
     def __init__(
         self,
         c_cfg: CancerConfig,
@@ -287,18 +289,6 @@ class SampledCancerCodec(CancerCodec):
         self.c_cfg.routine_phase = tuple(
             ("S" if phase_type == "R" else phase_type, bins_per_plane, num_planes)
             for phase_type, bins_per_plane, num_planes in self.c_cfg.routine_phase
-        )
-
-    def create_record(self, round_id: int, client_id: int) -> SampledCancerRecord:
-        base_record = super().create_record(round_id, client_id)
-        return SampledCancerRecord(
-            round_id=base_record.round_id,
-            client_id=base_record.client_id,
-            method=base_record.codec_class_used,
-            phase=base_record.phase,
-            round_type=base_record.round_type,
-            bits_per_plane=base_record.bins_per_plane,
-            num_planes=base_record.num_planes,
         )
 
     def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
@@ -471,10 +461,9 @@ class SampledCancerCodec(CancerCodec):
         original: torch.Tensor,
         reconstructed: torch.Tensor,
     ) -> None:
-        temp_record = CompressionRecord(record.round_id, record.client_id, record.codec_class_used)
-        record_reconstruction_metrics(original, reconstructed, temp_record)
-        record.sampled_mse = temp_record.mse
-        record.sampled_mape = temp_record.mape
-        record.sampled_mspe_sqrt = temp_record.mspe_sqrt
-        record.sampled_wmape = temp_record.wmape
-        record.sampled_wmspe_sqrt = temp_record.wmspe_sqrt
+        metrics = record_reconstruction_metrics(original, reconstructed)
+        record.sampled_mse = metrics["mse"]
+        record.sampled_mape = metrics["mape"]
+        record.sampled_mspe_sqrt = metrics["mspe_sqrt"]
+        record.sampled_wmape = metrics["wmape"]
+        record.sampled_wmspe_sqrt = metrics["wmspe_sqrt"]

@@ -93,7 +93,7 @@ def run_long_term_test(out_path: Path):
         signal = signal * (current_std / signal.std()) + (current_mean - signal.mean())
 
         # Create record and compress/decompress
-        record = codec.create_record(round_id=iter_idx, client_id=client_id)
+        record = codec.create_codec_record(round_id=iter_idx, client_id=client_id)
         record.model_size = DATA_SIZE
 
         compressed = codec.encode(signal, record)

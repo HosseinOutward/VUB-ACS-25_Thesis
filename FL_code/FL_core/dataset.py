@@ -115,6 +115,7 @@ def create_dataloader(
         perm = torch.randperm(len(dataset), generator=torch.Generator().manual_seed(cfg.seed))
         indices = perm[client_id::num_clients].tolist()
         dataset = Subset(dataset, indices)
+        shuffle_generator = torch.Generator().manual_seed(cfg.seed + client_id + 1)
 
         return DataLoader(
             dataset,
@@ -124,6 +125,7 @@ def create_dataloader(
             prefetch_factor=2 if cfg.num_loader_workers > 0 else None,
             persistent_workers=cfg.num_loader_workers > 0,
             shuffle=True,
+            generator=shuffle_generator,
         )
     else:
         # Testing: use full dataset, no shuffle, larger batch

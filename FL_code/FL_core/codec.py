@@ -1,93 +1,33 @@
 from __future__ import annotations
 
-from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import csv
-import pickle
-import gzip
 import tempfile
+import time
 from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 import numpy as np
 
+from FL_code.FL_core.utils import compress_data_list, decompress_data_list, get_obj_compressed_size
+
 if TYPE_CHECKING:
     from .utils import StateDictManager
 
 
-def _get_obj_storage_size(obj: Any) -> int:
-    """Return the in-memory payload size for tensor-like compression objects."""
-    if isinstance(obj, torch.Tensor):
-        return obj.element_size() * obj.nelement()
-    if isinstance(obj, np.ndarray):
-        return obj.nbytes
-    if isinstance(obj, (list, tuple)):
-        return sum(_get_obj_storage_size(x) for x in obj)
-    if isinstance(obj, Mapping):
-        return sum(_get_obj_storage_size(v) for v in obj.values())
-    if hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
-        return len(obj) * (obj._dtype.bitwidth // 8)
-    if isinstance(obj, bytes):
-        return len(obj)
-    if obj is None:
-        return 1
-    raise TypeError(f"Unsupported object type: {type(obj)}")
-
-
-def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
-    """Return the compressed serialized size, or raw tensor-like storage size."""
-    if not with_compression or isinstance(obj, bytes):
-        return _get_obj_storage_size(obj)
-    return len(compress_data_list(obj))
-
-
-def make_serializable(item: Any) -> Any:
-    """Normalize payload values that pickle should not store as-is."""
-    if isinstance(item, torch.Tensor):
-        return item.cpu()
-    if hasattr(item, '_dtype') and hasattr(item, '__len__'):
-        return np.array(item, dtype=np.dtype(str(item._dtype)))
-    if isinstance(item, (np.integer, np.floating)):
-        return item.item()
-    if isinstance(item, OrderedDict):
-        return OrderedDict((key, make_serializable(value)) for key, value in item.items())
-    if isinstance(item, Mapping):
-        return {key: make_serializable(value) for key, value in item.items()}
-    if isinstance(item, (list, tuple)):
-        return [make_serializable(x) for x in item]
-    return item
-
-
-def compress_data_list(data_list: Any) -> bytes:
-    """Compress data using pickle and gzip."""
-    # Level 1: gzip here only estimates payload size on the server's critical path,
-    # and higher levels barely shrink float payloads while costing much more time.
-    return gzip.compress(
-        pickle.dumps(make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL),
-        compresslevel=1,
-    )
-
-
-def decompress_data_list(compressed_data: bytes) -> Any:
-    """Decompress data."""
-    return pickle.loads(gzip.decompress(compressed_data))
-
-
-# --- Compression Record --- #
+# --- History management --- #
 class Access(Enum):
     """Which reconstructed-gradient history entries a process may inspect."""
-
     NONE = "none"
-    SHARED = "shared"
+    TEMPORAL = "temporal"
     SERVER = "server"
 
 @dataclass(frozen=True, slots=True)
 class HistoryEntry:
     """One reconstructed delta committed by the codec after a successful decode."""
-
     tensor: torch.Tensor
     round_id: int
     client_id: int
@@ -101,27 +41,18 @@ class ReconstructionHistory:
     def __init__(self, max_per_client: int) -> None:
         self.max_per_client: int = max_per_client
         self._server: dict[int, list[HistoryEntry]] = {}
-        self._shared: dict[int, list[HistoryEntry]] = {}
+        self._temporal: dict[int, list[HistoryEntry]] = {}
         self._keep_server: bool = True
-        self._keep_shared: bool = True
+        self._keep_temporal: bool = True
 
     def finish_warmup(self, routine_accesses: Sequence[Access]) -> None:
         """Discard ledgers that the repeating routine phase will never read."""
         routine_plan = tuple(routine_accesses)
         assert all(isinstance(access, Access) for access in routine_plan), (
             "Routine history access plan must contain Access values.")
-        self._set_retention(
-            server=Access.SERVER in routine_plan,
-            shared=Access.SHARED in routine_plan,
-        )
 
-    def _set_retention(self, *, server: bool, shared: bool) -> None:
-        self._keep_server = server
-        self._keep_shared = shared
-        if not server:
-            self._server.clear()
-        if not shared:
-            self._shared.clear()
+        self._keep_server = Access.SERVER in routine_plan
+        self._keep_temporal = Access.TEMPORAL in routine_plan
 
     def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
         """Commit a reconstructed tensor to every ledger allowed to retain it."""
@@ -138,41 +69,22 @@ class ReconstructionHistory:
         )
         if self._keep_server:
             self._add_entry(self._server, entry)
-        if access is Access.SHARED and self._keep_shared:
-            self._add_entry(self._shared, entry)
+        if access is Access.TEMPORAL and self._keep_temporal:
+            self._add_entry(self._temporal, entry)
 
     def view(self, access: Access, record: CompressionRecord) -> tuple[HistoryEntry, ...]:
         """Return the history entries visible to the requested process."""
         if access is Access.NONE:
             return ()
-        if access is Access.SHARED:
-            assert record.client_id in self._shared, (
-                f"No shared reconstruction history exists for client {record.client_id}."
-            )
-            return tuple(self._shared[record.client_id])
+
+        if access is Access.TEMPORAL:
+            assert record.client_id in self._temporal, (
+                f"No temporal reconstruction history exists for client {record.client_id}.")
+            return tuple(self._temporal[record.client_id])
+
         assert access is Access.SERVER, f"Unknown access policy: {access!r}."
         entries = [entry for ledger in self._server.values() for entry in ledger]
         return tuple(sorted(entries, key=lambda entry: (entry.round_id, entry.client_id)))
-
-    def latest_for_client(self, access: Access, record: CompressionRecord) -> HistoryEntry:
-        """Return the latest visible entry for the record's client."""
-        assert access is Access.SERVER, "Client-specific latest lookup is only defined for server history."
-        assert record.client_id in self._server and self._server[record.client_id], (
-            f"No server reconstruction history exists for client {record.client_id}."
-        )
-        return self._server[record.client_id][-1]
-
-    def seed(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
-        """Insert externally prepared side information for diagnostics or experiments."""
-        tensor = reconst.detach().to(device="cpu", dtype=torch.float16)
-        self.commit(tensor, record, access)
-
-    def tensor_ledgers(self, access: Access) -> list[list[torch.Tensor]]:
-        """Return a tensor-only snapshot of one internal ledger for diagnostics."""
-        assert access in {Access.SERVER, Access.SHARED}, f"Cannot snapshot access policy: {access!r}."
-        history = self._server if access is Access.SERVER else self._shared
-        max_client_id = max(history, default=-1)
-        return [[entry.tensor for entry in history.get(client_id, [])] for client_id in range(max_client_id + 1)]
 
     def _add_entry(self, history: dict[int, list[HistoryEntry]], entry: HistoryEntry) -> None:
         ledger = history.setdefault(entry.client_id, [])
@@ -181,7 +93,7 @@ class ReconstructionHistory:
             ledger.pop(0)
 
 
-# --- Compression Record --- #
+# --- Record Row Data --- #
 class CompressionRecord:
     """Record for compression metrics. Stores all attributes for CSV export."""
 
@@ -194,6 +106,8 @@ class CompressionRecord:
         self.compressed_bytes: float | None = None
         self.basic_raw_bytes: float | None = None
         self.compression_ratio: float | None = None
+        self.encode_seconds: float | None = None
+        self.decode_seconds: float | None = None
 
         self.global_eval_metrics: dict[str, float] = {}
         self.worker_eval_metrics: dict[str, dict[str, float]] = {}
@@ -274,6 +188,7 @@ class BaseCodec:
     """
 
     OPTION_ORDER: tuple[str, ...] = ()
+    record_class: type[CompressionRecord] = CompressionRecord
 
     def __init__(self, codec_name: str = "base") -> None:
         self.codec_name = codec_name
@@ -296,9 +211,17 @@ class BaseCodec:
         assert not option_tokens
         return cls(codec_name=codec_name)
 
-    def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
-        """Create a metrics record for one client-round compression."""
-        return CompressionRecord(round_id, client_id, method=self.codec_name)
+    def create_codec_record(self, round_id: int, client_id: int, **record_inputs: Any) -> CompressionRecord:
+        """Create a codec-owned metrics record for one client-round compression."""
+        record = self.record_class(
+            round_id=round_id,
+            client_id=client_id,
+            method=self.codec_name,
+        )
+        unknown_inputs = record_inputs.keys() - vars(record).keys()
+        assert not unknown_inputs, f"Unknown record input fields: {tuple(unknown_inputs)}."
+        vars(record).update(record_inputs)
+        return record
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         """Encode one flattened model delta into a transport payload."""
@@ -333,40 +256,7 @@ class BaseCodec:
         return payload_content
 
 
-class BasicCompressionCodec(BaseCodec):
-    """Basic compression: float16 + gzip. Extends BaseCodec."""
-
-    @staticmethod
-    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
-        """Validate basic codec name options."""
-        assert not option_tokens, f"basic codec does not accept options: {option_tokens!r}."
-
-    @classmethod
-    def create_from_codec_name(
-        cls,
-        codec_name: str,
-        protocol_name: str,
-        option_tokens: Sequence[str],
-        sd_manager: StateDictManager | None,
-    ) -> BasicCompressionCodec:
-        """Create a basic compression codec from a validated codec name."""
-        assert protocol_name == "basic"
-        assert not option_tokens
-        return cls(codec_name=codec_name)
-
-    def create_record(self, round_id: int, client_id: int) -> CompressionRecord:
-        """Create a metrics record for basic float16 compression."""
-        return CompressionRecord(round_id, client_id, method=self.codec_name)
-
-    def _compress(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
-        delta_fp16 = delta_vec.to(torch.float16)
-        return delta_fp16
-    
-    def _decompress(self, payload_content: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
-        return payload_content.to(torch.float32)
-
-
-# --- Codec Name Parsing --- #
+# --- Codec Name Parsing and factory --- #
 def parse_and_validate_codec_name(codec_name: str) -> tuple[str, tuple[str, ...]]:
     """Validate a codec name and return protocol plus ordered option tokens."""
     assert isinstance(codec_name, str), f"codec must be a string; got {type(codec_name).__name__}."
@@ -387,8 +277,6 @@ def get_protocol_class(protocol_name: str) -> type[BaseCodec]:
     """Return the protocol class selected by a codec-name protocol token."""
     if protocol_name == "base":
         return BaseCodec
-    if protocol_name == "basic":
-        return BasicCompressionCodec
     if protocol_name == "split":
         from FL_code.other_protocols.n_split_protocol import NSplitCodec
         return NSplitCodec
@@ -408,59 +296,67 @@ def create_codec(codec_name: str, sd_manager: StateDictManager | None) -> BaseCo
 def record_reconstruction_metrics(
     original: torch.Tensor,
     reconstructed: torch.Tensor,
-    record: CompressionRecord,
-) -> None:
-    """Populate distortion metrics for one reconstructed delta."""
+) -> dict[str, float | None]:
+    """Return distortion metrics for one reconstructed delta."""
     assert original.shape == reconstructed.shape, (
         f"Reconstruction shape mismatch: got {tuple(reconstructed.shape)}, expected {tuple(original.shape)}."
     )
     error = reconstructed - original
-    record.mse = torch.mean(error ** 2).item()
-    record.mape = torch.mean(torch.abs(error) / (torch.abs(original) + 1e-8)).item() * 100
-    record.mspe_sqrt = torch.sqrt(torch.mean(error ** 2 / (original ** 2 + 1e-8))).item() * 100
+    mse = torch.mean(error ** 2).item()
+    w_mean_of_vec = torch.abs(original).mean().item()
+    metrics: dict[str, float | None] = {
+        "mse": mse,
+        "mape": torch.mean(torch.abs(error) / (torch.abs(original) + 1e-8)).item() * 100,
+        "mspe_sqrt": torch.sqrt(torch.mean(error ** 2 / (original ** 2 + 1e-8))).item() * 100,
+        "w_mean_of_vec": w_mean_of_vec,
+        "wmape": None,
+        "wmspe_sqrt": None,
+    }
+    if w_mean_of_vec == 0.0:
+        return metrics
 
-    record.w_mean_of_vec = torch.abs(original).mean().item()
-    if record.w_mean_of_vec == 0.0:
-        record.wmape = None
-        record.wmspe_sqrt = None
-        return
-
-    record.wmape = torch.mean(torch.abs(error)).item() / record.w_mean_of_vec * 100
-    record.wmspe_sqrt = float(np.sqrt(record.mse)) / record.w_mean_of_vec * 100
+    metrics["wmape"] = torch.mean(torch.abs(error)).item() / w_mean_of_vec * 100
+    metrics["wmspe_sqrt"] = float(np.sqrt(mse)) / w_mean_of_vec * 100
+    return metrics
 
 
 def simulate_compression(
     codec: BaseCodec, delta_vec: torch.Tensor, client_id: int, round_id: int,
     model_size: int, save_dir: Path,
     server_eval_metrics: dict[str, float], worker_eval_metrics: Sequence[float],
-    metric_keys: list[str]) -> torch.Tensor:
+    metric_keys: Sequence[str]
+) -> torch.Tensor:
     """Simulate client encoding and server decoding for one flattened delta."""
-    # Create record for this compression operation
-    record = codec.create_record(round_id, client_id)
-    record.model_size = model_size
-    record.global_eval_metrics = server_eval_metrics
-
-    # Restructure worker metrics to match server metrics structure
     num_metrics = len(metric_keys)
     expected_len = num_metrics * 2
-    assert len(worker_eval_metrics) == expected_len, (
-        f"worker_eval_metrics must contain {expected_len} "
-        f"values for {num_metrics} metric keys; "
-        f"got {len(worker_eval_metrics)}."
+    assert len(worker_eval_metrics) == expected_len
+
+    record = codec.create_codec_record(
+        round_id,
+        client_id,
+        model_size=model_size,
+        global_eval_metrics=server_eval_metrics,
+        worker_eval_metrics={
+            'train': {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)},
+            'test': {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)},
+        },
     )
-    train_metrics = {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)}
-    test_metrics = {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)}
-    record.worker_eval_metrics = {'train': train_metrics, 'test': test_metrics}
 
     # Encode (client-side simulation)
+    start_time = time.perf_counter()
     payload = codec.encode(delta_vec, record)
+    record.encode_seconds = time.perf_counter() - start_time
     
     # Decode (server-side)
+    start_time = time.perf_counter()
     reconstructed = codec.decode(payload, record)
+    record.decode_seconds = time.perf_counter() - start_time
+
     assert reconstructed.numel() == model_size, (
-        f"{codec.__class__.__name__} reconstructed {reconstructed.numel()} values; expected {model_size}."
-    )
-    record_reconstruction_metrics(delta_vec, reconstructed, record)
+        f"{codec.__class__.__name__} reconstructed {reconstructed.numel()} values; expected {model_size}.")
+    
+    recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
+    vars(record).update(recons_error_and_metric)
 
     record.append_record_to_csv(save_dir)
 

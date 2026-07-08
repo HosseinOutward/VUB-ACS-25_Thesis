@@ -59,6 +59,8 @@ from typing import TYPE_CHECKING, Any
 import torch
 from pydantic import BaseModel, ConfigDict
 
+from FL_code.FL_core.utils import get_obj_compressed_size
+
 from .cancer_quantizer import WZQuantizerCancer
 from FL_code.FL_core.codec import (
     Access,
@@ -66,7 +68,6 @@ from FL_code.FL_core.codec import (
     HistoryEntry,
     BaseCodec,
     ReconstructionHistory,
-    get_obj_compressed_size,
 )
 from .prior_calculator import PriorCalculator
 
@@ -187,6 +188,8 @@ class CancerRecord(CompressionRecord):
 # ============================================================================
 class CancerCodec(BaseCodec):
     """Cancer protocol codec coordinating WZ quantizers and side-information histories."""
+
+    record_class: type[CancerRecord] = CancerRecord
 
     def __init__(
         self,
@@ -327,18 +330,19 @@ class CancerCodec(BaseCodec):
         assert record.round_type is not None
         round_type = self._base_round_type(record.round_type)[0]
         if round_type in _CLIENT_RECONSTRUCTION_ROUNDS:
-            return Access.SHARED
+            return Access.TEMPORAL
         if round_type in {"R", "S", "F"}:
             return Access.SERVER
         return Access.NONE
 
-    def create_record(self, round_id: int, client_id: int) -> CancerRecord:
+    def create_codec_record(self, round_id: int, client_id: int, **record_inputs: Any) -> CancerRecord:
+        """Create a Cancer protocol metrics record for one client-round compression."""
         cfg = self.c_cfg
         self._ensure_client_state(client_id)
         is_warmup = round_id < len(cfg.warmup_phase)
         if not is_warmup and not self._history_warmup_finished:
             _history_access = lambda round_type_s: {
-                    "P": Access.SERVER, "R": Access.SERVER, "S": Access.SERVER, "T": Access.SHARED
+                    "P": Access.SERVER, "R": Access.SERVER, "S": Access.SERVER, "T": Access.TEMPORAL
                 }.get(self._base_round_type(round_type_s)[0], Access.NONE)
             self.reconstruction_history.finish_warmup(
                 [_history_access(round_type) for round_type, _, _ in cfg.routine_phase])
@@ -347,10 +351,19 @@ class CancerCodec(BaseCodec):
         temp = (round_id - len(cfg.warmup_phase)) % len(cfg.routine_phase)
         round_type, round_bpp, round_np = cfg.warmup_phase[round_id] if is_warmup else cfg.routine_phase[temp]
         phase = "warmup" if is_warmup else "routine"
-
-        return CancerRecord(
-            round_id=round_id, client_id=client_id, method=self.codec_name, phase=phase,
-            round_type=round_type, bits_per_plane=round_bpp, num_planes=round_np)
+        record_inputs = {
+            "phase": phase,
+            "round_type": round_type,
+            "bins_per_plane": round_bpp,
+            "num_planes": round_np,
+        } | record_inputs
+        record = super().create_codec_record(
+            round_id,
+            client_id,
+            **record_inputs,
+        )
+        assert isinstance(record, CancerRecord)
+        return record
 
     def _train_quantizer_or_load(self, delta_vec: torch.Tensor, record: CancerRecord) -> None:
         """Train new quantizer or load pretrained if needed (P, T, R rounds)."""
@@ -369,8 +382,14 @@ class CancerCodec(BaseCodec):
         if round_type == "P":
             prior_recons = self.reconstruction_history.view(Access.SERVER, record)
         elif round_type == "R":
-            target_recon = self.reconstruction_history.latest_for_client(Access.SERVER, record)
             server_recons = self.reconstruction_history.view(Access.SERVER, record)
+            target_recon = next(
+                (recon for recon in reversed(server_recons) if recon.client_id == record.client_id),
+                None,
+            )
+            assert target_recon is not None, (
+                f"No server reconstruction history exists for client {record.client_id}."
+            )
             training_recons = tuple(
                 recon
                 for recon in server_recons
@@ -384,7 +403,7 @@ class CancerCodec(BaseCodec):
                 self.c_cfg.max_side_info_count * client_count - 1
             ), "Retrain side-information count does not match protocol schedule."
         elif round_type == "T":
-            training_recons = self.reconstruction_history.view(Access.SHARED, record)
+            training_recons = self.reconstruction_history.view(Access.TEMPORAL, record)
             prior_recons = training_recons
             target = delta_vec
         else:
@@ -531,7 +550,7 @@ if __name__ == "__main__":
         for client_id in range(num_clients):
             print(f"C{client_id} -- ", end='', flush=True)
             delta = client_deltas[client_id]
-            record = codec.create_record(round_id, client_id)
+            record = codec.create_codec_record(round_id, client_id)
             record.model_size = vector_size
 
             # Cancer compression & decompression (metrics computed in encode/decode)

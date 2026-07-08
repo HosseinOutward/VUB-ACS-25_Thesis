@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class NSplitRecord(CompressionRecord):
     """Compression record for n-split quantized-symbol diagnostics."""
 
-    def __init__(self, round_id: int, client_id: int, bins_per_plane: int | None, method: str) -> None:
+    def __init__(self, round_id: int, client_id: int, method: str, bins_per_plane: int | None = None) -> None:
         super().__init__(round_id, client_id, method)
         self.bins_per_plane: int | None = bins_per_plane
         self.prior_rate: float | None = None
@@ -37,6 +37,7 @@ class NSplitCodec(BaseCodec):
     """Baseline codec that quantizes values by percentile split points."""
 
     OPTION_ORDER: tuple[str, ...] = ("points",)
+    record_class: type[NSplitRecord] = NSplitRecord
 
     def __init__(self, split_points: int, codec_name: str = "split|points=3") -> None:
         super().__init__(codec_name)
@@ -68,8 +69,15 @@ class NSplitCodec(BaseCodec):
         assert key == "points" and sep == "=", "split codec name was not validated before creation."
         return cls(int(value), codec_name=codec_name)
 
-    def create_record(self, round_id: int, client_id: int) -> NSplitRecord:
-        return NSplitRecord(round_id, client_id, self.split_points, method=self.codec_name)
+    def create_codec_record(self, round_id: int, client_id: int, **record_inputs: Any) -> NSplitRecord:
+        """Create an n-split metrics record for one client-round compression."""
+        record = super().create_codec_record(
+            round_id,
+            client_id,
+            **({"bins_per_plane": self.split_points} | record_inputs),
+        )
+        assert isinstance(record, NSplitRecord)
+        return record
 
     def _ensure_client_history(self, client_id: int) -> list[torch.Tensor]:
         while len(self.srvr_past_reconst) <= client_id:
@@ -84,8 +92,7 @@ class NSplitCodec(BaseCodec):
             assert self.si_vec_size is not None, "Side information size must be set before fallback prior creation."
             si_raw = [torch.zeros(self.si_vec_size)]
 
-        si_raw: torch.Tensor = torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
-        return si_raw
+        return torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
 
     def bin_f(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         perc_v = [torch.quantile(x, i / self.split_points) for i in range(1, self.split_points)]
@@ -145,7 +152,7 @@ if __name__ == '__main__':
         client_deltas = [base_vector + torch.normal(0.0, 0.1, size=(vector_size,)) for _ in range(num_clients)]
 
         for ci, d_v in enumerate(client_deltas):
-            record = codec.create_record(round_id, ci)
+            record = codec.create_codec_record(round_id, ci)
             record.model_size = d_v.shape[0]
             payload = codec.encode(d_v, record)
             reconst = codec.decode(payload, record)

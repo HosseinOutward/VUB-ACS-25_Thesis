@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Mapping
 import json
 from pathlib import Path
 import random
@@ -12,6 +13,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from tqdm.auto import tqdm
+
 
 from .models import FLModelTemplate, initialize_model
 from .dataset import create_dataloader
@@ -52,6 +54,7 @@ def create_training_progress_bar(
 def set_global_seed(seed: int) -> None:
     """Set random seeds for reproducibility."""
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
@@ -385,3 +388,61 @@ def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Ten
             f"Client {client_id} train split classes do not match model classes: "
             f"got {sorted(client_classes)}, expected {sorted(expected_classes)}."
         )
+
+
+def _get_obj_storage_size(obj: Any) -> int:
+    """Return the in-memory payload size for tensor-like compression objects."""
+    if isinstance(obj, torch.Tensor):
+        return obj.element_size() * obj.nelement()
+    if isinstance(obj, np.ndarray):
+        return obj.nbytes
+    if isinstance(obj, (list, tuple)):
+        return sum(_get_obj_storage_size(x) for x in obj)
+    if isinstance(obj, Mapping):
+        return sum(_get_obj_storage_size(v) for v in obj.values())
+    if hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
+        return len(obj) * (obj._dtype.bitwidth // 8)
+    if isinstance(obj, bytes):
+        return len(obj)
+    if obj is None:
+        return 1
+    raise TypeError(f"Unsupported object type: {type(obj)}")
+
+
+def compress_data_list(data_list: Any) -> bytes:
+    """Compress data using pickle and gzip."""
+    # Level 1: gzip here only estimates payload size on the server's critical path,
+    # and higher levels barely shrink float payloads while costing much more time.
+    return gzip.compress(
+        pickle.dumps(make_serializable(data_list), protocol=pickle.HIGHEST_PROTOCOL),
+        compresslevel=1,
+    )
+
+
+def get_obj_compressed_size(obj: Any, with_compression: bool = True) -> int:
+    """Return the compressed serialized size, or raw tensor-like storage size."""
+    if not with_compression or isinstance(obj, bytes):
+        return _get_obj_storage_size(obj)
+    return len(compress_data_list(obj))
+
+
+def make_serializable(item: Any) -> Any:
+    """Normalize payload values that pickle should not store as-is."""
+    if isinstance(item, torch.Tensor):
+        return item.cpu()
+    if hasattr(item, '_dtype') and hasattr(item, '__len__'):
+        return np.array(item, dtype=np.dtype(str(item._dtype)))
+    if isinstance(item, (np.integer, np.floating)):
+        return item.item()
+    if isinstance(item, OrderedDict):
+        return OrderedDict((key, make_serializable(value)) for key, value in item.items())
+    if isinstance(item, Mapping):
+        return {key: make_serializable(value) for key, value in item.items()}
+    if isinstance(item, (list, tuple)):
+        return [make_serializable(x) for x in item]
+    return item
+
+
+def decompress_data_list(compressed_data: bytes) -> Any:
+    """Decompress data."""
+    return pickle.loads(gzip.decompress(compressed_data))

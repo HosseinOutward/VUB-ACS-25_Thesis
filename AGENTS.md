@@ -26,9 +26,9 @@ The central design question is always: what side information is available at the
 
 These standards apply to every module unless a more specific local instruction says otherwise.
 
-- **Use Pydantic v2** when data contracts or structured configuration models are needed. not for functions or code data handling.
 - **Use full type hints** on every function signature and class attribute.
-- **Use advanced python syntax**, for example, `pathlib.Path` for filesystem paths over raw `str`, and many other uses of tools given by python and common libraries.
+- **Use advanced python syntax**, Its encouraged to use python best practices and advanced syntax to improve the code logic and readability. avoid over engineering for the sake of syntax though. for example, `pathlib.Path` for filesystem paths over raw `str`, and many other uses of tools given by python and common libraries.
+- **Keep code to a minimum** Common thread among below standards too, is to make use of dynamic approaches, judgment of if an extra code had any real impact or use, and if an extra function and class needed to be made. Less is always better mostly since it helps with readibilty and debugging. all else is secondary.
 - **Write concise docstrings.** Public functions need a one-paragraph docstring. Each shared data contract needs a class-level docstring explaining what it represents and who produces and consumes it.
 - **Comments explain why, not what.** Comment only when intent is non-obvious, such as a conditional field requirement or cache ordering. Do not narrate self-evident code.
 - **Fail loudly and clearly.** Hidden behavior is worse than a visible failure. On error, raise with a message that names the offending file, field, or stage. Avoid silent fallbacks and unnecessary recovery logic.
@@ -37,7 +37,6 @@ These standards apply to every module unless a more specific local instruction s
 - **No global mutable state.** Pass `Config` and other dependencies explicitly. Do not introduce module-level mutable singletons.
 - **Avoid needless abstraction.** Do not add tiny one-use functions or renaming-only helpers. Add abstractions only when they remove real duplication or make a complex concept easier to reason about.
 - **Keep control flow shallow.** Avoid unnecessary nested loops and conditionals. Prefer direct, readable logic.
-- **Advanced python syntax** Its encouraged to use python best practices and advanced syntax to improve the code logic and readability. avoid over engineering for the sake of syntax though.
 - **Avoid meaningless intermediate variables.** Create new names only when they clarify a non-trivial transformation or prevent repeated complex expressions.
 
 ---
