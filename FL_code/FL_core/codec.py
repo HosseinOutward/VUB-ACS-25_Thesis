@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import torch
 import numpy as np
 
-from FL_code.FL_core.utils import _get_obj_storage_size, compress_data_list, decompress_data_list
+from FL_code.FL_core.utils import (
+    _get_obj_storage_size,
+    compress_data_list,
+    decompress_data_list,
+    parse_configurable_name,
+)
 
 if TYPE_CHECKING:
     from .utils import StateDictManager
@@ -100,9 +105,8 @@ class CompressionRecord:
     round_id: int
     client_id: int
 
-    round_acronym: ClassVar[str]
-    round_cfg_acronym: str | None
-    protocol_name: str | None = None
+    round_name_full: str
+    protocol_name_full: str | None = None
 
     model_size: int | None = None
     encode_seconds: float | None = None
@@ -118,26 +122,21 @@ class CompressionRecord:
     wmape: float | None = None
     wmspe_sqrt: float | None = None
 
-    def __init_subclass__(cls) -> None:
-        """Require concrete record classes to declare their round acronym."""
-        super().__init_subclass__()
-        assert hasattr(cls, "round_acronym")
-
     def __init__(
         self,
         round_id: int,
         client_id: int,
-        round_cfg_acronym: str | None,
+        round_name_full: str,
     ) -> None:
         self.round_id: int = round_id
         self.client_id: int = client_id
-        self.round_cfg_acronym: str | None = round_cfg_acronym
+        self.round_name_full: str = round_name_full
 
     def to_dict(self) -> dict[str, Any]:
         """Convert record attributes to a flat CSV-ready dictionary."""
         skipped_fields = {
             "global_eval_metrics", "worker_eval_metrics"}
-        result: dict[str, Any] = {"round_acronym": self.round_acronym} | {
+        result: dict[str, Any] = {
             key: value
             for key, value in vars(self).items()
             if not key.startswith("_") and key not in skipped_fields
@@ -207,24 +206,40 @@ class BaseRoundCodec:
     """One-round compressor selected by a protocol schedule."""
 
     record_class: ClassVar[type[CompressionRecord]]
-    round_acronym: ClassVar[str]
-    round_cfg_acronym: ClassVar[str|None]
+    round_name: ClassVar[str]
+    round_name_full: str
 
     def __init_subclass__(cls) -> None:
         """Require concrete round codecs to declare their record type and round acronym."""
         super().__init_subclass__()
         assert hasattr(cls, "record_class")
-        assert hasattr(cls, "round_acronym")
-        assert hasattr(cls, "round_cfg_acronym")
+        assert hasattr(cls, "round_name")
+
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None,
+        round_name_full: str,
+    ) -> None:
+        self.round_name_full = round_name_full
+        if options:
+            self.validate_cfg(options)
+            self.options_to_config(options)
 
     def create_round_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create this round codec's metrics record for one client-round compression."""
         return self.record_class(
             round_id=round_id,
             client_id=client_id,
-            round_cfg_acronym=self.round_cfg_acronym
+            round_name_full=self.round_name_full,
         )
 
+    def options_to_config(self, options: Mapping[str, Any]) -> Any:
+        raise NotImplementedError
+
+    @staticmethod
+    def validate_cfg(options: Mapping[str, Any]) -> None:
+        raise NotImplementedError
+    
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         raise NotImplementedError
 
@@ -235,9 +250,11 @@ class BaseRoundCodec:
 class BaseProtocol:
     """Protocol schedule that selects the round codec used for each training round."""
 
-    warmup_round_codecs: ClassVar[tuple[type[BaseRoundCodec], ...]]
-    routine_round_codecs: ClassVar[tuple[type[BaseRoundCodec], ...]]
-    protocol_name: str
+    warmup_round_codecs: ClassVar[tuple[str, ...]]
+    routine_round_codecs: ClassVar[tuple[str, ...]]
+    protocol_name: ClassVar[str]
+    protocol_name_full: str
+    _round_codec_classes: dict[str, type[BaseRoundCodec]]
 
     def __init_subclass__(cls) -> None:
         """Require concrete protocols to declare their warmup and routine round codec plans."""
@@ -247,31 +264,57 @@ class BaseProtocol:
         assert hasattr(cls, "protocol_name")
         assert cls.routine_round_codecs
 
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None = None,
+        protocol_name_full: str | None = None,
+    ) -> None:
+        self.protocol_name_full = protocol_name_full or type(self).protocol_name
+        if options:
+            self.options_to_config(options)
+        self._round_codec_classes = self._validate_round_codecs()
+
+    def options_to_config(self, options: Mapping[str, Any]) -> Any:
+        raise NotImplementedError
+
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the round codec selected by this protocol schedule."""
         if round_id < len(self.warmup_round_codecs):
-            rc_acronym = self.warmup_round_codecs[round_id]
+            round_name_full = self.warmup_round_codecs[round_id]
         else:
             routine_idx = (round_id - len(self.warmup_round_codecs)) % len(self.routine_round_codecs)
-            rc_acronym = self.routine_round_codecs[routine_idx]
-        round_codec_class = rc_acronym
-        return round_codec_class()
+            round_name_full = self.routine_round_codecs[routine_idx]
+        parsed = parse_configurable_name(round_name_full, "round codec")
+        return self._round_codec_classes[round_name_full](parsed.options, round_name_full)
+
+    def _validate_round_codecs(self) -> dict[str, type[BaseRoundCodec]]:
+        round_codec_classes: dict[str, type[BaseRoundCodec]] = {}
+        for round_name_full in set(self.warmup_round_codecs + self.routine_round_codecs):
+            parsed = parse_configurable_name(round_name_full, "round codec")
+            round_codec_class = _single_named_subclass(BaseRoundCodec, "round_name", parsed.name)
+            round_codec_class.validate_cfg(parsed.options)
+            round_codec_classes[round_name_full] = round_codec_class
+        return round_codec_classes
 
 
 def create_protocol(protocol_name: str) -> BaseProtocol:
     """Create a validated protocol schedule."""
-    parse_and_validate_protocol(protocol_name)
-    return DemoProtocol()
+    parsed = parse_configurable_name(protocol_name, "protocol")
+    return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name)
+
+
+def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:
+    matches = [
+        subclass for subclass in base_class.__subclasses__()
+        if getattr(subclass, name_attr) == name]
+    assert len(matches) == 1, (
+        f"Expected one {base_class.__name__} subclass with {name_attr}={name!r}; got {len(matches)}.")
+    return matches[0]
 
 
 def parse_and_validate_protocol(protocol_name: str) -> str:
-    """Validate a protocol name and return its canonical protocol token."""
-    raise NotImplemented
-    assert isinstance(protocol_name, str), f"protocol must be a string; got {type(protocol_name).__name__}."
-    assert protocol_name, "protocol must be a non-empty string."
-    assert protocol_name == protocol_name.strip(), (
-        f"protocol={protocol_name!r} must not contain leading or trailing whitespace.")
-    assert protocol_name == "demo", f"Unknown protocol={protocol_name!r}."
+    """Validate a configured protocol name and return it unchanged."""
+    create_protocol(protocol_name)
     return protocol_name
 
 
@@ -323,7 +366,7 @@ def simulate_compression(
     assert reconstructed.numel() == model_size
 
     record.update_record_fields({
-        "protocol_name": protocol.protocol_name,
+        "protocol_name_full": protocol.protocol_name_full,
         "model_size": model_size,
         "global_eval_metrics": server_eval_metrics,
         "worker_eval_metrics": {
@@ -348,18 +391,28 @@ def simulate_compression(
 class RCDemo(BaseRoundCodec):
     """Round codec that serializes raw float32 deltas with the shared gzip transport."""
 
+    round_cfg: bool
+
     class RecordDemo(CompressionRecord):
-        round_acronym = "gzip"
-        compression_method: str | None = None
+        comp_report: int | None = None
     record_class = RecordDemo
-    round_acronym = record_class.round_acronym
-    round_cfg_acronym = None
+    round_name = "DemoRC"
+
+    def options_to_config(self, options: Mapping[str, Any]) -> None:
+        """Set whether demo records include the compression-report metric."""
+        self.round_cfg = options.get("compReport", False)
+
+    @staticmethod
+    def validate_cfg(options: Mapping[str, Any]) -> None:
+        """Validate demo round-codec options."""
+        assert set(options) <= {"compReport"}, f"Unknown Demo round codec options: {tuple(options)}."
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
         """Encode one raw float32 delta into f16, pickle then gzip."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         payload = compress_data_list(delta_vec.to(torch.float16))
-        record.update_record_fields({"compression_method": "gzip_level_1"})
+        if self.round_cfg:
+            record.update_record_fields({"comp_report": 1})
         return payload
 
     def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
@@ -369,6 +422,7 @@ class RCDemo(BaseRoundCodec):
 
 
 class DemoProtocol(BaseProtocol):
-    warmup_round_codecs= ()
-    routine_round_codecs= (RCDemo,)
-    protocol_name: str = "demo"
+    """Protocol schedule that repeatedly uses the raw demo round codec."""
+    warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
+    routine_round_codecs: ClassVar[tuple[str, ...]] = ("DemoRC|compReport",)
+    protocol_name: ClassVar[str] = "demo"

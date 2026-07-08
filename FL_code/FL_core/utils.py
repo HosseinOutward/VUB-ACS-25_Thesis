@@ -1,5 +1,6 @@
 from __future__ import annotations
 from collections.abc import Mapping
+from dataclasses import dataclass
 import gzip
 import json
 import pickle
@@ -26,6 +27,43 @@ if TYPE_CHECKING:
 # Canonical key order for evaluate() results. Client and server exchange worker
 # metrics as a flat tensor, so both sides must agree on this exact order.
 EVAL_METRIC_KEYS: tuple[str, ...] = ("loss", "acc", "f1", "auc")
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedConfigurableName:
+    """A pipe-delimited selector produced by configuration and consumed by factories."""
+
+    name: str
+    options: dict[str, Any] | None
+    option_tokens: tuple[str, ...]
+
+
+def parse_configurable_name(raw_name: str, field_name: str) -> ParsedConfigurableName:
+    """Parse a selector like name|flag|key=value into its name and option dictionary."""
+    assert isinstance(raw_name, str), f"{field_name} must be a string; got {type(raw_name).__name__}."
+    assert raw_name, f"{field_name} must be a non-empty string."
+    assert raw_name == raw_name.strip(), (
+        f"{field_name}={raw_name!r} must not contain leading or trailing whitespace.")
+
+    parts = raw_name.split("|")
+    name = parts[0]
+    assert name, f"{field_name}={raw_name!r} must start with a non-empty name."
+    assert name == name.strip(), f"{field_name} selector {name!r} must not contain surrounding whitespace."
+
+    options: dict[str, Any] = {}
+    for token in parts[1:]:
+        assert token, f"{field_name}={raw_name!r} contains an empty option token."
+        assert token == token.strip(), (
+            f"{field_name} option {token!r} must not contain surrounding whitespace.")
+        key, sep, value = token.partition("=")
+        assert key, f"{field_name} option {token!r} must have a non-empty key."
+        assert key not in options, f"{field_name} option {key!r} appears more than once."
+        options[key] = eval(value) if sep else True
+        assert options[key] is True or options[key] != "", (
+            f"{field_name} option {token!r} must not have an empty value.")
+
+    options = None if not options else options
+    return ParsedConfigurableName(name=name, options=options, option_tokens=tuple(parts[1:]))
 
 
 
