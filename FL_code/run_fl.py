@@ -5,15 +5,15 @@ import os
 from datetime import timedelta
 from typing import Any
 
-from FL_code.dataset import _force_class_coverage
-from FL_code.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
+from FL_code.FL_core.dataset import _force_class_coverage
+from FL_code.FL_core.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
 import torch
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from FL_code.codec import parse_and_validate_codec_name
+from FL_code.FL_core.codec import parse_and_validate_codec_name
 
 
 class FLConfig(BaseModel):
@@ -117,10 +117,10 @@ def _worker(
 
     try:
         if rank == 0:
-            from FL_code.server import run_federated_server
+            from FL_code.FL_core.server import run_federated_server
             run_federated_server(cfg, rank, world_size, X_test, y_test)
         else:
-            from FL_code.client import run_federated_client
+            from FL_code.FL_core.client import run_federated_client
             run_federated_client(cfg, rank, world_size, X_train, y_train, X_test, y_test)
     except Exception:
         print(f"\n{'='*70}", file=sys.stderr)
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     if cfg.dataset_fraction is not None:
         print(f"[Debug] Using {cfg.dataset_fraction*100:.1f}% of dataset for quick testing.")
 
-    from FL_code.dataset import precompute_dataset_to_shared
+    from FL_code.FL_core.dataset import precompute_dataset_to_shared
     X_train, y_train = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,
                                                     "train", torch.float32, cfg.dataset_fraction, cfg.seed)
     X_test, y_test = precompute_dataset_to_shared(cfg.dataset_name, cfg.data_folder,

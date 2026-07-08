@@ -4,7 +4,7 @@ import torch
 import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
-from FL_code.utils import (
+from .utils import (
     EVAL_METRIC_KEYS, set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics)
 
 

@@ -15,7 +15,7 @@ import torch
 import numpy as np
 
 if TYPE_CHECKING:
-    from FL_code.utils import StateDictManager
+    from .utils import StateDictManager
 
 
 def _get_obj_storage_size(obj: Any) -> int:

@@ -8,11 +8,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from FL_code.cancer_protocol import CancerCodec, CancerConfig, CancerRecord
-from FL_code.cancer_quantizer import WZQuantizerCancer
-from FL_code.codec import Access, CompressionRecord, get_obj_compressed_size, record_reconstruction_metrics
-from FL_code.prior_calculator import PriorCalculator
-from FL_code.utils import create_training_progress_bar
+from .cancer_protocol import CancerCodec, CancerConfig, CancerRecord
+from .cancer_quantizer import WZQuantizerCancer
+from FL_code.FL_core.codec import Access, CompressionRecord, get_obj_compressed_size, record_reconstruction_metrics
+from .prior_calculator import PriorCalculator
+from FL_code.FL_core.utils import create_training_progress_bar
 
 
 class SampledCancerRecord(CancerRecord):

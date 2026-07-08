@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from FL_code.cancer_protocol import CancerConfig
-from FL_code.codec import CompressionRecord, BaseCodec
-from FL_code.prior_calculator import PriorCalculator
+from FL_code.FL_core.codec import CompressionRecord, BaseCodec
+from FL_code.cancer_protocol.prior_calculator import PriorCalculator
 
 if TYPE_CHECKING:
-    from FL_code.utils import StateDictManager
+    from FL_code.FL_core.utils import StateDictManager
 
 
 class NSplitRecord(CompressionRecord):

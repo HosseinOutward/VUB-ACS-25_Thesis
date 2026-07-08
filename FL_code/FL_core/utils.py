@@ -13,8 +13,8 @@ import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from tqdm.auto import tqdm
 
-from FL_code.models import FLModelTemplate, initialize_model
-from FL_code.dataset import create_dataloader
+from .models import FLModelTemplate, initialize_model
+from .dataset import create_dataloader
 
 if TYPE_CHECKING:
     from FL_code.run_fl import FLConfig
