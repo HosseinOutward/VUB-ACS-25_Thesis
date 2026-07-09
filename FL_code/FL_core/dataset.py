@@ -27,20 +27,11 @@ class SharedTensorDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-# Dataset configurations: (mean, std, data_loader_func)
-DATASET_CONFIG = {
-    'SVHN': {
-        'mean': [0.4377, 0.4438, 0.4728],
-        'std': [0.1980, 0.2010, 0.1970],
-    },
-    'CIFAR10': {
-        'mean': [0.4914, 0.4822, 0.4465],
-        'std': [0.2470, 0.2435, 0.2616],
-    },
-    'SYNTHETIC': {
-        'mean': [0.0, 0.0, 0.0],
-        'std': [1.0, 1.0, 1.0],
-    },
+# Dataset configurations: (mean, std)
+DATASET_CONFIG: dict[str, tuple[tuple[float, float, float],...]] = {
+    'SVHN': ((0.4377, 0.4438, 0.4728), (0.1980, 0.2010, 0.1970)),
+    'CIFAR10': ((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+    'SYNTHETIC': ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
 }
 
 
@@ -58,7 +49,7 @@ def precompute_dataset_to_shared(
         raise ValueError(f"Unknown dataset: {dataset_name}. Available: {list(DATASET_CONFIG.keys())}")
 
     is_train = (split == "train")
-    cfg = DATASET_CONFIG[dataset_name]
+    mean_values, std_values = DATASET_CONFIG[dataset_name]
     data_path = Path(data_folder)
 
     # Load dataset
@@ -91,8 +82,8 @@ def precompute_dataset_to_shared(
             X, y = X[:n].clone(), y[:n].clone()
 
     # Normalize in place to avoid transient full-size copies of the dataset
-    mean = torch.tensor(cfg['mean']).view(1, 3, 1, 1)
-    std = torch.tensor(cfg['std']).view(1, 3, 1, 1)
+    mean = torch.tensor(mean_values).view(1, 3, 1, 1)
+    std = torch.tensor(std_values).view(1, 3, 1, 1)
     X = X.sub_(mean).div_(std).to(dtype)
 
     X.share_memory_()

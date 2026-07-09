@@ -74,21 +74,18 @@ def create_training_progress_bar(
     leave: bool = False,
     position: int = 0
 ) -> tqdm:
-    common_config = {
-        'disable': disable,
-        'desc': desc,
-        'leave': leave,
-        'position': position
-    }
-
     # try:
     #     ipython = get_ipython()  # type: ignore
     # except NameError:
-    common_config['file'] = sys.stderr
-    common_config['bar_format'] = \
-        '{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}'
-
-    return tqdm(total=iterable_or_total, **common_config)
+    return tqdm(
+        total=iterable_or_total,
+        disable=disable,
+        desc=desc,
+        leave=leave,
+        position=position,
+        file=sys.stderr,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}]{postfix}",
+    )
 
 
 def set_global_seed(seed: int) -> None:
@@ -376,9 +373,8 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
     with config_path.open() as f:
         saved_config = json.load(f)
 
-    current_config = cfg.model_dump(mode="json")
     # Fields that cannot affect the saved training data, so replays may differ in them.
-    _DEBUG_CONFIG_IGNORED_FIELDS = frozenset({
+    ignored_fields = {
         "protocol",
         "run_name",
         "records_dir",
@@ -388,10 +384,12 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
         "training_progress_bar",
         "debug_save_train_data",
         "debug_load_from_saved_data",
-    })
-    for field in _DEBUG_CONFIG_IGNORED_FIELDS:
-        saved_config.pop(field, None)
-        current_config.pop(field, None)
+    }
+    unknown_fields = ignored_fields - type(cfg).model_fields.keys()
+    assert not unknown_fields, f"Unknown debug config ignored field(s): {tuple(sorted(unknown_fields))}."
+
+    saved_config = {field: value for field, value in saved_config.items() if field not in ignored_fields}
+    current_config = cfg.model_dump(mode="json", exclude=ignored_fields)
 
     assert saved_config == current_config, (
         f"Debug data in {save_dir} was saved with a different FLConfig: "
