@@ -7,12 +7,13 @@ from pathlib import Path
 import csv
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 import numpy as np
 
 from FL_code.FL_core.utils import (
+    ParsedConfigurableName,
     _get_obj_storage_size,
     compress_data_list,
     decompress_data_list,
@@ -38,7 +39,7 @@ class HistoryEntry:
     round_id: int
     client_id: int
     access: Access
-    round_type: str | None
+    round_name: str | None
 
 
 class ReconstructionHistory:
@@ -100,7 +101,7 @@ class ReconstructionHistory:
             round_id=record.round_id,
             client_id=record.client_id,
             access=access,
-            round_type=getattr(record, "round_type", None),
+            round_name=record.round_name_full,
         )
         if self._keep_server:
             self._add_entry(self._server, entry)
@@ -186,7 +187,7 @@ class CompressionRecord:
 
         return result
 
-    def update_record_fields(self, updates: Mapping[str, Any]) -> None:
+    def update_record_fields(self, **updates: Any) -> None:
         """Update unset record fields with known non-null values."""
         unknown_fields = {field_name for field_name in updates if not hasattr(self, field_name)}
         assert not unknown_fields, f"Unknown record fields: {tuple(unknown_fields)}."
@@ -245,9 +246,9 @@ class BaseRoundCodec:
     def __init_subclass__(cls) -> None:
         """Require concrete round codecs to declare their record type and round acronym."""
         super().__init_subclass__()
-        assert hasattr(cls, "record_class")
-        assert hasattr(cls, "round_name")
-        assert hasattr(cls, "history_access_needs")
+        assert issubclass(cls.record_class, CompressionRecord)
+        assert cls.round_name
+        assert isinstance(cls.history_access_needs, Access)
 
     def __init__(
         self,
@@ -257,22 +258,25 @@ class BaseRoundCodec:
     ) -> None:
         self.round_name_full = round_name_full
         if options:
-            self.validate_cfg(options)
-            self.options_to_config(options)
+            self.validate_cfg(**options)
+            self.options_to_config(**options)
 
     def create_round_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create this round codec's metrics record for one client-round compression."""
+        if not issubclass(self.record_class, CompressionRecord):
+            raise TypeError(
+                "Don't use CompressionRecord directly, override create_round_record() in a concrete round codec to return a subclass.")
         return self.record_class(
             round_id=round_id,
             client_id=client_id,
             round_name_full=self.round_name_full,
         )
 
-    def options_to_config(self, options: Mapping[str, Any]) -> Any:
+    def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
 
     @staticmethod
-    def validate_cfg(options: Mapping[str, Any]) -> None:
+    def validate_cfg(**options: Any) -> None:
         raise NotImplementedError
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
@@ -296,34 +300,35 @@ class BaseProtocol:
     def __init_subclass__(cls) -> None:
         """Require concrete protocols to declare their warmup and routine round codec plans."""
         super().__init_subclass__()
-        assert hasattr(cls, "warmup_round_codecs")
-        assert hasattr(cls, "routine_round_codecs")
-        assert hasattr(cls, "protocol_name")
-        assert hasattr(cls, "max_per_client_recons_history")
+        assert isinstance(cls.warmup_round_codecs, tuple)
+        assert isinstance(cls.routine_round_codecs, tuple)
         assert cls.routine_round_codecs
+        assert cls.protocol_name
+        assert cls.max_per_client_recons_history != 0
 
     def __init__(
         self,
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
+        sd_slices: Sequence[slice] | None = None
     ) -> None:
         self.protocol_name_full = protocol_name_full or type(self).protocol_name
         if options:
-            self.options_to_config(options)
+            self.options_to_config(**options)
         self._round_codec_classes = self._validate_round_codecs()
         self._recons_history = ReconstructionHistory(
             max_per_client=self.max_per_client_recons_history,
             routine_accesses=[h.history_access_needs for h in self._round_codec_classes.values()]
         )
 
-    def options_to_config(self, options: Mapping[str, Any]) -> Any:
+    def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
 
     def create_round_codec(
         self,
         round_id: int,
         client_id: int,
-        protocol_inputs: dict[str, Any] = {},
+        **protocol_inputs: Any
     ) -> BaseRoundCodec:
         """Create the round codec selected by this protocol schedule."""
         if round_id < len(self.warmup_round_codecs):
@@ -341,20 +346,29 @@ class BaseProtocol:
         for round_name_full in set(self.warmup_round_codecs + self.routine_round_codecs):
             parsed = parse_configurable_name(round_name_full, "round codec")
             round_codec_class = _single_named_subclass(BaseRoundCodec, "round_name", parsed.name)
-            round_codec_class.validate_cfg(parsed.options)
+            if parsed.options:
+                round_codec_class.validate_cfg(**parsed.options)
             round_codec_classes[round_name_full] = round_codec_class
         return round_codec_classes
 
 
-def create_protocol(protocol_name: str) -> BaseProtocol:
+def create_protocol(protocol_name: str, sd_slices: Sequence[slice] | None = None) -> BaseProtocol:
     """Create a validated protocol schedule."""
+    from FL_code.cancer_protocol import NewCancer
     parsed = parse_configurable_name(protocol_name, "protocol")
-    return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name)
+    return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name, sd_slices=sd_slices)
 
 
 def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:
+    def all_subclasses(parent: type) -> list[type]:
+        return [
+            subclass
+            for direct_subclass in parent.__subclasses__()
+            for subclass in (direct_subclass, *all_subclasses(direct_subclass))
+        ]
+
     matches = [
-        subclass for subclass in base_class.__subclasses__()
+        subclass for subclass in all_subclasses(base_class)
         if getattr(subclass, name_attr) == name]
     assert len(matches) == 1, (
         f"Expected one {base_class.__name__} subclass with {name_attr}={name!r}; got {len(matches)}.")
@@ -420,22 +434,21 @@ def simulate_compression(
             round_codec.history_access_needs,
         )
 
-    record.update_record_fields({
-        "protocol_name_full": protocol.protocol_name_full,
-        "model_size": model_size,
-        "global_eval_metrics": server_eval_metrics,
-        "worker_eval_metrics": {
+    record.update_record_fields(
+        protocol_name_full=protocol.protocol_name_full,
+        model_size=model_size,
+        global_eval_metrics=server_eval_metrics,
+        worker_eval_metrics={
             'train': {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)},
             'test': {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)},
         },
-
-        "final_bytes": _get_obj_storage_size(payload),
-        "encode_seconds": encode_seconds,
-        "decode_seconds": decode_seconds,
-    })
+        final_bytes=_get_obj_storage_size(payload),
+        encode_seconds=encode_seconds,
+        decode_seconds=decode_seconds,
+    )
 
     recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
-    record.update_record_fields(recons_error_and_metric)
+    record.update_record_fields(**recons_error_and_metric)
 
     record.append_record_to_csv(save_dir)
 
@@ -450,6 +463,7 @@ class RCDemo(BaseRoundCodec):
 
     class RecordDemo(CompressionRecord):
         comp_report: int | None = None
+        random_field: int | None = None
     record_class = RecordDemo
     round_name = "DemoRC"
     history_access_needs = Access.BOTH
@@ -464,21 +478,27 @@ class RCDemo(BaseRoundCodec):
         super().__init__(options, round_name_full)
         self.frozen_history = frozen_history
 
-    def options_to_config(self, options: Mapping[str, Any]) -> None:
+    def create_round_record(self, round_id: int, client_id: int) -> RCDemo.RecordDemo:
+        """Create a demo metrics record with a random demo-only field."""
+        raw_record = super().create_round_record(round_id, client_id)
+        assert isinstance(raw_record, RCDemo.RecordDemo)
+        raw_record.random_field = int(np.random.randint(0, 100))
+        return raw_record
+
+    def options_to_config(self, compReport: bool) -> None:
         """Set whether demo records include the compression-report metric."""
-        self.round_cfg = options.get("compReport", False)
+        self.round_cfg = compReport
 
     @staticmethod
-    def validate_cfg(options: Mapping[str, Any]) -> None:
-        """Validate demo round-codec options."""
-        assert set(options) <= {"compReport"}, f"Unknown Demo round codec options: {tuple(options)}."
+    def validate_cfg(compReport: bool) -> None:
+        assert isinstance(compReport, bool), "DemoRC compReport option must be a boolean."
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
         """Encode one raw float32 delta into f16, pickle then gzip."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         payload = compress_data_list(delta_vec.to(torch.float16))
         if self.round_cfg:
-            record.update_record_fields({"comp_report": 1})
+            record.update_record_fields(comp_report=1)
         return payload
 
     def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
@@ -497,7 +517,4 @@ class DemoProtocol(BaseProtocol):
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         frozen_history = self._recons_history.copy()
         frozen_history.freeze()
-        protocol_inputs = {
-            "frozen_history": frozen_history,
-        }
-        return super().create_round_codec(round_id, client_id, protocol_inputs)
+        return super().create_round_codec(round_id, client_id, frozen_history=frozen_history)

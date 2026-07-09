@@ -36,7 +36,7 @@ def run_federated_server(
         loaded_state_dict = torch.load(delta_data_path)
         model.load_state_dict(loaded_state_dict)
 
-    protocol = create_protocol(cfg.protocol)
+    protocol = create_protocol(cfg.protocol, sd_manager.get_slices())
 
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using protocol: {protocol.__class__.__name__}")
