@@ -307,7 +307,16 @@ class WZQuantizerCancer:
         assert bins.shape == (self.num_planes, self.vector_size)
         assert bins.max().item() < self.bins_per_plane
         side_info = self.side_info_tensor()
+        recons = self._decode_preprocessed(bins, side_info, batch_size)
+        return self.postprocess(recons, metadata)
 
+    def _decode_preprocessed(
+        self,
+        bins: torch.Tensor,
+        side_info: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Decode normalized reconstruction values from bins and normalized side information."""
         def decode_batch(start: int, end: int) -> torch.Tensor:
             codes = [
                 F.one_hot(plane.long().to(self.device), num_classes=self.bins_per_plane).float()
@@ -315,8 +324,8 @@ class WZQuantizerCancer:
             ]
             return self.coding_model.decode(codes, side_info[start:end])[-1].cpu()
 
-        recons = batch_loop(decode_batch, self.coding_model, self.vector_size, batch_size)
-        return self.postprocess(recons.squeeze(), metadata)
+        recons = batch_loop(decode_batch, self.coding_model, bins.shape[1], batch_size)
+        return recons.reshape(-1)
 
     def _get_posterior(
         self,
@@ -401,3 +410,181 @@ class WZQuantizerCancer:
             for si in side_info_list
         ]
         return torch.stack(tensors, dim=1).to(self.device, dtype=torch.float32).contiguous()
+
+
+class SampledEncodingStats(NamedTuple):
+    """Diagnostics from sampled-distance encoding, produced by the encoder for experiment logging."""
+
+    vector_size: int
+    sample_count: int
+    inferred_count: int
+    fallback_count: int
+    distance_threshold: float
+
+
+class DedupedDecodingStats(NamedTuple):
+    """Diagnostics from deduplicated decoding, produced by the decoder for experiment logging."""
+
+    vector_size: int
+    unique_count: int
+    reused_count: int
+    collision_count: int
+
+
+class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
+    """WZ quantizer that encodes a sample exactly and infers safe remaining symbols by nearby sampled values.
+
+    The sampling knobs are runtime-speed trade-offs rather than experiment parameters, so they
+    are class constants instead of configuration.
+    """
+
+    sample_fraction: ClassVar[float] = 0.02
+    neighbor_count: ClassVar[int] = 4
+    distance_multiplier: ClassVar[float] = 64.0
+    exact_encode_threshold: ClassVar[float] = 1.4
+    assignment_batch_size: ClassVar[int] = 1_000_000
+    sample_seed: ClassVar[int] = 0
+
+    last_sampled_encoding_stats: SampledEncodingStats | None = None
+
+    def _encode_preprocessed(
+        self,
+        x_prep: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Encode normalized model inputs from sampled anchors plus exact unsafe values."""
+        vector_size = x_prep.shape[0]
+        sample_count = min(
+            vector_size,
+            max(self.neighbor_count, int(np.ceil(vector_size * self.sample_fraction))),
+        )
+        if sample_count == vector_size:
+            bins = super()._encode_preprocessed(x_prep, batch_size)
+            self.last_sampled_encoding_stats = SampledEncodingStats(vector_size, sample_count, 0, 0, 0.0)
+            return bins
+
+        # The neural encoder is used only for sampled anchors and values rejected by sample-based assignment.
+        generator = torch.Generator(device=self.device).manual_seed(self.sample_seed)
+        sample_indices = torch.randperm(vector_size, device=self.device, generator=generator)[:sample_count]
+        sample_bins = super()._encode_preprocessed(x_prep[sample_indices], batch_size).to(
+            device=self.device, dtype=torch.long
+        )
+
+        sampled = torch.zeros(vector_size, dtype=torch.bool, device=self.device)
+        sampled[sample_indices] = True
+        remaining_indices = sampled.logical_not().nonzero(as_tuple=False).flatten()
+
+        bins = torch.empty((self.num_planes, vector_size), dtype=torch.long, device=self.device)
+        bins[:, sample_indices] = sample_bins
+
+        # Pure 1D assignment: infer symbols from nearby sampled anchors and mark unsafe values for exact encoding.
+        inferred_bins, inferred_mask, distance_threshold = self._assign_bins_from_samples(
+            x_prep[sample_indices].squeeze(1),
+            sample_bins,
+            x_prep[remaining_indices].squeeze(1),
+        )
+        bins[:, remaining_indices[inferred_mask]] = inferred_bins[:, inferred_mask]
+
+        # Unsafe values include contradictory neighborhoods, sparse neighborhoods, and optional normalized tails.
+        fallback_indices = remaining_indices[~inferred_mask]
+        if fallback_indices.numel():
+            bins[:, fallback_indices] = super()._encode_preprocessed(
+                x_prep[fallback_indices],
+                batch_size,
+            ).to(device=self.device, dtype=torch.long)
+
+        self.last_sampled_encoding_stats = SampledEncodingStats(
+            vector_size,
+            sample_count,
+            int(inferred_mask.sum().item()),
+            int(fallback_indices.numel()),
+            distance_threshold,
+        )
+        return bins.cpu()
+
+    def _assign_bins_from_samples(
+        self,
+        sample_values: torch.Tensor,
+        sample_bins: torch.Tensor,
+        values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, float]:
+        """Infer bins from sampled value-symbol pairs and mark unsafe values for exact encoding."""
+        sort_order = sample_values.argsort()
+        sorted_values = sample_values[sort_order]
+        sorted_bins = sample_bins[:, sort_order]
+        keep = torch.ones(sorted_values.numel(), dtype=torch.bool, device=sorted_values.device)
+        keep[1:] = sorted_values[1:] != sorted_values[:-1]
+        sorted_values = sorted_values[keep].contiguous()
+        sorted_bins = sorted_bins[:, keep].contiguous()
+
+        gaps = sorted_values.diff().abs()
+        positive_gaps = gaps[gaps > 0]
+        distance_threshold = 0.0 if positive_gaps.numel() == 0 else float(
+            positive_gaps.median().item() * self.distance_multiplier
+        )
+        interval_lowers, interval_uppers, interval_bins = self._symbol_intervals(
+            sorted_values,
+            sorted_bins,
+            distance_threshold,
+        )
+        if interval_lowers.numel() == 0:
+            return (
+                torch.empty((self.num_planes, values.numel()), dtype=interval_bins.dtype, device=self.device),
+                torch.zeros(values.numel(), dtype=torch.bool, device=self.device),
+                float(distance_threshold),
+            )
+
+        inferred_bins_chunks: list[torch.Tensor] = []
+        inferred_mask_chunks: list[torch.Tensor] = []
+        for start in range(0, values.numel(), self.assignment_batch_size):
+            value_batch = values[start:start + self.assignment_batch_size]
+            interval_indices = torch.bucketize(value_batch, interval_lowers) - 1
+            candidate_indices = interval_indices.clamp(0, interval_lowers.numel() - 1)
+            inferred_mask = (interval_indices >= 0) & (value_batch <= interval_uppers[candidate_indices])
+            inferred_mask &= value_batch.abs() <= self.exact_encode_threshold
+            inferred_bins_chunks.append(interval_bins[:, candidate_indices])
+            inferred_mask_chunks.append(inferred_mask)
+        inferred_mask = torch.cat(inferred_mask_chunks)
+        return (
+            torch.cat(inferred_bins_chunks, dim=1),
+            inferred_mask,
+            float(distance_threshold),
+        )
+
+    def _symbol_intervals(
+        self,
+        sorted_values: torch.Tensor,
+        sorted_bins: torch.Tensor,
+        distance_threshold: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        changes = (sorted_bins[:, 1:] != sorted_bins[:, :-1]).any(dim=0)
+        starts = torch.cat((
+            torch.zeros(1, dtype=torch.long, device=self.device),
+            torch.nonzero(changes, as_tuple=False).flatten() + 1,
+        ))
+        ends = torch.cat((starts[1:] - 1, starts.new_tensor([sorted_values.numel() - 1])))
+        valid = ends - starts + 1 >= self.neighbor_count
+        if not valid.any():
+            empty = torch.empty(0, device=self.device)
+            return empty, empty, torch.empty((self.num_planes, 0), dtype=sorted_bins.dtype, device=self.device)
+
+        starts = starts[valid]
+        ends = ends[valid]
+        lower_positions = starts + self.neighbor_count - 1
+        upper_positions = ends - self.neighbor_count + 1
+        lower_bounds = sorted_values[lower_positions] - distance_threshold
+        upper_bounds = sorted_values[upper_positions] + distance_threshold
+
+        previous_conflicts = torch.full_like(lower_bounds, -torch.inf)
+        has_previous = starts > 0
+        previous_conflicts[has_previous] = sorted_values[starts[has_previous] - 1] + distance_threshold
+        next_conflicts = torch.full_like(upper_bounds, torch.inf)
+        has_next = ends < sorted_values.numel() - 1
+        next_conflicts[has_next] = sorted_values[ends[has_next] + 1] - distance_threshold
+        lower_bounds = torch.maximum(lower_bounds, previous_conflicts)
+        upper_bounds = torch.minimum(upper_bounds, next_conflicts)
+        valid_bounds = lower_bounds <= upper_bounds
+        return lower_bounds[valid_bounds].contiguous(), upper_bounds[valid_bounds].contiguous(), sorted_bins[
+            :,
+            starts[valid_bounds],
+        ].contiguous()
