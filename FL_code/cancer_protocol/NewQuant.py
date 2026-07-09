@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .NewPrior import PriorCalculator, batch_loop, new_rnn_model
+from .NewPrior import DedupedPriorCalculator, PriorCalculator
 
 if TYPE_CHECKING:
     from .NewCancer import NewCancerConfig
@@ -91,8 +91,46 @@ def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tens
     )
 
 
+def new_rnn_model(
+    num_planes: int,
+    bins_per_plane: int,
+    side_info_size: int,
+    marginal: bool,
+) -> EncoderDecoderLayeredRNN:
+    """Create the RNN network shared by the WZ quantizer and the conditional prior model."""
+    return EncoderDecoderLayeredRNN(
+        num_planes=num_planes,
+        bins_per_plane=bins_per_plane,
+        side_info_size=max(1, side_info_size),
+        input_dim=1,
+        layers=3,
+        hidden_dim=100,
+        marginal=marginal,
+    )
+
+
+def batch_loop(
+    func: Callable[[int, int], torch.Tensor],
+    model: EncoderDecoderLayeredRNN,
+    input_size: int,
+    batch_size: int,
+    cat_dim: int | None = None,
+) -> torch.Tensor:
+    """Run an inference callback over contiguous batches on the best device and concatenate the outputs."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device).eval()
+    with torch.inference_mode():
+        batches = [func(start, min(start + batch_size, input_size)) for start in range(0, input_size, batch_size)]
+    model.cpu()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return torch.cat(batches, dim=cat_dim if cat_dim is not None else (1 if batches[0].ndim == 3 else 0))
+
+
 class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
+
+    prior_calculator: ClassVar[type[PriorCalculator]] = PriorCalculator
 
     def __init__(
         self,
@@ -327,11 +365,12 @@ class WZQuantizerCancer:
         recons = batch_loop(decode_batch, self.coding_model, bins.shape[1], batch_size)
         return recons.reshape(-1)
 
-    def _get_posterior(
+    def get_posterior(
         self,
         x_raw: torch.Tensor,
         bins_vec_save_compute: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Return per-position decoder-prior probabilities for one raw vector, cached by data hash."""
         data_hash = PriorCalculator.get_hash(x_raw)
         cached_prior = self.prior_cache.get(data_hash)
         if isinstance(cached_prior, torch.Tensor):
@@ -340,10 +379,12 @@ class WZQuantizerCancer:
         bins = self.encoding_process(x_raw)[0] if bins_vec_save_compute is None else bins_vec_save_compute
         side_info = self.side_info_tensor(for_prior=True)
         use_quantizer_prior = cached_prior == PRIOR_CACHE_NO_RETRAIN and not self.extra_si_for_prior
-        prior_model = self.coding_model if use_quantizer_prior else PriorCalculator.train_prior_model(
+        prior_model = self.coding_model if use_quantizer_prior else self.prior_calculator.train_prior_model(
             bins, side_info, self.num_planes, self.bins_per_plane, self.c_cfg
         )
-        prior = PriorCalculator.compute_prior_from_network(prior_model, bins, side_info).to(torch.float16)
+        prior = self.prior_calculator.compute_prior_from_network(prior_model, bins, side_info).to(torch.float16)
+        # Deltas never repeat across rounds, so keep only the string flags and this newest prior tensor.
+        self.prior_cache = {key: flag for key, flag in self.prior_cache.items() if isinstance(flag, str)}
         self.prior_cache[data_hash] = prior
         return prior
 
@@ -588,3 +629,71 @@ class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
             :,
             starts[valid_bounds],
         ].contiguous()
+
+
+def unique_row_groups(
+    bins: torch.Tensor,
+    side_info: torch.Tensor,
+    si_match_bits: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Group positions with identical (bins, side info) rows so pure row functions run once per group.
+
+    ``si_match_bits`` sets how many leading float32 bits of each side-information value must agree
+    for rows to be grouped (32 means bitwise equality; bins always match exactly). Returns the
+    device-resident long bins plus (representatives, inverse, collisions): one member position per
+    unique row, the position-to-group map, and positions whose projection key collided with a
+    different row (those must be processed exactly).
+    """
+    assert 1 <= si_match_bits <= 32, "si_match_bits must be in [1, 32]."
+    device = side_info.device
+    bins_device = bins.to(device, torch.long)
+    if si_match_bits < 32:
+        side_info = (side_info.view(torch.int32) & -(1 << (32 - si_match_bits))).view(torch.float32)
+    features = torch.cat([side_info, bins_device.T.to(side_info.dtype)], dim=1)
+    generator = torch.Generator(device=device).manual_seed(0)
+    projection = torch.randn(features.shape[1], generator=generator, device=device, dtype=torch.float64)
+
+    unique_keys, inverse = torch.unique(features.double() @ projection, return_inverse=True)
+    representatives = torch.empty(unique_keys.numel(), dtype=torch.long, device=device)
+    representatives[inverse] = torch.arange(features.shape[0], device=device)
+    collisions = (features != features[representatives[inverse]]).any(dim=1).nonzero(as_tuple=False).flatten()
+    return bins_device, representatives, inverse, collisions
+
+
+class DedupedDecodingWZQuantizerCancer(DistanceSampledWZQuantizerCancer):
+    """Distance-sampled WZ quantizer that decodes each unique (bins, side info) row only once.
+
+    Decoder outputs and conditional priors are pure functions of the per-position bin symbols
+    and side information, and in practice both are heavily discretized (side information is
+    built from earlier quantized reconstructions), so duplicates are reused and the results
+    stay bitwise equal to the full neural passes.
+    """
+
+    prior_calculator: ClassVar[type[PriorCalculator]] = DedupedPriorCalculator
+    si_match_bits: ClassVar[int] = 30
+
+    last_decoding_stats: DedupedDecodingStats | None = None
+
+    def _decode_preprocessed(
+        self,
+        bins: torch.Tensor,
+        side_info: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Decode each unique (bins, side info) row once and reuse the result for exact duplicates."""
+        bins_device, representatives, inverse, collisions = unique_row_groups(bins, side_info, self.si_match_bits)
+        recons = super()._decode_preprocessed(
+            bins_device[:, representatives], side_info[representatives], batch_size
+        ).to(self.device)[inverse]
+        if collisions.numel():
+            recons[collisions] = super()._decode_preprocessed(
+                bins_device[:, collisions], side_info[collisions], batch_size
+            ).to(self.device)
+
+        self.last_decoding_stats = DedupedDecodingStats(
+            recons.numel(),
+            int(representatives.numel()),
+            int(recons.numel() - representatives.numel() - collisions.numel()),
+            int(collisions.numel()),
+        )
+        return recons.cpu()
