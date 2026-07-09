@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 import hashlib
 
 import numpy as np
@@ -14,42 +13,6 @@ from .brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
     from .NewCancer import NewCancerConfig
-
-
-def new_rnn_model(
-    num_planes: int,
-    bins_per_plane: int,
-    side_info_size: int,
-    marginal: bool,
-) -> EncoderDecoderLayeredRNN:
-    """Create the RNN network shared by the WZ quantizer and the conditional prior model."""
-    return EncoderDecoderLayeredRNN(
-        num_planes=num_planes,
-        bins_per_plane=bins_per_plane,
-        side_info_size=max(1, side_info_size),
-        input_dim=1,
-        layers=3,
-        hidden_dim=100,
-        marginal=marginal,
-    )
-
-
-def batch_loop(
-    func: Callable[[int, int], torch.Tensor],
-    model: EncoderDecoderLayeredRNN,
-    input_size: int,
-    batch_size: int,
-    cat_dim: int | None = None,
-) -> torch.Tensor:
-    """Run an inference callback over contiguous batches on the best device and concatenate the outputs."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device).eval()
-    with torch.inference_mode():
-        batches = [func(start, min(start + batch_size, input_size)) for start in range(0, input_size, batch_size)]
-    model.cpu()
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-    return torch.cat(batches, dim=cat_dim if cat_dim is not None else (1 if batches[0].ndim == 3 else 0))
 
 
 class PriorCalculator:
@@ -90,6 +53,8 @@ class PriorCalculator:
         batch_size: int = 500_000,
     ) -> torch.Tensor:
         """Run a trained quantizer/prior network over all bins and return per-plane probabilities."""
+        from .NewQuant import batch_loop
+
         def prior_batch(start: int, end: int) -> torch.Tensor:
             device = next(model.parameters()).device
             codes = [
@@ -131,6 +96,8 @@ class PriorCalculator:
         c_cfg: NewCancerConfig,
         batch_size: int,
     ) -> tuple[EncoderDecoderLayeredRNN, float]:
+        from .NewQuant import new_rnn_model
+
         assert bins_vec.shape[0] == num_planes, "bins_vec first dimension must match num_planes."
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = new_rnn_model(num_planes, bins_per_plane, side_info.shape[1], False).to(device).train()
@@ -158,11 +125,8 @@ class PriorCalculator:
                     y=si_batch,
                     tau=tau,
                 ))
-                sample_idx = torch.arange(bins_batch.shape[1], device=device)
-                loss = sum(
-                    -torch.log(priors[plane, sample_idx, bins_batch[plane]] + 1e-12).mean()
-                    for plane in range(num_planes)
-                ) / num_planes
+                selected_probs = priors.gather(2, bins_batch.long().unsqueeze(-1)).squeeze(-1)
+                loss = -torch.log(selected_probs + 1e-12).mean(dim=1).mean()
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -178,3 +142,35 @@ class PriorCalculator:
         if device.type == "cuda":
             torch.cuda.empty_cache()
         return model, epoch_loss
+
+
+class DedupedPriorCalculator(PriorCalculator):
+    """PriorCalculator that runs the prior network once per unique (bins, side info) row.
+
+    Priors are a pure function of each position's bin symbols and side information, so duplicate
+    rows reuse the representative's probabilities; with ``si_match_bits`` at 32 the result stays
+    equal to the full pass, lower values trade exactness for more reuse.
+    """
+
+    si_match_bits: ClassVar[int] = 30
+
+    @classmethod
+    def compute_prior_from_network(
+        cls,
+        model: EncoderDecoderLayeredRNN,
+        bins_vec: torch.Tensor,
+        side_info: torch.Tensor,
+        batch_size: int = 500_000,
+    ) -> torch.Tensor:
+        """Compute priors for unique (bins, side info) rows and broadcast them back to duplicates."""
+        from .NewQuant import unique_row_groups
+
+        bins_device, representatives, inverse, collisions = unique_row_groups(bins_vec, side_info, cls.si_match_bits)
+        prior = PriorCalculator.compute_prior_from_network(
+            model, bins_device[:, representatives], side_info[representatives], batch_size
+        ).to(side_info.device)[:, inverse]
+        if collisions.numel():
+            prior[:, collisions] = PriorCalculator.compute_prior_from_network(
+                model, bins_device[:, collisions], side_info[collisions], batch_size
+            ).to(side_info.device)
+        return prior.cpu()
