@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
+from pydantic import BaseModel
 import torch
 import torch.nn.functional as F
 
@@ -127,6 +128,14 @@ def batch_loop(
     return torch.cat(batches, dim=cat_dim if cat_dim is not None else (1 if batches[0].ndim == 3 else 0))
 
 
+class WZcfgQuant(BaseModel):
+    bins_per_plane: int
+    num_planes: int
+    norm_slices: list[slice] | None = None
+    outlier_threshold: float | None = None
+    marginal_loss: bool = True
+
+
 class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
 
@@ -134,28 +143,23 @@ class WZQuantizerCancer:
 
     def __init__(
         self,
-        c_cfg: NewCancerConfig,
-        num_planes: int,
-        bins_per_plane: int,
+        c_cfg: WZcfgQuant,
         si_size: int,
-        marginal_loss: bool = False,
-        norm_slices: Sequence[slice] | None = None,
-        outlier_threshold: float | None = None,
         extra_si_for_prior: Sequence[torch.Tensor] = (),
     ) -> None:
-        self.c_cfg: NewCancerConfig = c_cfg
+        self.c_cfg: WZcfgQuant = c_cfg
         self.norm_slices: list[slice] = list(norm_slices or [slice(0, None)])
         self.outlier_threshold: float | None = outlier_threshold
         self.extra_si_for_prior: list[torch.Tensor] = list(extra_si_for_prior)
         self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.no_side_info: bool = si_size == 0
-        assert marginal_loss or not self.no_side_info, (
+        assert c_cfg.marginal_loss or not self.no_side_info, (
             "si_size=0 requires marginal_loss=True; no-SI quantizers must be explicit."
         )
         self.side_info_size: int = max(si_size, 1)
         self.coding_model: EncoderDecoderLayeredRNN = new_rnn_model(
-            num_planes, bins_per_plane, self.side_info_size, marginal_loss
+            num_planes=c_cfg.num_planes, bins_per_plane=c_cfg.bins_per_plane, side_info_size=self.side_info_size, marginal=c_cfg.marginal_loss
         )
 
         # "P": untrained zero-SI marginal (pretrained weights may be loaded); None: awaiting train_model().
