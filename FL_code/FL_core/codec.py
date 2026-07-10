@@ -7,7 +7,7 @@ from pathlib import Path
 import csv
 import tempfile
 import time
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 import numpy as np
@@ -66,6 +66,8 @@ class ReconstructionHistory:
         routine_plan = tuple(routine_accesses)
         assert all(isinstance(access, Access) for access in routine_plan), (
             "Routine history access plan must contain Access values.")
+        assert all(access is not Access.NONE for access in routine_plan), (
+            "Routine history access plan must not contain Access.NONE.")
 
         self._keep_server = any(access in (Access.SERVER_ONLY, Access.TEMPORAL_TOO) for access in routine_plan)
         self._server = {} if not self._keep_server else self._server
@@ -245,11 +247,17 @@ class BaseRoundCodec:
     round_name_full: str
 
     def __init_subclass__(cls) -> None:
-        """Require concrete round codecs to declare their record type and round acronym."""
+        """Require concrete round codecs to declare their record type and round acronym.
+
+        Underscore-prefixed subclasses are abstract intermediates and skip validation.
+        can_decode_where may instead be declared as an instance annotation when the
+        access level is only known per instance (e.g. frozen rounds).
+        """
         super().__init_subclass__()
         assert issubclass(cls.record_class, CompressionRecord)
         assert cls.round_name
-        assert isinstance(cls.can_decode_where, Access)
+        assert (isinstance(getattr(cls, "can_decode_where", None), Access)
+                or "can_decode_where" in getattr(cls, "__annotations__", {}))
 
     def __init__(
         self,
@@ -264,9 +272,8 @@ class BaseRoundCodec:
 
     def create_r_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create this round codec's metrics record for one client-round compression."""
-        if not issubclass(self.record_class, CompressionRecord):
-            raise TypeError(
-                "Don't use CompressionRecord directly, override create_r_record() in a concrete round codec to return a subclass.")
+        assert self.record_class is not CompressionRecord, (
+            "Declare a CompressionRecord subclass as record_class; the base record is not usable directly.")
         return self.record_class(
             round_id=round_id,
             client_id=client_id,
@@ -297,10 +304,16 @@ class BaseProtocol:
     _round_codec_classes: dict[str, type[BaseRoundCodec]]
     max_per_client_recons_history: ClassVar[int | None]
     _recons_history: ReconstructionHistory
+    sd_slices: Sequence[slice] | None
 
     def __init_subclass__(cls) -> None:
-        """Require concrete protocols to declare their warmup and routine round codec plans."""
+        """Require concrete protocols to declare their warmup and routine round codec plans.
+
+        Underscore-prefixed subclasses are abstract intermediates and skip validation.
+        """
         super().__init_subclass__()
+        if cls.__name__.startswith("_"):
+            return
         assert isinstance(cls.warmup_round_codecs, tuple)
         assert isinstance(cls.routine_round_codecs, tuple)
         assert cls.routine_round_codecs
@@ -321,6 +334,7 @@ class BaseProtocol:
             max_per_client=self.max_per_client_recons_history,
             routine_accesses=[h.can_decode_where for h in self._round_codec_classes.values()]
         )
+        self.sd_slices = sd_slices
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
@@ -367,7 +381,7 @@ def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:
 
     matches = [
         subclass for subclass in all_subclasses(base_class)
-        if getattr(subclass, name_attr) == name]
+        if getattr(subclass, name_attr, None) == name]
     assert len(matches) == 1, (
         f"Expected one {base_class.__name__} subclass with {name_attr}={name!r}; got {len(matches)}.")
     return matches[0]

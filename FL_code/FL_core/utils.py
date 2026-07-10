@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
+import ast
 import gzip
 import json
 import pickle
@@ -58,7 +59,7 @@ def parse_configurable_name(raw_name: str, field_name: str) -> ParsedConfigurabl
         key, sep, value = token.partition("=")
         assert key, f"{field_name} option {token!r} must have a non-empty key."
         assert key not in options, f"{field_name} option {key!r} appears more than once."
-        options[key] = eval(value) if sep else True
+        options[key] = ast.literal_eval(value) if sep else True
         assert options[key] is True or options[key] != "", (
             f"{field_name} option {token!r} must not have an empty value.")
 
@@ -430,15 +431,19 @@ def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Ten
 
 def _get_obj_storage_size(obj: Any) -> float:
     """Return the in-memory payload size for tensor-like compression objects in MB."""
+    return _obj_storage_bytes(obj) / (1024 ** 2)
+
+
+def _obj_storage_bytes(obj: Any) -> int | float:
     res: int | float | None = None
     if isinstance(obj, torch.Tensor):
         res = obj.element_size() * obj.nelement()
     elif isinstance(obj, np.ndarray):
         res = obj.nbytes
     elif isinstance(obj, (list, tuple)):
-        res = sum(_get_obj_storage_size(x) for x in obj)
+        res = sum(_obj_storage_bytes(x) for x in obj)
     elif isinstance(obj, Mapping):
-        res = sum(_get_obj_storage_size(v) for v in obj.values())
+        res = sum(_obj_storage_bytes(v) for v in obj.values())
     elif hasattr(obj, '_dtype') and hasattr(obj, '__len__'):
         res = len(obj) * (obj._dtype.bitwidth // 8)
     elif isinstance(obj, bytes):
@@ -446,7 +451,7 @@ def _get_obj_storage_size(obj: Any) -> float:
     elif obj is None:
         res = 1
     assert res is not None
-    return res / (1024**2)  # Return size in MB
+    return res
 
 def make_serializable(item: Any) -> Any:
     """Normalize payload values that pickle should not store as-is."""
@@ -461,6 +466,9 @@ def make_serializable(item: Any) -> Any:
         return OrderedDict((key, make_serializable(value)) for key, value in item.items())
     if isinstance(item, Mapping):
         return {key: make_serializable(value) for key, value in item.items()}
+    # NamedTuples (e.g. PreprocessMetadata) must survive the round trip as their own type.
+    if isinstance(item, tuple) and hasattr(item, '_fields'):
+        return type(item)(*(make_serializable(x) for x in item))
     if isinstance(item, (list, tuple)):
         return [make_serializable(x) for x in item]
     return item

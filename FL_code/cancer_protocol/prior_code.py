@@ -12,7 +12,7 @@ from FL_code.FL_core.utils import create_training_progress_bar
 from .brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
-    from .cancer_protocol import NewCancerConfig
+    from .wz_quantizer import WZcfgQuant
 
 
 class PriorCalculator:
@@ -31,9 +31,10 @@ class PriorCalculator:
         )
 
     @staticmethod
-    def get_hash(x_vec: torch.Tensor, sample_size: int = 128) -> str:
+    def get_hash(x_vec: torch.Tensor, sample_size: int = 1024) -> str:
         """Build the stable lightweight cache key used for prior reuse."""
-        sample = x_vec[:sample_size * 3:3].cpu().numpy().round(decimals=1).astype(np.int32)
+        sample = x_vec[:sample_size * 3:3].cpu().numpy().round(decimals=2)
+        sample = (sample*100).astype(np.int16)
         return hashlib.md5(sample.tobytes()).hexdigest()
 
     @staticmethod
@@ -71,7 +72,7 @@ class PriorCalculator:
         side_info: torch.Tensor,
         num_planes: int,
         bins_per_plane: int,
-        c_cfg: NewCancerConfig,
+        c_cfg: WZcfgQuant,
         batch_size: int = 50_000,
     ) -> EncoderDecoderLayeredRNN:
         """Train repeated conditional prior models and return the finite lowest-loss attempt."""
@@ -93,7 +94,7 @@ class PriorCalculator:
         side_info: torch.Tensor,
         num_planes: int,
         bins_per_plane: int,
-        c_cfg: NewCancerConfig,
+        c_cfg: WZcfgQuant,
         batch_size: int,
     ) -> tuple[EncoderDecoderLayeredRNN, float]:
         from .wz_quantizer import new_rnn_model
