@@ -12,7 +12,7 @@ from FL_code.FL_core.utils import create_training_progress_bar
 from .brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
-    from .NewCancer import NewCancerConfig
+    from .cancer_protocol import NewCancerConfig
 
 
 class PriorCalculator:
@@ -53,7 +53,7 @@ class PriorCalculator:
         batch_size: int = 500_000,
     ) -> torch.Tensor:
         """Run a trained quantizer/prior network over all bins and return per-plane probabilities."""
-        from .NewQuant import batch_loop
+        from .wz_quantizer import batch_loop
 
         def prior_batch(start: int, end: int) -> torch.Tensor:
             device = next(model.parameters()).device
@@ -96,7 +96,7 @@ class PriorCalculator:
         c_cfg: NewCancerConfig,
         batch_size: int,
     ) -> tuple[EncoderDecoderLayeredRNN, float]:
-        from .NewQuant import new_rnn_model
+        from .wz_quantizer import new_rnn_model
 
         assert bins_vec.shape[0] == num_planes, "bins_vec first dimension must match num_planes."
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,7 +163,7 @@ class DedupedPriorCalculator(PriorCalculator):
         batch_size: int = 500_000,
     ) -> torch.Tensor:
         """Compute priors for unique (bins, side info) rows and broadcast them back to duplicates."""
-        from .NewQuant import unique_row_groups
+        from .wz_quantizer import unique_row_groups
 
         bins_device, representatives, inverse, collisions = unique_row_groups(bins_vec, side_info, cls.si_match_bits)
         prior = PriorCalculator.compute_prior_from_network(

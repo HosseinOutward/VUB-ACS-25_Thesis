@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import torch
 import torch.nn.functional as F
 
 from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .NewPrior import DedupedPriorCalculator, PriorCalculator
+from .prior_code import DedupedPriorCalculator, PriorCalculator
 
 if TYPE_CHECKING:
-    from .NewCancer import NewCancerConfig
+    from .cancer_protocol import NewCancerConfig
 
 PRIOR_CACHE_NO_RETRAIN = "flag_no_retrain"
 PriorCache: TypeAlias = dict[str, torch.Tensor | str]
@@ -129,11 +130,31 @@ def batch_loop(
 
 
 class WZcfgQuant(BaseModel):
+    """Quantizer and training configuration consumed by WZQuantizerCancer."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
     bins_per_plane: int
     num_planes: int
     norm_slices: list[slice] | None = None
     outlier_threshold: float | None = None
     marginal_loss: bool = True
+    max_side_info_count: int = 5
+    pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
+
+    train_epochs: int = 70
+    reconst_ld: float = 200.0
+    train_sample_size: int = 300_000
+    lr: float = 1e-3
+    lr_step: int = 35
+    tau: float = 1.3
+    quantizer_train_repeats: int = 3
+    prior_train_repeats: int = 3
+
+    training_progress_bar: bool = False
+    tf32: bool = True
+    fused_optimizer: bool = True
+    mixed_precision: bool = True
 
 
 class WZQuantizerCancer:
@@ -148,8 +169,8 @@ class WZQuantizerCancer:
         extra_si_for_prior: Sequence[torch.Tensor] = (),
     ) -> None:
         self.c_cfg: WZcfgQuant = c_cfg
-        self.norm_slices: list[slice] = list(norm_slices or [slice(0, None)])
-        self.outlier_threshold: float | None = outlier_threshold
+        self.norm_slices: list[slice] = list(c_cfg.norm_slices or [slice(0, None)])
+        self.outlier_threshold: float | None = c_cfg.outlier_threshold
         self.extra_si_for_prior: list[torch.Tensor] = list(extra_si_for_prior)
         self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

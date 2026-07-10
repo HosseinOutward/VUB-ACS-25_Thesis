@@ -19,8 +19,8 @@ from FL_code.FL_core.codec import (
 )
 from FL_code.FL_core.utils import ParsedConfigurableName, compress_data_list, decompress_data_list
 
-from .NewQuant import DedupedDecodingWZQuantizerCancer, WZQuantizerCancer, WZcfgQuant
-from .NewPrior import PriorCalculator
+from .wz_quantizer import DedupedDecodingWZQuantizerCancer, WZQuantizerCancer, WZcfgQuant
+from .prior_code import PriorCalculator
 
 
 def _compressed_size(obj: Any) -> float:
@@ -31,26 +31,13 @@ def _compressed_size(obj: Any) -> float:
 class NewCancerConfig(BaseModel):
     """Configuration shared by NewCancer round codecs and produced by NewCancerProtocol."""
 
-    
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    bins_per_plane: int = 8
+    num_planes: int = 3
+    norm_slices: list[slice] | None = None
+    marginal_loss: bool = True
     max_side_info_count: int = 5
-    pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
-
-    train_epochs: int = 70
-    reconst_ld: float = 200.0
-    train_sample_size: int = 300_000
-    lr: float = 1e-3
-    lr_step: int = 35
-    tau: float = 1.3
-    quantizer_train_repeats: int = 3
-    prior_train_repeats: int = 3
-
-    use_model_slices: bool = True
-    outlier_threshold: float | None = None
-    training_progress_bar: bool = False
-    tf32: bool = True
-    fused_optimizer: bool = True
-    mixed_precision: bool = True
-
 
 class CancerRecord(CompressionRecord):
     """Compression record for one NewCancer client-round."""
@@ -96,7 +83,7 @@ class _WZRoundCodec(BaseRoundCodec):
         assert isinstance(num_planes, int) and num_planes > 0
 
     def get_training_data(self, given_history: ReconstructionHistory, client_id: int) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        history:dict[int, tuple[HistoryEntry, ...]] = given_history.view(Access.SERVER, client_id)
+        history:dict[int, tuple[HistoryEntry, ...]] = given_history.view(Access.SERVER_ONLY, client_id)
         raise NotImplementedError("This method should be implemented in subclasses to return training data for the quantizer.")
 
     def build_quantizer(self, x: torch.Tensor, si: list[torch.Tensor]) -> WZQuantizerCancer:
@@ -151,7 +138,7 @@ class F_RoundCodec(_WZRoundCodec):
     
 class P_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "P"
-    can_decode_where: Access = Access.BOTH
+    can_decode_where: Access = Access.TEMPORAL_TOO
     frozen_si: list[torch.Tensor]
 
     def build_quantizer(self, x: torch.Tensor, si: list[torch.Tensor]) -> WZQuantizerCancer:
@@ -165,27 +152,27 @@ class P_RoundCodec(_WZRoundCodec):
 
 class R_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "R"
-    can_decode_where: Access = Access.SERVER
+    can_decode_where: Access = Access.SERVER_ONLY
     frozen_si: list[torch.Tensor]
 
     def get_training_data(self, given_history: ReconstructionHistory, client_id: int) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        history = given_history.view(Access.SERVER, client_id)
+        history = given_history.view(Access.SERVER_ONLY, client_id)
         x_entry = history[client_id][-1]
         assert x_entry.client_id == client_id
-        assert x_entry.access == Access.SERVER
+        assert x_entry.access == Access.SERVER_ONLY
         train_si = [entry.tensor for c_h in history.values() for entry in c_h if entry != x_entry]
         return x_entry.tensor, train_si
     
 
 class S_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "S"
-    can_decode_where: Access = Access.SERVER
+    can_decode_where: Access = Access.SERVER_ONLY
     frozen_si: list[torch.Tensor]
     si: list[torch.Tensor]
     
     def get_training_data(self, given_history: ReconstructionHistory, 
                           client_id: int) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        history = given_history.view(Access.SERVER, client_id)
+        history = given_history.view(Access.SERVER_ONLY, client_id)
         train_si = [entry.tensor for c_h in history.values() for entry in c_h]
         x_tensor = torch.stack([c_h[-1].tensor for c_h in history.values()])
         x_tensor = x_tensor[torch.randint(x_tensor.shape[0], (), device=x_tensor.device)]
@@ -193,8 +180,8 @@ class S_RoundCodec(_WZRoundCodec):
         return x_tensor, train_si
 
     def create_encode_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
-        sample_idx = ?
-        bins_of_sampled = ?
+        # sample_idx = ?
+        # bins_of_sampled = ?
         # somehow add a super compressed (using sw) version of the sent values to the record
         #   it has to appear in the prior metric
         #   it has to also appear in the data sent but sw used on it
@@ -215,15 +202,15 @@ class S_RoundCodec(_WZRoundCodec):
 
 class T_RoundCodec(_WZRoundCodec):
     where_quantizer_trained: Literal["server", "worker"] = "worker"
-    can_decode_where: ClassVar[Access] = Access.TEMPORAL
+    can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
     round_name: ClassVar[str] = "T"
 
     si: list[torch.Tensor]
 
     def get_training_data(self, given_history: ReconstructionHistory, client_id: int) -> tuple[torch.Tensor|None, list[torch.Tensor]]:
-        si_entry = given_history.view(Access.TEMPORAL, client_id)[client_id]
+        si_entry = given_history.view(Access.TEMPORAL_TOO, client_id)[client_id]
         assert si_entry[-1].client_id == client_id
-        assert si_entry[-1].access == Access.TEMPORAL
+        assert si_entry[-1].access == Access.TEMPORAL_TOO
         train_si = [entry.tensor for entry in si_entry]
         return None, train_si
 
