@@ -108,21 +108,24 @@ class ReconstructionHistory:
         if access in (Access.TEMPORAL, Access.BOTH) and self._keep_temporal:
             self._add_entry(self._temporal, entry)
 
-    def view(self, access: Access, record: CompressionRecord) -> tuple[HistoryEntry, ...]:
+    def view(self, access: Access, client_id: int) -> dict[int, tuple[HistoryEntry, ...]]:
         """Return the history entries visible to the requested process."""
         assert access is not Access.BOTH, "Access.BOTH is not a valid view policy."
 
         if access is Access.NONE:
-            return ()
+            return dict()
 
         if access is Access.TEMPORAL:
-            assert record.client_id in self._temporal, (
-                f"No temporal reconstruction history exists for client {record.client_id}.")
-            return tuple(self._temporal[record.client_id])
+            assert client_id in self._temporal, (
+                f"No temporal reconstruction history exists for client {client_id}.")
+            return {client_id: tuple(self._temporal[client_id])}
 
         assert access is Access.SERVER, f"Unknown access policy: {access!r}."
-        entries = [entry for ledger in self._server.values() for entry in ledger]
-        return tuple(sorted(entries, key=lambda entry: (entry.round_id, entry.client_id)))
+        entries: dict[int, tuple[HistoryEntry, ...]] = {
+            client_id: tuple(ledger)
+            for client_id, ledger in self._server.items()
+        }
+        return entries
 
     def _add_entry(self, history: dict[int, list[HistoryEntry]], entry: HistoryEntry) -> None:
         ledger = history.setdefault(entry.client_id, [])
@@ -240,7 +243,7 @@ class BaseRoundCodec:
 
     record_class: ClassVar[type[CompressionRecord]]
     round_name: ClassVar[str]
-    history_access_needs: ClassVar[Access]
+    can_decode_where: ClassVar[Access]
     round_name_full: str
 
     def __init_subclass__(cls) -> None:
@@ -248,24 +251,24 @@ class BaseRoundCodec:
         super().__init_subclass__()
         assert issubclass(cls.record_class, CompressionRecord)
         assert cls.round_name
-        assert isinstance(cls.history_access_needs, Access)
+        assert isinstance(cls.can_decode_where, Access)
 
     def __init__(
         self,
-        options: Mapping[str, Any] | None,
+        cfg_options: Mapping[str, Any] | None,
         round_name_full: str,
         **protocol_inputs: Any,
     ) -> None:
         self.round_name_full = round_name_full
-        if options:
-            self.validate_cfg(**options)
-            self.options_to_config(**options)
+        if cfg_options:
+            self.validate_cfg(**cfg_options)
+            self.options_to_config(**cfg_options)
 
-    def create_round_record(self, round_id: int, client_id: int) -> CompressionRecord:
+    def create_r_record(self, round_id: int, client_id: int) -> CompressionRecord:
         """Create this round codec's metrics record for one client-round compression."""
         if not issubclass(self.record_class, CompressionRecord):
             raise TypeError(
-                "Don't use CompressionRecord directly, override create_round_record() in a concrete round codec to return a subclass.")
+                "Don't use CompressionRecord directly, override create_r_record() in a concrete round codec to return a subclass.")
         return self.record_class(
             round_id=round_id,
             client_id=client_id,
@@ -318,19 +321,13 @@ class BaseProtocol:
         self._round_codec_classes = self._validate_round_codecs()
         self._recons_history = ReconstructionHistory(
             max_per_client=self.max_per_client_recons_history,
-            routine_accesses=[h.history_access_needs for h in self._round_codec_classes.values()]
+            routine_accesses=[h.can_decode_where for h in self._round_codec_classes.values()]
         )
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
 
-    def create_round_codec(
-        self,
-        round_id: int,
-        client_id: int,
-        **protocol_inputs: Any
-    ) -> BaseRoundCodec:
-        """Create the round codec selected by this protocol schedule."""
+    def _get_curr_round_codec_name(self, round_id: int) -> tuple[type[BaseRoundCodec], ParsedConfigurableName, str]:
         if round_id < len(self.warmup_round_codecs):
             round_name_full = self.warmup_round_codecs[round_id]
         else:
@@ -339,7 +336,14 @@ class BaseProtocol:
         parsed = parse_configurable_name(round_name_full, "round codec")
 
         rc_class = self._round_codec_classes[round_name_full]
-        return rc_class(parsed.options, round_name_full, **protocol_inputs,)
+        return rc_class, parsed, round_name_full
+
+    def create_round_codec(
+        self,
+        rc_class: type[BaseRoundCodec],
+        parsed: ParsedConfigurableName,
+    ) -> BaseRoundCodec:
+        raise NotImplementedError
 
     def _validate_round_codecs(self) -> dict[str, type[BaseRoundCodec]]:
         round_codec_classes: dict[str, type[BaseRoundCodec]] = {}
@@ -417,7 +421,7 @@ def simulate_compression(
 
     round_codec = protocol.create_round_codec(round_id, client_id)
 
-    record = round_codec.create_round_record(round_id, client_id)
+    record = round_codec.create_r_record(round_id, client_id)
 
     start_time = time.perf_counter()
     payload = round_codec.encode(delta_vec, record)
@@ -431,7 +435,7 @@ def simulate_compression(
         protocol._recons_history.commit(
             reconstructed.detach().to(device="cpu", dtype=torch.float16),
             record,
-            round_codec.history_access_needs,
+            round_codec.can_decode_where,
         )
 
     record.update_record_fields(
@@ -466,7 +470,7 @@ class RCDemo(BaseRoundCodec):
         random_field: int | None = None
     record_class = RecordDemo
     round_name = "DemoRC"
-    history_access_needs = Access.BOTH
+    can_decode_where = Access.BOTH
     frozen_history: ReconstructionHistory
 
     def __init__(
@@ -478,9 +482,9 @@ class RCDemo(BaseRoundCodec):
         super().__init__(options, round_name_full)
         self.frozen_history = frozen_history
 
-    def create_round_record(self, round_id: int, client_id: int) -> RCDemo.RecordDemo:
+    def create_r_record(self, round_id: int, client_id: int) -> RCDemo.RecordDemo:
         """Create a demo metrics record with a random demo-only field."""
-        raw_record = super().create_round_record(round_id, client_id)
+        raw_record = super().create_r_record(round_id, client_id)
         assert isinstance(raw_record, RCDemo.RecordDemo)
         raw_record.random_field = int(np.random.randint(0, 100))
         return raw_record
@@ -515,6 +519,7 @@ class DemoProtocol(BaseProtocol):
     max_per_client_recons_history: ClassVar[int | None] = 10
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
+        rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
         frozen_history = self._recons_history.copy()
         frozen_history.freeze()
-        return super().create_round_codec(round_id, client_id, frozen_history=frozen_history)
+        return rc_class(parsed.options, round_name_full, frozen_history=frozen_history)
