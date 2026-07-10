@@ -160,15 +160,15 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict:
     ]
     if config.model_type in ['T', 'TM']:
         seed_record = CancerRecord(-1, 0, config.codec_name, phase="seed", round_type="T")
-        codec.reconstruction_history.commit(possible_si[0], seed_record, Access.TEMPORAL)
+        codec.reconstruction_history.commit(possible_si[0], seed_record, Access.TEMPORAL_TOO)
     elif config.model_type in ['R', 'RM']:
         for seed_round, seed_tensor in enumerate(possible_si):
             seed_record = CancerRecord(seed_round, 0, config.codec_name, phase="seed", round_type="R")
-            codec.reconstruction_history.commit(seed_tensor, seed_record, Access.SERVER)
+            codec.reconstruction_history.commit(seed_tensor, seed_record, Access.SERVER_ONLY)
         record.round_id = 2
     elif config.model_type == 'M':
         seed_record = CancerRecord(-1, 0, config.codec_name, phase="seed", round_type="P")
-        codec.reconstruction_history.commit(possible_si[0], seed_record, Access.SERVER)
+        codec.reconstruction_history.commit(possible_si[0], seed_record, Access.SERVER_ONLY)
     else:
         raise ValueError(f"Unknown model type: {config.model_type}")
 

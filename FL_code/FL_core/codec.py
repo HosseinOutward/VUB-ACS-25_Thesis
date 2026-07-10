@@ -28,9 +28,9 @@ if TYPE_CHECKING:
 class Access(Enum):
     """Which reconstructed-gradient history entries a process may inspect."""
     NONE = "none"
-    TEMPORAL = "temporal"
-    SERVER = "server"
-    BOTH = "both"
+    SERVER_ONLY = "server_only"
+    TEMPORAL_TOO = "temporal_too"
+
 
 @dataclass(frozen=True, slots=True)
 class HistoryEntry:
@@ -67,9 +67,9 @@ class ReconstructionHistory:
         assert all(isinstance(access, Access) for access in routine_plan), (
             "Routine history access plan must contain Access values.")
 
-        self._keep_server = any(access in (Access.SERVER, Access.BOTH) for access in routine_plan)
+        self._keep_server = any(access in (Access.SERVER_ONLY, Access.TEMPORAL_TOO) for access in routine_plan)
         self._server = {} if not self._keep_server else self._server
-        self._keep_temporal = any(access in (Access.TEMPORAL, Access.BOTH) for access in routine_plan)
+        self._keep_temporal = any(access is Access.TEMPORAL_TOO for access in routine_plan)
         self._temporal = {} if not self._keep_temporal else self._temporal
 
     def copy(self) -> ReconstructionHistory:
@@ -105,22 +105,20 @@ class ReconstructionHistory:
         )
         if self._keep_server:
             self._add_entry(self._server, entry)
-        if access in (Access.TEMPORAL, Access.BOTH) and self._keep_temporal:
+        if access is Access.TEMPORAL_TOO and self._keep_temporal:
             self._add_entry(self._temporal, entry)
 
     def view(self, access: Access, client_id: int) -> dict[int, tuple[HistoryEntry, ...]]:
         """Return the history entries visible to the requested process."""
-        assert access is not Access.BOTH, "Access.BOTH is not a valid view policy."
-
         if access is Access.NONE:
             return dict()
 
-        if access is Access.TEMPORAL:
+        if access is Access.TEMPORAL_TOO:
             assert client_id in self._temporal, (
                 f"No temporal reconstruction history exists for client {client_id}.")
             return {client_id: tuple(self._temporal[client_id])}
 
-        assert access is Access.SERVER, f"Unknown access policy: {access!r}."
+        assert access is Access.SERVER_ONLY, f"Unknown access policy: {access!r}."
         entries: dict[int, tuple[HistoryEntry, ...]] = {
             client_id: tuple(ledger)
             for client_id, ledger in self._server.items()
@@ -338,11 +336,7 @@ class BaseProtocol:
         rc_class = self._round_codec_classes[round_name_full]
         return rc_class, parsed, round_name_full
 
-    def create_round_codec(
-        self,
-        rc_class: type[BaseRoundCodec],
-        parsed: ParsedConfigurableName,
-    ) -> BaseRoundCodec:
+    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         raise NotImplementedError
 
     def _validate_round_codecs(self) -> dict[str, type[BaseRoundCodec]]:
@@ -358,7 +352,7 @@ class BaseProtocol:
 
 def create_protocol(protocol_name: str, sd_slices: Sequence[slice] | None = None) -> BaseProtocol:
     """Create a validated protocol schedule."""
-    from FL_code.cancer_protocol import NewCancer
+    from FL_code.cancer_protocol import cancer_protocol
     parsed = parse_configurable_name(protocol_name, "protocol")
     return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name, sd_slices=sd_slices)
 
@@ -470,7 +464,7 @@ class RCDemo(BaseRoundCodec):
         random_field: int | None = None
     record_class = RecordDemo
     round_name = "DemoRC"
-    can_decode_where = Access.BOTH
+    can_decode_where = Access.TEMPORAL_TOO
     frozen_history: ReconstructionHistory
 
     def __init__(
