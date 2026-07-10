@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, NamedTuple, TypeAlias
+from typing import ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
@@ -13,9 +13,6 @@ from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
 from .prior_code import DedupedPriorCalculator, PriorCalculator
-
-if TYPE_CHECKING:
-    from .cancer_protocol import NewCancerConfig
 
 PRIOR_CACHE_NO_RETRAIN = "flag_no_retrain"
 PriorCache: TypeAlias = dict[str, torch.Tensor | str]
@@ -45,18 +42,25 @@ class PreprocessMetadata(NamedTuple):
 
 
 def normalization_params(values: torch.Tensor) -> tuple[float, float]:
-    """Estimate a robust center and scale from a random quantile-trimmed sample."""
+    """Estimate a robust center and scale from a seeded quantile-trimmed sample.
+
+    Seeded so encoder and decoder derive bitwise-identical factors from the same values.
+    Factors are rounded to float16 because that is the precision the decoder receives
+    them in; the encoder must normalize with the exact same values.
+    """
     sample_size = min(200_000, values.numel())
+    generator = torch.Generator(device=values.device).manual_seed(0)
 
     def random_sample() -> torch.Tensor:
-        return values[torch.randint(values.numel(), (sample_size,), device=values.device)].float()
+        return values[torch.randint(
+            values.numel(), (sample_size,), device=values.device, generator=generator)].float()
 
     centers: list[float] = []
     for _ in range(5):
         sample = random_sample()
         q02, q98 = torch.quantile(sample, torch.tensor([0.02, 0.98], device=sample.device))
         centers.append(sample[(sample >= q02) & (sample <= q98)].mean().item())
-    center = float(np.mean(centers))
+    center = float(np.float16(np.mean(centers)))
 
     scales: list[float] = []
     for _ in range(5):
@@ -65,7 +69,7 @@ def normalization_params(values: torch.Tensor) -> tuple[float, float]:
             torch.tensor([0.01, 0.99], device=values.device),
         ).abs()
         scales.extend((q01.item(), q99.item()))
-    scale = float(np.mean(scales))
+    scale = float(np.float16(np.mean(scales)))
     assert scale != 0
     return scale, center
 
@@ -78,7 +82,8 @@ def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tens
 
     outliers = values[positions]
     tail = outliers.abs() - threshold
-    scale = torch.quantile(tail.float(), 0.99).item() / threshold
+    # Rounded to float16 first because the decoder rescales with the float16 metadata value.
+    scale = float(np.float16(torch.quantile(tail.float(), 0.99).item() / threshold))
     assert scale != 0
     values = values.clone()
     values[positions] = tail * outliers.sign() / scale
@@ -86,7 +91,7 @@ def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tens
     return values, OutlierMetadata(
         tuple(
             (positions_np[(positions_np >= start) & (positions_np < start + OUTLIER_CHUNK)] - start).astype(np.uint8)
-            for start in range(0, values.numel() + OUTLIER_CHUNK - 1, OUTLIER_CHUNK)
+            for start in range(0, values.numel(), OUTLIER_CHUNK)
         ),
         np.array(scale, dtype=np.float16),
         (outliers > 0).cpu().numpy().astype(np.bool_),
@@ -136,7 +141,7 @@ class WZcfgQuant(BaseModel):
 
     bins_per_plane: int
     num_planes: int
-    norm_slices: list[slice] | None = None
+    norm_slices: Sequence[slice] | None = None
     outlier_threshold: float | None = None
     marginal_loss: bool = True
     max_side_info_count: int = 5
@@ -187,6 +192,7 @@ class WZQuantizerCancer:
         self.side_info_list_used: list[torch.Tensor] | str | None = "P" if si_size == 0 else None
         self.vector_size: int | None = None
         self.prior_cache: PriorCache = {}
+        self._si_tensor_cache: dict[bool, torch.Tensor] = {}
 
     @property
     def num_planes(self) -> int:
@@ -206,7 +212,7 @@ class WZQuantizerCancer:
         x_batch: torch.Tensor,
         si_batch: torch.Tensor,
         epoch: int,
-        c_cfg: NewCancerConfig,
+        c_cfg: WZcfgQuant,
         wmspe_denom: float,
     ) -> torch.Tensor:
         """Compute reconstruction-plus-rate loss for one quantizer training batch."""
@@ -242,6 +248,7 @@ class WZQuantizerCancer:
                 f"Quantizer training requires {self.side_info_size} side-information vectors."
             )
             self.side_info_list_used = list(si_raw_list)
+        self._si_tensor_cache.clear()
 
         wmspe_denom = (x_raw.float().square().mean().item() / 2) + 1e-8
         x_prep, _ = self.preprocess_x(x_raw)
@@ -250,7 +257,7 @@ class WZQuantizerCancer:
         attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
         tries = 0
         while len(attempts) < self.c_cfg.quantizer_train_repeats:
-            assert tries <= self.c_cfg.quantizer_train_repeats * 5, "Too many failed training attempts."
+            assert tries < self.c_cfg.quantizer_train_repeats * 5, "Too many failed training attempts."
             tries += 1
             self.coding_model = new_rnn_model(
                 self.num_planes, self.bins_per_plane, side_info.shape[1], self.coding_model.marginal
@@ -268,7 +275,7 @@ class WZQuantizerCancer:
         model: EncoderDecoderLayeredRNN,
         x_prep: torch.Tensor,
         side_info: torch.Tensor,
-        c_cfg: NewCancerConfig,
+        c_cfg: WZcfgQuant,
         wmspe_denom: float,
         batch_size: int = 50_000,
     ) -> float:
@@ -284,11 +291,7 @@ class WZQuantizerCancer:
             lr=c_cfg.lr,
             weight_decay=1e-4,
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer,
-            step_size=int(c_cfg.train_epochs * np.ceil(c_cfg.lr_step / 180)),
-            gamma=0.3,
-        )
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
 
         model.to(device).train()
         x_prep = x_prep.to(device)
@@ -347,7 +350,7 @@ class WZQuantizerCancer:
         """Preprocess and quantize one raw vector into per-plane bin indices."""
         x_prep, metadata = self.preprocess_x(x_raw)
         bins = self._encode_preprocessed(x_prep, batch_size)
-        dtype = torch.uint8 if self.bins_per_plane < 2**8 else torch.uint16
+        dtype = torch.uint8 if self.bins_per_plane <= 2**8 else torch.uint16
         return bins.to(dtype), metadata
 
     def _encode_preprocessed(self, x_prep: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -441,7 +444,7 @@ class WZQuantizerCancer:
                 chunk.astype(np.int64) + start
                 for chunk, start in zip(
                     metadata.outliers.positions,
-                    range(0, recons.numel() + OUTLIER_CHUNK - 1, OUTLIER_CHUNK),
+                    range(0, recons.numel(), OUTLIER_CHUNK),
                     strict=True,
                 )
             ])).to(recons.device)
@@ -456,7 +459,10 @@ class WZQuantizerCancer:
         return recons
 
     def side_info_tensor(self, for_prior: bool = False) -> torch.Tensor:
-        """Return side information in the normalized model input format."""
+        """Return side information in the normalized model input format, cached after the first call."""
+        cached = self._si_tensor_cache.get(for_prior)
+        if cached is not None:
+            return cached
         assert self.vector_size is not None, "Vector size must be known before side information is formatted."
         assert self.side_info_list_used is not None, "Side information must be set before formatting."
         side_info_list = [] if self.side_info_list_used == "P" else list(self.side_info_list_used)
@@ -475,7 +481,9 @@ class WZQuantizerCancer:
             else self.preprocess_x(si, skip_outliers=True)[0].squeeze(1)
             for si in side_info_list
         ]
-        return torch.stack(tensors, dim=1).to(self.device, dtype=torch.float32).contiguous()
+        side_info = torch.stack(tensors, dim=1).to(self.device, dtype=torch.float32).contiguous()
+        self._si_tensor_cache[for_prior] = side_info
+        return side_info
 
 
 class SampledEncodingStats(NamedTuple):
