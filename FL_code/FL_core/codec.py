@@ -254,7 +254,8 @@ class BaseRoundCodec:
         access level is only known per instance (e.g. frozen rounds).
         """
         super().__init_subclass__()
-        # should fail on base classes (like with _)
+        if cls.__name__.startswith("_"):
+            return
         assert issubclass(cls.record_class, CompressionRecord)
         assert cls.round_name
         assert (isinstance(getattr(cls, "can_decode_where", None), Access)
@@ -293,6 +294,34 @@ class BaseRoundCodec:
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         raise NotImplementedError
+
+
+class IdentityRoundCodec(BaseRoundCodec):
+    """Round codec that reconstructs the original delta exactly."""
+
+    class IdentityRecord(CompressionRecord):
+        """Compression record for one identity client-round."""
+
+    record_class = IdentityRecord
+    round_name = "I"
+    can_decode_where = Access.TEMPORAL_TOO
+
+    def options_to_config(self, **options: Any) -> None:
+        """Reject identity-round options."""
+        assert not options, f"I round does not accept options: {tuple(options)}."
+
+    @staticmethod
+    def validate_cfg(**options: Any) -> None:
+        assert not options, f"I round does not accept options: {tuple(options)}."
+
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
+        """Return the original float32 CPU delta as the identity payload."""
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        return delta_vec
+
+    def decode(self, payload: torch.Tensor, record: CompressionRecord) -> torch.Tensor:
+        """Return the identity payload as the reconstruction."""
+        return payload
 
 
 class BaseProtocol:
@@ -368,6 +397,7 @@ class BaseProtocol:
 def create_protocol(protocol_name: str, sd_slices: Sequence[slice] | None = None) -> BaseProtocol:
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
+    from FL_code.other_protocols import n_split_protocol
     parsed = parse_configurable_name(protocol_name, "protocol")
     return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name, sd_slices=sd_slices)
 

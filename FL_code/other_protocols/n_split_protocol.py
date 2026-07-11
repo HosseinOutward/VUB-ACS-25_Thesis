@@ -1,166 +1,97 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 import torch
 
-from FL_code.cancer_protocol import CancerConfig
-from FL_code.FL_core.codec import CompressionRecord, BaseCodec
-from FL_code.cancer_protocol.prior_calculator import PriorCalculator
-
-if TYPE_CHECKING:
-    from FL_code.FL_core.utils import StateDictManager
+from FL_code.FL_core.codec import Access, BaseProtocol, BaseRoundCodec, CompressionRecord
+from FL_code.FL_core.utils import compress_data_list, decompress_data_list
 
 
-class NSplitRecord(CompressionRecord):
-    """Compression record for n-split quantized-symbol diagnostics."""
+class NSplitCodec(BaseRoundCodec):
+    """Round codec that quantizes float values into percentile bins and bin means."""
 
-    def __init__(self, round_id: int, client_id: int, method: str, bins_per_plane: int | None = None) -> None:
-        super().__init__(round_id, client_id, method)
-        self.bins_per_plane: int | None = bins_per_plane
-        self.prior_rate: float | None = None
-        self.marginal_rate: float | None = None
+    record_class = CompressionRecord
+    round_name: ClassVar[str] = "NS"
+    can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
-    def to_dict(self) -> dict[str, Any]:
-        """Convert split-protocol metrics to a flat CSV-ready dictionary."""
-        result = super().to_dict()
-        result.update({
-            "bins_per_plane": self.bins_per_plane,
-            "prior_rate": self.prior_rate,
-            "marginal_rate": self.marginal_rate,
-        })
-        return result
+    split_points: int
 
-
-class NSplitCodec(BaseCodec):
-    """Baseline codec that quantizes values by percentile split points."""
-
-    OPTION_ORDER: tuple[str, ...] = ("points",)
-    record_class: type[NSplitRecord] = NSplitRecord
-
-    def __init__(self, split_points: int, codec_name: str = "split|points=3") -> None:
-        super().__init__(codec_name)
-        self.split_points = split_points
-        self.srvr_past_reconst: list[list[torch.Tensor]] = []
-        self.si_vec_size: int | None = None
+    def options_to_config(self, points: int) -> None:
+        """Set the number of percentile bins used by the split quantizer."""
+        self.validate_cfg(points=points)
+        self.split_points = points
 
     @staticmethod
-    def validate_codec_tokens(option_tokens: Sequence[str]) -> None:
-        """Validate split codec name options."""
-        # TODO: finalize the split protocol's long-term option vocabulary.
-        assert len(option_tokens) == 1, "split codec requires exactly one ordered option: points=<int>."
-        key, sep, value = option_tokens[0].partition("=")
-        assert key == "points" and sep == "=", "split codec option must use points=<int>."
-        split_points = int(value)
-        assert split_points > 1, "split codec points option must be greater than 1."
+    def validate_cfg(points: int) -> None:
+        assert type(points) is int and points > 1, (
+            "NS round points option must be an integer greater than 1.")
 
-    @classmethod
-    def create_from_codec_name(
-        cls,
-        codec_name: str,
-        protocol_name: str,
-        option_tokens: Sequence[str],
-        sd_manager: StateDictManager | None,
-    ) -> NSplitCodec:
-        """Create an n-split baseline codec from ordered codec-name options."""
-        assert protocol_name == "split"
-        key, sep, value = option_tokens[0].partition("=")
-        assert key == "points" and sep == "=", "split codec name was not validated before creation."
-        return cls(int(value), codec_name=codec_name)
+    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
+        """Encode a float32 CPU delta into percentile-bin symbols and reconstruction levels."""
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        assert delta_vec.numel() > 0, "NS round cannot encode an empty delta vector."
+        assert isinstance(record, CompressionRecord)
 
-    def create_codec_record(self, round_id: int, client_id: int, **record_inputs: Any) -> NSplitRecord:
-        """Create an n-split metrics record for one client-round compression."""
-        record = super().create_codec_record(
-            round_id,
-            client_id,
-            **({"bins_per_plane": self.split_points} | record_inputs),
-        )
-        assert isinstance(record, NSplitRecord)
-        return record
+        bins, levels = self._bin(delta_vec)
+        return compress_data_list({
+            "bins": bins,
+            "levels": levels,
+            "shape": tuple(delta_vec.shape),
+        })
 
-    def _ensure_client_history(self, client_id: int) -> list[torch.Tensor]:
-        while len(self.srvr_past_reconst) <= client_id:
-            self.srvr_past_reconst.append([])
-        return self.srvr_past_reconst[client_id]
+    def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
+        """Decode percentile-bin symbols back to their transmitted bin means."""
+        payload_dict = decompress_data_list(payload)
+        bins = payload_dict["bins"]
+        levels = payload_dict["levels"]
+        shape = tuple(payload_dict["shape"])
+        assert isinstance(bins, torch.Tensor) and isinstance(levels, torch.Tensor)
+        return levels[bins.to(torch.int64)].to(torch.float32).reshape(shape)
 
-    def get_si_data(self) -> torch.Tensor:
-        si_raw = [tensor.float() for history in self.srvr_past_reconst for tensor in history]
-        si_raw = [tensor / tensor.abs().quantile(0.99) for tensor in si_raw]
+    def _bin(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        quantiles = torch.arange(1, self.split_points, dtype=x.dtype, device=x.device) / self.split_points
+        boundaries = torch.quantile(x, quantiles)
+        bins = torch.bucketize(x.contiguous(), boundaries, right=False).to(self._symbol_dtype())
 
-        if not si_raw:
-            assert self.si_vec_size is not None, "Side information size must be set before fallback prior creation."
-            si_raw = [torch.zeros(self.si_vec_size)]
+        flat_bins = bins.reshape(-1).to(torch.int64)
+        counts = torch.bincount(flat_bins, minlength=self.split_points)
+        sums = torch.zeros(self.split_points, dtype=torch.float32)
+        sums.scatter_add_(0, flat_bins, x.reshape(-1).to(torch.float32))
 
-        return torch.stack(si_raw).cuda().T.to(torch.float32).contiguous()
+        levels = torch.zeros(self.split_points, dtype=torch.float16)
+        nonempty = counts > 0
+        levels[nonempty] = (sums[nonempty] / counts[nonempty]).to(torch.float16)
+        return bins, levels
 
-    def bin_f(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        perc_v = [torch.quantile(x, i / self.split_points) for i in range(1, self.split_points)]
+    def _symbol_dtype(self) -> torch.dtype:
+        if self.split_points <= 256:
+            return torch.uint8
+        if self.split_points <= 32_768:
+            return torch.int16
+        return torch.int32
 
-        bins_vec = torch.zeros(x.shape, dtype=torch.uint8)
-        for i, pv in enumerate(perc_v):
-            bins_vec[x > pv] = i + 1
 
-        mean_v = torch.zeros(self.split_points, dtype=torch.float16)
-        for i in range(self.split_points):
-            mean_v[i] = x[bins_vec == i].mean().to(torch.float16)
-        return bins_vec.unsqueeze(0), mean_v
+class NSplitProtocol(BaseProtocol):
+    """Protocol schedule that repeatedly uses the percentile split baseline."""
 
-    def un_bin_f(self, bins_vec: torch.Tensor, mean_v: torch.Tensor) -> torch.Tensor:
-        reconst = torch.zeros(bins_vec.shape[1], dtype=torch.float32)
-        for i in range(self.split_points):
-            reconst[bins_vec[0]==i] = mean_v[i]
-        return reconst
+    warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
+    routine_round_codecs: ClassVar[tuple[str, ...]] = ("NS|points=3",)
+    protocol_name: ClassVar[str] = "n_split"
+    max_per_client_recons_history: ClassVar[int | None] = None
 
-    def _compress(self, delta_vec: torch.Tensor, record: NSplitRecord) -> tuple[torch.Tensor, torch.Tensor]:
-        self.si_vec_size = len(delta_vec)
-        bins_vec, mean_v = self.bin_f(delta_vec)
-        payload = (bins_vec, mean_v)
+    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
+        """Create the configured n-split round codec for this client-round."""
+        rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
+        assert rc_class is NSplitCodec and parsed.options is not None
+        return NSplitCodec(parsed.options, round_name_full)
 
-        si_trans = self.get_si_data()
-        q_model = PriorCalculator.train_prior_model(
-            bins_vec, si_trans, 1, record.bins_per_plane, CancerConfig())
-        prior = PriorCalculator._compute_prior_from_network(q_model, bins_vec, si_trans)
-        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior, bins_vec, 1)
 
-        m_prior = PriorCalculator.compute_marginal_prior(bins_vec, record.bins_per_plane, 1)
-        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(m_prior, bins_vec, 1)
-
-        return payload
-
-    def _decompress(self, payload: tuple[torch.Tensor, torch.Tensor], record: NSplitRecord) -> torch.Tensor:
-        reconst = self.un_bin_f(*payload)
-
-        history = self._ensure_client_history(record.client_id)
-        history.append(reconst.to(torch.float16))
-        # history.append(payload[0].squeeze())
-        if len(history) > CancerConfig().max_side_info_count:
-            history.pop(0)
-
-        return reconst
-
-if __name__ == '__main__':
-    split_points = 3
-    num_clients = 3
-    num_rounds = 10
-    vector_size = 1_000_000
-    base_vector = torch.normal(0, 1, size=(vector_size,))
-    codec = NSplitCodec(split_points=split_points)
-
-    for round_id in range(num_rounds):
-        base_vector = base_vector + torch.normal(0.0, 0.01, size=(vector_size,))
-        client_deltas = [base_vector + torch.normal(0.0, 0.1, size=(vector_size,)) for _ in range(num_clients)]
-
-        for ci, d_v in enumerate(client_deltas):
-            record = codec.create_codec_record(round_id, ci)
-            record.model_size = d_v.shape[0]
-            payload = codec.encode(d_v, record)
-            reconst = codec.decode(payload, record)
-            print(record.to_dict())
-
-    # from matplotlib import pyplot as plt
-    # bins_vec, mean_v = codec._compress(base_vector, record)
-    # plt.scatter(base_vector.cpu().numpy(), bins_vec.cpu().numpy()+0.2, alpha=0.5, s=0.1, cmap='red')
-    # plt.vlines(mean_v.cpu().numpy(), 0, split_points-0.9, alpha=0.3)
-    # plt.twinx().hist(base_vector.cpu().numpy(), 200, alpha=0.3)
-    # plt.show()
+if __name__ == "__main__":
+    codec = NSplitCodec({"points": 3}, "NS|points=3")
+    delta = torch.normal(0, 1, size=(1_000_000,), dtype=torch.float32)
+    record = codec.create_r_record(round_id=0, client_id=0)
+    reconstruction = codec.decode(codec.encode(delta, record), record)
+    print(record.to_dict())
+    print(torch.mean((reconstruction - delta).square()).item())
