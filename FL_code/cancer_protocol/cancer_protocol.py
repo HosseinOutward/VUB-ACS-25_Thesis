@@ -14,7 +14,7 @@ from FL_code.FL_core.codec import (
     CompressionRecord,
     ReconstructionHistory,
 )
-from FL_code.FL_core.utils import compress_data_list, decompress_data_list
+from FL_code.FL_core.utils import ParsedConfigurableName, compress_data_list, decompress_data_list
 from FL_code.cancer_protocol.prior_code import PriorCalculator
 
 from .wz_quantizer import DedupedDecodingWZQuantizerCancer, WZQuantizerCancer, WZcfgQuant
@@ -350,6 +350,19 @@ class T_RoundCodec(_WZRoundCodec):
         temp = PriorCalculator.compute_marginal_prior(bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(temp, bins, self.c_cfg.num_planes)
 
+
+class Oracle_RoundCodec(T_RoundCodec):
+    round_name: ClassVar[str] = "O"
+    can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
+
+    def get_training_data(
+        self, given_history: ReconstructionHistory, client_id: int
+    ) -> tuple[None, list[torch.Tensor]]:
+        history = given_history.view(Access.SERVER_ONLY, client_id)
+        train_si = [entry.tensor for c_h in history.values() for entry in c_h]
+        return None, train_si
+
+
 class _WZProtocol(BaseProtocol):
     max_per_client_recons_history = 5
 
@@ -373,13 +386,12 @@ class _WZProtocol(BaseProtocol):
         if not issubclass(rc_class, _WZRoundCodec):
             return rc_class(parsed.options, round_name_full)
         
-        assert isinstance(parsed.options, dict)
-
         if rc_class is F_RoundCodec:
             frozen_state = self.last_frozen_state.get(client_id)
             assert frozen_state is not None, f"No frozen quantizer state exists yet for client {client_id}."
             return F_RoundCodec(None, round_name_full, **frozen_state,)
 
+        assert isinstance(parsed.options, dict)
         parsed.options['sd_slices'] = self.sd_slices
         codec = rc_class(parsed.options, round_name_full)
         assert isinstance(codec, _WZRoundCodec)
@@ -404,7 +416,7 @@ class WZCancerProtocol(_WZProtocol):
         f"T|bins_per_plane=4|num_planes=3",
     )
     routine_round_codecs: tuple[str, ...] = (
-        f"T|bins_per_plane=2|num_planes=3",
+        f"T|bins_per_plane=3|num_planes=3",
         "F",
         "F",
         "F",
@@ -412,6 +424,11 @@ class WZCancerProtocol(_WZProtocol):
     )
     protocol_name: ClassVar[str] = "wz_cancer"
 
-    def options_to_config(self, **options: Any) -> None:
-        """Reject protocol-level options; bit allocation is fixed by the schedule."""
-        assert not options, f"wz_cancer protocol does not accept options: {tuple(options)}."
+    def options_to_config(self, replace_T_with: str | None = None) -> None:
+        if replace_T_with is not None:
+            self.warmup_round_codecs = tuple(
+                rc.replace("T|", f"{replace_T_with}|")
+                if rc.startswith("T|") else rc for rc in self.warmup_round_codecs)
+            self.routine_round_codecs = tuple(
+                rc.replace("T|", f"{replace_T_with}|")
+                if rc.startswith("T|") else rc for rc in self.routine_round_codecs)

@@ -374,6 +374,12 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
     with config_path.open() as f:
         saved_config = json.load(f)
 
+    saved_num_clients = saved_config["num_clients"]
+    assert cfg.num_clients <= saved_num_clients, (
+        f"Debug data in {save_dir} contains {saved_num_clients} clients, "
+        f"but {cfg.num_clients} were requested."
+    )
+
     # Fields that cannot affect the saved training data, so replays may differ in them.
     ignored_fields = {
         "protocol",
@@ -390,6 +396,9 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
         "debug_data_folder",
         "debug_save_deltas",
         "debug_save_recons",
+        "debug_save_recons_rounds",
+        "num_clients",
+        "dataset_fraction",
     }
     unknown_fields = ignored_fields - (type(cfg).model_fields.keys() | {"codec"})
     assert not unknown_fields, f"Unknown debug config ignored field(s): {tuple(sorted(unknown_fields))}."
