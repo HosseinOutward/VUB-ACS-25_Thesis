@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Mapping, Sequence
+from copy import copy, deepcopy
 from typing import Any, ClassVar, Literal
 
 import torch
@@ -11,7 +12,6 @@ from FL_code.FL_core.codec import (
     BaseProtocol,
     BaseRoundCodec,
     CompressionRecord,
-    HistoryEntry,
     ReconstructionHistory,
 )
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
@@ -59,7 +59,11 @@ class _WZRoundCodec(BaseRoundCodec):
         self.c_cfg = WZcfgQuant(bins_per_plane=bins_per_plane, num_planes=num_planes, norm_slices=sd_slices)
 
     @staticmethod
-    def validate_cfg(bins_per_plane: int, num_planes: int) -> None:
+    def validate_cfg(
+        bins_per_plane: int,
+        num_planes: int,
+        sd_slices: Sequence[slice] | None = None,
+    ) -> None:
         assert isinstance(bins_per_plane, int) and bins_per_plane > 0
         assert isinstance(num_planes, int) and num_planes > 0
 
@@ -76,7 +80,7 @@ class _WZRoundCodec(BaseRoundCodec):
         torch.cuda.empty_cache()
         return quantizer
 
-    def create_encode_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
+    def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
 
         bins, prep_metadata = self.quantizer.encoding_process(delta_vec)
@@ -90,7 +94,7 @@ class _WZRoundCodec(BaseRoundCodec):
         return {'payload_content': (bins, prep_metadata)}
 
     def encode(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
-        payload = self.create_encode_payload(delta_vec, record)
+        payload = self.get_encod_payload(delta_vec, record)
         return compress_data_list(payload)
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
@@ -101,7 +105,7 @@ class _WZRoundCodec(BaseRoundCodec):
 
 class F_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "F"
-    can_decode_where: Access
+    can_decode_where:Access
 
     def __init__(
         self,
@@ -150,33 +154,150 @@ class R_RoundCodec(_WZRoundCodec):
 
 
 class S_RoundCodec(_WZRoundCodec):
+    """Two-pass sampled-retraining round against the quantizer's train-inference mismatch.
+
+    A seeded sample of the delta is coded with a frozen copy of the initial server-trained
+    model; its reconstruction is reproducible on the server, so both sides can retrain the
+    encoder head and decoder on it. The remainder is coded with the retrained model, and only
+    the small retrained encoder head has to travel back to the clients.
+    """
+
+    class S_record(CancerRecord):
+        """Compression record with first-pass sample diagnostics for an S round."""
+
+        sampled_count: int | None = None
+        sampled_fraction: float | None = None
+        sampled_data_size: float | None = None
+        sampled_symbol_rate: float | None = None
+        sampled_mse: float | None = None
+        sampled_wmspe_sqrt: float | None = None
+        retrain_loss: float | None = None
+        head_size_only: float | None = None
+
+    record_class = S_record
     round_name: ClassVar[str] = "S"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
+
+    sample_fraction: ClassVar[float] = 0.02
+    retrain_epochs: ClassVar[int] = 10
+    _sample_original: torch.Tensor | None = None
+
+    sampling_quantizer: WZQuantizerCancer
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Select one latest server reconstruction as target and all visible reconstructions as side information."""
         history = given_history.view(Access.SERVER_ONLY, client_id)
         train_si = [entry.tensor for c_h in history.values() for entry in c_h]
         x_tensor = torch.stack([c_h[-1].tensor for c_h in history.values()])
         x_tensor = x_tensor[torch.randint(x_tensor.shape[0], (), device=x_tensor.device)]
         return x_tensor, train_si
 
-    def create_encode_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
-        # sample_idx = ?
-        # bins_of_sampled = ?
-        # somehow add a super compressed (using sw) version of the sent values to the record
-        #   it has to appear in the prior metric
-        #   it has to also appear in the data sent but sw used on it
-        #   probably since prior compute is in encode function, it should be handled there
-        # train on a sample of delta_vec (only the head of the encoder and the entire decoder)
+    def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
+        """Encode a seeded sample with the initial model, retrain on its reconstruction, encode the rest."""
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        assert isinstance(record, self.S_record)
 
-        # include the head of the encoder in the payload
+        delta_prep, _ = self.quantizer.preprocess_x(delta_vec)
+        self.sampling_quantizer = copy(self.quantizer)
+        self.sampling_quantizer.coding_model = deepcopy(self.quantizer.coding_model)
 
-        # use the trained quantizer to encode the remaining delta_vec and send it to the server but not more probably using the super
+        sample_count = int(delta_vec.numel() * self.sample_fraction)
+        assert sample_count > 100_000, f"Sample count {sample_count} is too small for retraining."
+        sample_seed = self._sample_seed(record, delta_vec.numel())
+        sample_indices, _ = self._split_indices(sample_seed, delta_vec.numel(), sample_count)
+        self._sample_original = delta_vec[sample_indices]
 
-        # account for the fact that the prior from the sampled part and the rest have to be combined in the prior metric
-        raise NotImplementedError("S round sampled encoding is not implemented yet.")
+        sample_bins = self.sampling_quantizer.encode_subset(delta_prep, sample_indices)
+        sample_recons_prep = self.sampling_quantizer.decode_subset(
+            sample_bins, sample_indices)
+        retrain_loss = self._retrain_from_reconstructed_sample(sample_recons_prep, sample_indices)
+
+        payload = super().get_encod_payload(delta_vec, record)
+        full_bins, _ = payload["payload_content"]
+        full_bins[:, sample_indices] = sample_bins
+
+        encoder_head_state = self.quantizer.encoder_head_state_dict()
+        sampling_payload = {
+            "seed": sample_seed,
+            "count": sample_count,
+            "new_head_state": encoder_head_state,
+        }
+        payload["sampling"] = sampling_payload
+
+        sample_data_size = _compressed_size([sampling_payload, sample_bins])
+        head_size = _compressed_size(encoder_head_state)
+        assert record.encoder_size is not None
+        record.encoder_size += head_size
+        record.update_record_fields(
+            sampled_count=sample_count,
+            sampled_fraction=sample_count / delta_vec.numel(),
+            sampled_data_size=sample_data_size,
+            sampled_symbol_rate=sample_data_size * (1024 ** 2) * 8 / sample_count,
+            retrain_loss=retrain_loss,
+            head_size_only=head_size
+        )
+        return payload
+
+    def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
+        """Decode the sample with the initial model and the remainder with the retrained one, then reorder."""
+        assert isinstance(record, self.S_record) and self._sample_original is not None
+        payload_dict = decompress_data_list(payload)
+        sampling_payload = payload_dict["sampling"]
+        full_bins, _ = payload_dict["payload_content"]
+        sample_indices, _ = self._split_indices(
+            int(sampling_payload["seed"]), full_bins.shape[1], int(sampling_payload["count"]))
+
+        reconst = super().decode(payload, record)
+        sampling_reconst = self.sampling_quantizer.decoding_process(
+            payload_dict["payload_content"])
+        reconst[sample_indices] = sampling_reconst[sample_indices]
+
+        sample_error = reconst[sample_indices] - self._sample_original
+        record.update_record_fields(
+            sampled_mse=sample_error.square().mean().item(),
+            sampled_wmspe_sqrt=(
+                sample_error.square().mean().sqrt().item()
+                / (self._sample_original.abs().mean().item() + 1e-8) * 100
+            ),
+        )
+        return reconst
+
+    def _retrain_from_reconstructed_sample(
+        self, sample_recons_prep: torch.Tensor, sample_indices: torch.Tensor
+    ) -> float:
+        """Retrain the encoder head and downstream decoder/prior on the reproducible sample."""
+        x_sample = sample_recons_prep.unsqueeze(1)
+        side_info = self.quantizer.side_info_tensor()[
+            sample_indices.to(self.quantizer.device)
+        ]
+        retrain_cfg = self.c_cfg.model_copy(update={"train_epochs": self.retrain_epochs})
+        return self.quantizer.train_attempt(
+            self.quantizer.coding_model,
+            x_sample,
+            side_info,
+            retrain_cfg,
+            x_sample.float().square().mean().item() / 2 + 1e-8,
+        )
+
+    @staticmethod
+    def _sample_seed(record: CancerRecord, vector_size: int) -> int:
+        return int(
+            (record.round_id * 1_000_003 + record.client_id * 9_176 + vector_size) % (2**31 - 1))
+
+    @staticmethod
+    def _split_indices(
+        seed: int, vector_size: int, sample_count: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert 0 < sample_count <= vector_size
+        generator = torch.Generator().manual_seed(seed)
+        sample_indices = (
+            torch.randperm(vector_size, generator=generator)[:sample_count].sort().values
+        )
+        sample_mask = torch.zeros(vector_size, dtype=torch.bool)
+        sample_mask[sample_indices] = True
+        return sample_indices, torch.arange(vector_size)[~sample_mask]
 
 
 class T_RoundCodec(_WZRoundCodec):
@@ -199,12 +320,12 @@ class T_RoundCodec(_WZRoundCodec):
         self.quantizer = quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))
         return quantizer
 
-    def create_encode_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
+    def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
         # The worker trains here, so encode timing includes quantizer training by design.
         self.quantizer.train_model(delta_vec, self.si)
         gc.collect()
         torch.cuda.empty_cache()
-        payload = super().create_encode_payload(delta_vec, record)
+        payload = super().get_encod_payload(delta_vec, record)
         payload['quantizer_state'] = self.quantizer.coding_model.decoder_state_dict()
         return payload
 
@@ -227,15 +348,19 @@ class _WZProtocol(BaseProtocol):
         super().__init__(options, protocol_name_full, sd_slices)
         self.last_frozen_state = {}
 
-    def create_round_codec(self, round_id: int, client_id: int) -> _WZRoundCodec:
+    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
+        if not issubclass(rc_class, _WZRoundCodec):
+            return rc_class(parsed.options, round_name_full)
+        
         assert isinstance(parsed.options, dict)
-        parsed.options['sd_slices'] = self.sd_slices
+
         if rc_class is F_RoundCodec:
             frozen_state = self.last_frozen_state.get(client_id)
             assert frozen_state is not None, f"No frozen quantizer state exists yet for client {client_id}."
-            return F_RoundCodec(parsed.options, round_name_full, **frozen_state,)
+            return F_RoundCodec(None, round_name_full, **frozen_state,)
 
+        parsed.options['sd_slices'] = self.sd_slices
         codec = rc_class(parsed.options, round_name_full)
         assert isinstance(codec, _WZRoundCodec)
 
@@ -247,3 +372,26 @@ class _WZProtocol(BaseProtocol):
             'h_access': codec.can_decode_where,
         }
         return codec
+
+
+class WZCancerProtocol(_WZProtocol):
+    """WZ cancer replay schedule using identity warmup, temporal rounds, then frozen temporal reuse."""
+
+    _round_cfg: ClassVar[str] = "bins_per_plane=2|num_planes=2"
+    warmup_round_codecs: ClassVar[tuple[str, ...]] = (
+        "I",
+        f"T|{_round_cfg}",
+        f"T|{_round_cfg}",
+    )
+    routine_round_codecs: ClassVar[tuple[str, ...]] = (
+        f"T|{_round_cfg}",
+        "F",
+        "F",
+        "F",
+        "F",
+    )
+    protocol_name: ClassVar[str] = "wz_cancer"
+
+    def options_to_config(self, **options: Any) -> None:
+        """Reject protocol-level options; bit allocation is fixed by the schedule."""
+        assert not options, f"wz_cancer protocol does not accept options: {tuple(options)}."
