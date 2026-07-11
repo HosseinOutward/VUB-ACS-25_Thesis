@@ -118,7 +118,7 @@ class PriorCalculator:
         return min(attempts, key=lambda attempt: attempt[1])[0]
 
 
-class DedupedPriorCalculator(PriorCalculator):
+class DedupedPriorCalculator(PriorCalculator): # dont use / buggy
     """PriorCalculator that runs the prior network once per unique (bins, side info) row.
 
     Priors are a pure function of each position's bin symbols and side information, so duplicate
