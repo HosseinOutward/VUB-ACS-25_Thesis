@@ -45,9 +45,13 @@ class HistoryEntry:
 class ReconstructionHistory:
     """Owns reconstructed-gradient history and enforces decoder-side visibility."""
 
-    def __init__(self, max_per_client: int | None, routine_accesses: Sequence[Access]) -> None:
+    def __init__(
+        self, max_per_client: int | None, routine_accesses: Sequence[Access],
+        dtype: torch.dtype = torch.float16,
+    ) -> None:
         assert max_per_client != 0, 'to disable reconstruction history, set max_per_client to None'
         self.max_per_client: int = max_per_client if max_per_client else 0
+        self.dtype: torch.dtype = dtype
         self._server: dict[int, list[HistoryEntry]] = {}
         self._temporal: dict[int, list[HistoryEntry]] = {}
 
@@ -78,6 +82,7 @@ class ReconstructionHistory:
         """Return a state copy that reuses the same immutable history entries."""
         copied = type(self).__new__(type(self))
         copied.max_per_client = self.max_per_client
+        copied.dtype = self.dtype
         copied._server = {
             client_id: entries.copy()
             for client_id, entries in self._server.items()
@@ -94,7 +99,7 @@ class ReconstructionHistory:
     def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
         """Commit a reconstructed tensor to every ledger allowed to retain it."""
         assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
-        assert reconst.dtype == torch.float16 and reconst.device == torch.device("cpu")
+        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
         if access is Access.NONE:
             return
 
@@ -362,7 +367,12 @@ class BaseProtocol:
         self._round_codec_classes = self._validate_round_codecs()
         self._recons_history = ReconstructionHistory(
             max_per_client=self.max_per_client_recons_history,
-            routine_accesses=[h.can_decode_where for h in self._round_codec_classes.values()]
+            # Frozen rounds declare can_decode_where per instance; they inherit an
+            # earlier round's access, so they never extend the retention plan.
+            routine_accesses=[
+                access for h in self._round_codec_classes.values()
+                if isinstance(access := getattr(h, "can_decode_where", None), Access)
+            ]
         )
         self.sd_slices = sd_slices
 

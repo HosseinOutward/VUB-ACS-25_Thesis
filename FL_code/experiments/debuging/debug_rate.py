@@ -36,7 +36,7 @@ prep_si = quantizer.get_si_data()
 
 print("\nEncoding...")
 
-bins,_ = quantizer.encoding_process(y)
+bins, _, _ = quantizer.encoding_process(y)
 print(f"Bins shape: {bins.shape}")  # Should be [num_planes, N]
 print(f"Final bins unique: {[torch.unique(bins[i]).tolist() for i in range(bins.shape[0])]}")
 
