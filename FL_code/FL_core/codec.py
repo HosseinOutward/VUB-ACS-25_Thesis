@@ -254,6 +254,7 @@ class BaseRoundCodec:
         access level is only known per instance (e.g. frozen rounds).
         """
         super().__init_subclass__()
+        # should fail on base classes (like with _)
         assert issubclass(cls.record_class, CompressionRecord)
         assert cls.round_name
         assert (isinstance(getattr(cls, "can_decode_where", None), Access)

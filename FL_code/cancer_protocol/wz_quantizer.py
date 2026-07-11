@@ -362,6 +362,19 @@ class WZQuantizerCancer:
         bins = batch_loop(encode_batch, self.coding_model, x_prep.shape[0], batch_size, cat_dim=1)
         return bins
 
+    def encode_subset(
+        self,
+        x_prep: torch.Tensor,
+        indices: torch.Tensor,
+        batch_size: int = 500_000,
+    ) -> torch.Tensor:
+        """Exactly encode selected positions from an already preprocessed full vector."""
+        bins = WZQuantizerCancer._encode_preprocessed(
+            self, x_prep[indices.to(self.device)], batch_size
+        )
+        dtype = torch.uint8 if self.bins_per_plane <= 2**8 else torch.uint16
+        return bins.to(dtype)
+
     def decoding_process(
         self,
         payload_content: tuple[torch.Tensor, PreprocessMetadata],
@@ -392,6 +405,26 @@ class WZQuantizerCancer:
 
         recons = batch_loop(decode_batch, self.coding_model, bins.shape[1], batch_size)
         return recons.reshape(-1)
+
+    def decode_subset(
+        self,
+        bins: torch.Tensor,
+        indices: torch.Tensor,
+        batch_size: int = 500_000,
+    ) -> torch.Tensor:
+        """Decode normalized symbols at their original full-vector positions."""
+        assert bins.shape[1] == indices.numel()
+        return self._decode_preprocessed(
+            bins,
+            self.side_info_tensor()[indices.to(self.device)],
+            batch_size,
+        )
+
+    def encoder_head_state_dict(self) -> dict[str, torch.Tensor]:
+        """Return the encoder binner parameters in their transmitted representation."""
+        return self.coding_model._transmission_state_dict(
+            self.coding_model.state_dict(), ("binner",)
+        )
 
     def get_posterior(
         self,
