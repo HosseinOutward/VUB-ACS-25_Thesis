@@ -95,6 +95,10 @@ def run_federated_server(
                sd_manager=sd_manager,
                save_dir=cfg.records_dir, server_eval_metrics=metrics,
                worker_eval_metrics=worker_metrics_vec.tolist(), metric_keys=list(metrics.keys()))
+            if cfg.debug_save_recons is not None:
+                recon_data_path = cfg.debug_data_folder / cfg.debug_save_recons
+                recon_data_path.mkdir(parents=True, exist_ok=True)
+                torch.save(recon_delta_vec.cpu(), recon_data_path / f'round_{rnd_i}_client_{rcvd_client_id}.pt')
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))
 
