@@ -232,8 +232,8 @@ class WZQuantizerCancer:
                 f"Quantizer training requires {self.side_info_size} side-information vectors.")
             self.side_info_list_used = list(si_raw_list)
             
-        wmspe_denom = (x_raw.float().square().mean().item() / 2) + 1e-8
         x_prep, _ = self.preprocess_x(x_raw)
+        wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
         side_info = self.side_info_tensor()
 
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_raw, x_prep, side_info, wmspe_denom)
