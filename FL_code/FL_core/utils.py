@@ -377,7 +377,9 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
     # Fields that cannot affect the saved training data, so replays may differ in them.
     ignored_fields = {
         "protocol",
+        "codec",
         "run_name",
+        "rounds",
         "records_dir",
         "master_port",
         "master_addr",
@@ -385,8 +387,11 @@ def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
         "training_progress_bar",
         "debug_save_train_data",
         "debug_load_from_saved_data",
+        "debug_data_folder",
+        "debug_save_deltas",
+        "debug_save_recons",
     }
-    unknown_fields = ignored_fields - type(cfg).model_fields.keys()
+    unknown_fields = ignored_fields - (type(cfg).model_fields.keys() | {"codec"})
     assert not unknown_fields, f"Unknown debug config ignored field(s): {tuple(sorted(unknown_fields))}."
 
     saved_config = {field: value for field, value in saved_config.items() if field not in ignored_fields}

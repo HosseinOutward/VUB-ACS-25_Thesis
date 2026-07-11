@@ -59,6 +59,7 @@ class FLConfig(BaseModel):
     debug_save_train_data: bool = False
     debug_data_folder: Path = Path('data/_debug_saved_checckpoints')
     debug_save_deltas: str = 'delta_vec_data'
+    debug_save_recons: str | None = None
     debug_load_from_saved_data: bool = False
     debug_continue_from_saved_data: bool = False
     debug_continue_then_save: bool = False
@@ -160,6 +161,7 @@ if __name__ == "__main__":
     ap.add_argument("--debug-load-from-saved-data", action="store_true", default=False)
     ap.add_argument("--debug-data-folder", type=Path, default=FLConfig.model_fields["debug_data_folder"].default)
     ap.add_argument("--debug-save-deltas", type=str, default=FLConfig.model_fields["debug_save_deltas"].default)
+    ap.add_argument("--debug-save-recons", type=str, default=FLConfig.model_fields["debug_save_recons"].default)
     args = ap.parse_args()
 
     cfg = FLConfig(
@@ -180,6 +182,7 @@ if __name__ == "__main__":
         debug_load_from_saved_data=args.debug_load_from_saved_data,
         debug_data_folder=args.debug_data_folder,
         debug_save_deltas=args.debug_save_deltas,
+        debug_save_recons=args.debug_save_recons,
     )
 
     if cfg.debug_mode:
@@ -217,6 +220,8 @@ if __name__ == "__main__":
         write_fl_config_snapshot(cfg, debug_delta_dir)
     if cfg.debug_load_from_saved_data:
         assert_debug_fl_config_matches(cfg, debug_delta_dir)
+    if cfg.debug_save_recons is not None:
+        write_fl_config_snapshot(cfg, cfg.debug_data_folder / cfg.debug_save_recons)
 
     print(f'[MAIN] {cfg.protocol}')
 
