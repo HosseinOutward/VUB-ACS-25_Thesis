@@ -302,8 +302,10 @@ class WZQuantizerCancer:
 
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_raw, x_prep, side_info, wmspe_denom)
 
-        bins = self._encode_preprocessed(x_prep, 500_000)
-        self.training_prior = self.prior_calculator.compute_prior_from_network(self.coding_model, bins, side_info).to(torch.float16)
+        bins, _ = self._encode_preprocessed(x_prep, 500_000)
+        temp = self.prior_calculator.compute_prior_from_network(
+                self.coding_model, bins, side_info).to(torch.float16)
+        self.training_prior_rate = self.prior_calculator.compute_rate_from_prior_tensor(temp, bins, self.c_cfg.num_planes)
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_raw: torch.Tensor, x_prep: torch.Tensor, 
@@ -322,7 +324,8 @@ class WZQuantizerCancer:
                 (x_prep,), side_info, self.c_cfg, wmspe_denom=wmspe_denom)
 
             if np.isfinite(loss):
-                reconstruction = self.decoding_process(self.encoding_process(x_raw))
+                bins, _, metadata = self.encoding_process(x_raw)
+                reconstruction = self.decoding_process((bins, metadata))
                 if torch.isfinite(reconstruction).all():
                     attempt = (model, loss)
                     made_quants_and_stat.append(attempt)
@@ -332,20 +335,26 @@ class WZQuantizerCancer:
 
     def encoding_process(
         self, x_raw: torch.Tensor, batch_size: int = 500_000,
-    ) -> tuple[torch.Tensor, PreprocessMetadata]:
-        """Preprocess and quantize one raw vector into per-plane bin indices."""
-        x_prep, metadata = self.preprocess_x(x_raw)
-        bins = self._encode_preprocessed(x_prep, batch_size)
-        return bins, metadata
+    ) -> tuple[torch.Tensor, torch.Tensor | None, PreprocessMetadata]:
+        """Preprocess and quantize one raw vector into per-plane bin indices and soft code posteriors.
 
-    def _encode_preprocessed(self, x_prep: torch.Tensor, batch_size: int) -> torch.Tensor:
-        """Encode normalized model inputs into per-plane bin indices."""
+        Estimator subclasses that bypass the neural encoder return ``None`` soft codes.
+        """
+        x_prep, metadata = self.preprocess_x(x_raw)
+        bins, soft_codes = self._encode_preprocessed(x_prep, batch_size)
+        return bins, soft_codes, metadata
+
+    def _encode_preprocessed(self, x_prep: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode normalized model inputs into per-plane bin indices and soft code posteriors."""
+        soft_code_batches: list[torch.Tensor] = []
+
         def encode_batch(start: int, end: int) -> torch.Tensor:
-            bins, _ = self.coding_model.encode(x_prep[start:end])
+            bins, soft_codes = self.coding_model.encode(x_prep[start:end], force_softmax=True)
+            soft_code_batches.append(torch.stack(soft_codes).cpu())
             return torch.stack(bins).cpu()
         bins = batch_loop(encode_batch, self.coding_model, x_prep.shape[0], batch_size, cat_dim=1)
         dtype = torch.uint8 if self.bins_per_plane <= 2**8 else torch.uint16
-        return bins.to(dtype)
+        return bins.to(dtype), torch.cat(soft_code_batches, dim=1)
 
     def decoding_process(
         self,
@@ -455,7 +464,7 @@ class DedupedDecodingStats(NamedTuple):
     collision_count: int
 
 
-class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
+class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):  # dont use / buggy
     """WZ quantizer that encodes a sample exactly and infers safe remaining symbols by nearby sampled values.
 
     The sampling knobs are runtime-speed trade-offs rather than experiment parameters, so they
@@ -475,7 +484,7 @@ class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
         self,
         x_prep: torch.Tensor,
         batch_size: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, None]:
         """Encode normalized model inputs from sampled anchors plus exact unsafe values."""
         vector_size = x_prep.shape[0]
         sample_count = min(
@@ -483,16 +492,15 @@ class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
             max(self.neighbor_count, int(np.ceil(vector_size * self.sample_fraction))),
         )
         if sample_count == vector_size:
-            bins = super()._encode_preprocessed(x_prep, batch_size)
+            bins, _ = super()._encode_preprocessed(x_prep, batch_size)
             self.last_sampled_encoding_stats = SampledEncodingStats(vector_size, sample_count, 0, 0, 0.0)
-            return bins
+            return bins, None
 
         # The neural encoder is used only for sampled anchors and values rejected by sample-based assignment.
         generator = torch.Generator(device=self.device).manual_seed(self.sample_seed)
         sample_indices = torch.randperm(vector_size, device=self.device, generator=generator)[:sample_count]
-        sample_bins = super()._encode_preprocessed(x_prep[sample_indices], batch_size).to(
-            device=self.device, dtype=torch.long
-        )
+        sample_bins, _ = super()._encode_preprocessed(x_prep[sample_indices], batch_size)
+        sample_bins = sample_bins.to(device=self.device, dtype=torch.long)
 
         sampled = torch.zeros(vector_size, dtype=torch.bool, device=self.device)
         sampled[sample_indices] = True
@@ -512,10 +520,8 @@ class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
         # Unsafe values include contradictory neighborhoods, sparse neighborhoods, and optional normalized tails.
         fallback_indices = remaining_indices[~inferred_mask]
         if fallback_indices.numel():
-            bins[:, fallback_indices] = super()._encode_preprocessed(
-                x_prep[fallback_indices],
-                batch_size,
-            ).to(device=self.device, dtype=torch.long)
+            fallback_bins, _ = super()._encode_preprocessed(x_prep[fallback_indices], batch_size)
+            bins[:, fallback_indices] = fallback_bins.to(device=self.device, dtype=torch.long)
 
         self.last_sampled_encoding_stats = SampledEncodingStats(
             vector_size,
@@ -524,7 +530,7 @@ class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):
             int(fallback_indices.numel()),
             distance_threshold,
         )
-        return bins.cpu()
+        return bins.cpu(), None
 
     def _assign_bins_from_samples(
         self,
@@ -643,7 +649,7 @@ def unique_row_groups(
     return bins_device, representatives, inverse, collisions
 
 
-class DedupedDecodingWZQuantizerCancer(DistanceSampledWZQuantizerCancer):
+class DedupedDecodingWZQuantizerCancer(DistanceSampledWZQuantizerCancer): # dont use / buggy
     """Distance-sampled WZ quantizer that decodes each unique (bins, side info) row only once.
 
     Decoder outputs and conditional priors are pure functions of the per-position bin symbols
