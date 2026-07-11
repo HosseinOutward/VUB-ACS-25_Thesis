@@ -1,13 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, ClassVar
-import hashlib
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
 
@@ -29,13 +27,6 @@ class PriorCalculator:
             ).mean().item()
             for plane in range(num_planes)
         )
-
-    @staticmethod
-    def get_hash(x_vec: torch.Tensor, sample_size: int = 1024) -> str:
-        """Build the stable lightweight cache key used for prior reuse."""
-        sample = x_vec[:sample_size * 3:3].cpu().numpy().round(decimals=2)
-        sample = (sample*100).astype(np.int16)
-        return hashlib.md5(sample.tobytes()).hexdigest()
 
     @staticmethod
     def compute_marginal_prior(bins_vec: torch.Tensor, bins_per_plane: int, num_planes: int) -> torch.Tensor:
@@ -67,82 +58,64 @@ class PriorCalculator:
         return batch_loop(prior_batch, model, bins_vec.shape[1], batch_size, cat_dim=1)
 
     @staticmethod
-    def train_prior_model(
-        bins_vec: torch.Tensor,
+    def prior_loss(
+        model: EncoderDecoderLayeredRNN,
+        training_input: tuple[torch.Tensor, torch.Tensor],
         side_info: torch.Tensor,
-        num_planes: int,
-        bins_per_plane: int,
+        epoch: int,
+        c_cfg: WZcfgQuant,
+    ) -> torch.Tensor:
+        """Compute the quantizer's rate term from fixed bins and soft codes."""
+        progress = epoch / (c_cfg.train_epochs + 1)
+        tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
+        bins = training_input[0].unbind(dim=1)
+        soft_codes = training_input[1].unbind(dim=1)
+        priors = model.get_priors(codes=soft_codes, y=side_info, tau=tau)
+        return torch.stack([
+            torch.log(
+                (posterior.detach().gather(1, plane_bins[:, None]) + 1e-12)
+                / (prior.gather(1, plane_bins[:, None]) + 1e-12)
+            ).mean()
+            for plane_bins, posterior, prior in zip(bins, soft_codes, priors, strict=True)
+        ]).mean()
+
+    @staticmethod
+    def retrain_prior_with_quantizer_loop(
+        model: EncoderDecoderLayeredRNN,
+        bins_vec: torch.Tensor,
+        soft_codes: torch.Tensor,
+        side_info: torch.Tensor,
         c_cfg: WZcfgQuant,
         batch_size: int = 50_000,
     ) -> EncoderDecoderLayeredRNN:
-        """Train repeated conditional prior models and return the finite lowest-loss attempt."""
+        """Retrain a saved quantizer's prior from plane-first fixed bins and soft codes."""
+        from .wz_quantizer import wz_model_training_loop
+
+        assert bins_vec.shape == (model.num_planes, side_info.shape[0])
+        assert soft_codes.shape == (model.num_planes, side_info.shape[0], model.bins_per_plane)
+        prior_input = (bins_vec.T.contiguous(), soft_codes.transpose(0, 1).contiguous())
         attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
-        tries = 0
-        while len(attempts) < c_cfg.prior_train_repeats:
-            assert tries < c_cfg.prior_train_repeats * 5, "Too many failed prior-training attempts."
-            tries += 1
-            model, loss = PriorCalculator._train_prior_attempt(
-                bins_vec, side_info, num_planes, bins_per_plane, c_cfg, batch_size
-            )
+        for _ in range(c_cfg.prior_train_repeats + 2):
+            if len(attempts) == c_cfg.prior_train_repeats:
+                break
+            candidate = deepcopy(model)
+            prior_heads = (
+                candidate.conditionalPriors
+                if not candidate.shared_priors else (candidate.conditionalPrior,))
+            candidate.requires_grad_(False)
+            prior_params = tuple(candidate.conditionalRNN.parameters()) + tuple(
+                parameter for head in prior_heads for parameter in head.parameters())
+            for parameter in prior_params:
+                parameter.requires_grad_(True)
+            loss = wz_model_training_loop(
+                PriorCalculator.prior_loss, candidate, iter(prior_params),
+                prior_input, side_info, c_cfg, batch_size,)
+            candidate.requires_grad_(True)
             if np.isfinite(loss):
-                attempts.append((model, loss))
+                attempts.append((candidate, loss))
+
+        assert len(attempts) == c_cfg.prior_train_repeats, "Too many failed prior-retraining attempts."
         return min(attempts, key=lambda attempt: attempt[1])[0]
-
-    @staticmethod
-    def _train_prior_attempt(
-        bins_vec: torch.Tensor,
-        side_info: torch.Tensor,
-        num_planes: int,
-        bins_per_plane: int,
-        c_cfg: WZcfgQuant,
-        batch_size: int,
-    ) -> tuple[EncoderDecoderLayeredRNN, float]:
-        from .wz_quantizer import new_rnn_model
-
-        assert bins_vec.shape[0] == num_planes, "bins_vec first dimension must match num_planes."
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = new_rnn_model(num_planes, bins_per_plane, side_info.shape[1], False).to(device).train()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-        total_samples = min(c_cfg.train_sample_size, bins_vec.shape[1])
-        total_batches = (total_samples + batch_size - 1) // batch_size
-        pbar = create_training_progress_bar(
-            c_cfg.train_epochs * total_batches,
-            disable=not c_cfg.training_progress_bar,
-            desc="Prior Model",
-        )
-
-        epoch_loss = float("inf")
-        for epoch in range(c_cfg.train_epochs):
-            indices = torch.randint(bins_vec.shape[1], (total_samples,), dtype=torch.long)
-            epoch_loss = 0.0
-            for start in range(0, total_samples, batch_size):
-                batch_indices = indices[start:start + batch_size]
-                bins_batch = bins_vec[:, batch_indices].to(device, torch.long)
-                si_batch = side_info[batch_indices].to(device)
-                si_batch = si_batch + torch.randn_like(si_batch) * (1e-4 * si_batch.abs().mean())
-                tau = c_cfg.tau * np.exp(epoch / (c_cfg.train_epochs + 1) * np.log(0.1 / c_cfg.tau))
-                priors = torch.stack(model.get_priors(
-                    codes=[F.one_hot(plane, num_classes=bins_per_plane).float() for plane in bins_batch],
-                    y=si_batch,
-                    tau=tau,
-                ))
-                selected_probs = priors.gather(2, bins_batch.long().unsqueeze(-1)).squeeze(-1)
-                loss = -torch.log(selected_probs + 1e-12).mean(dim=1).mean()
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item()
-                if c_cfg.training_progress_bar:
-                    pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-                    pbar.update(1)
-            epoch_loss /= total_batches
-
-        pbar.close()
-        model.cpu().eval()
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-        return model, epoch_loss
 
 
 class DedupedPriorCalculator(PriorCalculator):

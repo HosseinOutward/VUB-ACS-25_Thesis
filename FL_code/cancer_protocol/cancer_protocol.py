@@ -377,14 +377,14 @@ class _WZProtocol(BaseProtocol):
 class WZCancerProtocol(_WZProtocol):
     """WZ cancer replay schedule using identity warmup, temporal rounds, then frozen temporal reuse."""
 
-    _round_cfg: ClassVar[str] = "bins_per_plane=2|num_planes=2"
     warmup_round_codecs: ClassVar[tuple[str, ...]] = (
         "I",
-        f"T|{_round_cfg}",
-        f"T|{_round_cfg}",
+        "I",
+        f"T|bins_per_plane=8|num_planes=3",
+        f"T|bins_per_plane=4|num_planes=3",
     )
     routine_round_codecs: ClassVar[tuple[str, ...]] = (
-        f"T|{_round_cfg}",
+        f"T|bins_per_plane=2|num_planes=3",
         "F",
         "F",
         "F",
