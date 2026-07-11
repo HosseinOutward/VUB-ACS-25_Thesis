@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 import torch
+from torch.nn import Parameter
 import torch.nn.functional as F
 
 from FL_code.FL_core.utils import create_training_progress_bar
@@ -14,8 +15,7 @@ from FL_code.FL_core.utils import create_training_progress_bar
 from .brent_wz_models import EncoderDecoderLayeredRNN
 from .prior_code import DedupedPriorCalculator, PriorCalculator
 
-PRIOR_CACHE_NO_RETRAIN = "flag_no_retrain"
-PriorCache: TypeAlias = dict[str, torch.Tensor | str]
+
 OUTLIER_CHUNK = 2**8
 
 
@@ -123,6 +123,63 @@ def batch_loop(
     return torch.cat(batches, dim=cat_dim if cat_dim is not None else (1 if batches[0].ndim == 3 else 0))
 
 
+def wz_model_training_loop(
+    compute_loss: Callable,
+    model: EncoderDecoderLayeredRNN,
+    parameters: Iterator[Parameter],
+    training_inputs: tuple[torch.Tensor, ...],
+    side_info: torch.Tensor,
+    c_cfg: WZcfgQuant,
+    batch_size: int = 50_000,
+    **loss_fn_options,
+) -> float:
+    """Train one quantizer initialization and return its final epoch loss."""
+    model.to('cuda').train()
+    training_inputs = tuple(value.to('cuda') for value in training_inputs)
+    assert training_inputs
+    assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
+    side_info = side_info.to('cuda')
+
+    optimizer = torch.optim.AdamW(parameters, fused=True, lr=c_cfg.lr, weight_decay=1e-4,)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
+    scaler = torch.amp.GradScaler("cuda")
+
+    input_size = training_inputs[0].shape[0]
+    total_samples = min(c_cfg.train_sample_size, input_size)
+    total_batches = (total_samples + batch_size - 1) // batch_size
+    pbar = create_training_progress_bar(
+        c_cfg.train_epochs * total_batches,
+        desc="Training Quantizer",
+        disable=not c_cfg.training_progress_bar,)
+
+    for epoch in range(c_cfg.train_epochs):
+        indices = torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
+        epoch_loss = 0.0
+        for start in range(0, total_samples, batch_size):
+            batch_indices = indices[start:start + batch_size]
+            input_batch = tuple(value[batch_indices].clone() for value in training_inputs)
+            si_batch = side_info[batch_indices]
+
+            optimizer.zero_grad()
+            with torch.amp.autocast("cuda"):
+                loss = compute_loss(model, input_batch, si_batch, epoch, c_cfg, **loss_fn_options)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_loss += loss.item()
+            if c_cfg.training_progress_bar:
+                pbar.set_postfix({"loss": f"{loss.item():.2f}"})
+                pbar.update(1)
+        scheduler.step()
+        epoch_loss /= total_batches
+
+    pbar.close()
+    model.cpu()
+    torch.cuda.empty_cache()
+    return epoch_loss
+    
+
 class WZcfgQuant(BaseModel):
     """Quantizer and training configuration consumed by WZQuantizerCancer."""
 
@@ -155,6 +212,11 @@ class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
 
     prior_calculator: ClassVar[type[PriorCalculator]] = PriorCalculator
+
+    @property
+    def device(self) -> torch.device:
+        """Return the accelerator used by quantizer inference when available."""
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def __getattr__(self, name: str) -> Any:
         """Read missing quantizer attributes from c_cfg when they are configuration fields."""
@@ -196,13 +258,15 @@ class WZQuantizerCancer:
     @staticmethod
     def compute_loss(
         model: EncoderDecoderLayeredRNN,
-        x_batch: torch.Tensor,
+        training_input: tuple[torch.Tensor],
         si_batch: torch.Tensor,
         epoch: int,
         c_cfg: WZcfgQuant,
         wmspe_denom: float,
     ) -> torch.Tensor:
         """Compute reconstruction-plus-rate loss for one quantizer training batch."""
+        x_batch, = training_input
+        x_batch = x_batch + torch.randn_like(x_batch) * (1e-5 * x_batch.abs().mean())
         progress = epoch / (c_cfg.train_epochs + 1)
         tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
         reconstructions, bins, soft_codes, priors = model(x_batch, si_batch, tau=tau)
@@ -253,7 +317,9 @@ class WZQuantizerCancer:
 
             model = new_rnn_model(
                 self.num_planes, self.bins_per_plane, side_info.shape[1], self.marginal_loss)
-            loss = self._single_train_attempt(model, x_prep, side_info, self.c_cfg, wmspe_denom)
+            loss = wz_model_training_loop(
+                self.compute_loss, model, model.parameters(),
+                (x_prep,), side_info, self.c_cfg, wmspe_denom=wmspe_denom)
 
             if np.isfinite(loss):
                 reconstruction = self.decoding_process(self.encoding_process(x_raw))
@@ -263,64 +329,6 @@ class WZQuantizerCancer:
         assert len(made_quants_and_stat) == self.quantizer_train_repeats, "Too many failed training attempts."
 
         return min(made_quants_and_stat, key=lambda attempt: attempt[1])[0]
-
-    @classmethod
-    def _single_train_attempt(
-        cls,
-        model: EncoderDecoderLayeredRNN,
-        x_prep: torch.Tensor,
-        side_info: torch.Tensor,
-        c_cfg: WZcfgQuant,
-        wmspe_denom: float,
-        batch_size: int = 50_000,
-    ) -> float:
-        """Train one quantizer initialization and return its final epoch loss."""
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            fused=True,
-            lr=c_cfg.lr,
-            weight_decay=1e-4,
-        )
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
-        model.to('cuda').train()
-        x_prep = x_prep.to('cuda')
-        side_info = side_info.to('cuda')
-        scaler = torch.amp.GradScaler("cuda")
-
-        total_samples = min(c_cfg.train_sample_size, x_prep.shape[0])
-        total_batches = (total_samples + batch_size - 1) // batch_size
-        pbar = create_training_progress_bar(
-            c_cfg.train_epochs * total_batches,
-            desc="Training Quantizer",
-            disable=not c_cfg.training_progress_bar,)
-
-        for epoch in range(c_cfg.train_epochs):
-            indices = torch.randint(x_prep.shape[0], (total_samples,), device=x_prep.device)
-            epoch_loss = 0.0
-            for start in range(0, total_samples, batch_size):
-                batch_indices = indices[start:start + batch_size]
-                x_batch = x_prep[batch_indices].clone()
-                si_batch = side_info[batch_indices]
-                x_batch = x_batch + torch.randn_like(x_batch) * (1e-5 * x_batch.abs().mean())
-
-                optimizer.zero_grad()
-                with torch.amp.autocast("cuda"):
-                    loss = cls.compute_loss(model, x_batch, si_batch, epoch, c_cfg, wmspe_denom)
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-
-                epoch_loss += loss.item()
-                if c_cfg.training_progress_bar:
-                    pbar.set_postfix({"loss": f"{loss.item():.2f}"})
-                    pbar.update(1)
-            scheduler.step()
-            epoch_loss /= total_batches
-
-        pbar.close()
-        model.cpu()
-        torch.cuda.empty_cache()
-        return epoch_loss
 
     def encoding_process(
         self, x_raw: torch.Tensor, batch_size: int = 500_000,
