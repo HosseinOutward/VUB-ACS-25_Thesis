@@ -189,12 +189,12 @@ class WZcfgQuant(BaseModel):
     num_planes: int
     norm_slices: Sequence[slice] | None = None
     outlier_threshold: float | None = None
-    marginal_loss: bool = True
+    marginal_loss: bool = False
     max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
     train_epochs: int = 70
-    reconst_ld: float = 200.0
+    reconst_ld: float = 120.0
     train_sample_size: int = 300_000
     lr: float = 1e-3
     lr_step: int = 35
@@ -292,15 +292,14 @@ class WZQuantizerCancer:
             assert not si_raw_list, "Marginal quantizer training expects no side information."
             self.side_info_list_used = []
         else:
-            assert si_raw_list and len(si_raw_list) == self.side_info_size, (
-                f"Quantizer training requires {self.side_info_size} side-information vectors.")
-            self.side_info_list_used = list(si_raw_list)
+            assert si_raw_list
+            self.set_side_information(si_raw_list)
             
         x_prep, _ = self.preprocess_x(x_raw)
         wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
         side_info = self.side_info_tensor()
 
-        self.coding_model = self._train_finite_candidate_and_retrieve_best(x_raw, x_prep, side_info, wmspe_denom)
+        self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
         bins, _ = self._encode_preprocessed(x_prep, 500_000)
         temp = self.prior_calculator.compute_prior_from_network(
@@ -308,7 +307,7 @@ class WZQuantizerCancer:
         self.training_prior_rate = self.prior_calculator.compute_rate_from_prior_tensor(temp, bins, self.c_cfg.num_planes)
 
     def _train_finite_candidate_and_retrieve_best(
-        self, x_raw: torch.Tensor, x_prep: torch.Tensor, 
+        self, x_prep: torch.Tensor,
         side_info: torch.Tensor, wmspe_denom: float, 
         failure_tolerance: int = 2
     ) -> EncoderDecoderLayeredRNN:
@@ -324,8 +323,12 @@ class WZQuantizerCancer:
                 (x_prep,), side_info, self.c_cfg, wmspe_denom=wmspe_denom)
 
             if np.isfinite(loss):
-                bins, _, metadata = self.encoding_process(x_raw)
-                reconstruction = self.decoding_process((bins, metadata))
+                def reconstruct_batch(start: int, end: int) -> torch.Tensor:
+                    _, codes = model.encode(x_prep[start:end])
+                    return model.decode(codes, side_info[start:end])[-1].cpu()
+
+                reconstruction = batch_loop(
+                    reconstruct_batch, model, x_prep.shape[0], 500_000).reshape(-1)
                 if torch.isfinite(reconstruction).all():
                     attempt = (model, loss)
                     made_quants_and_stat.append(attempt)
@@ -443,6 +446,16 @@ class WZQuantizerCancer:
 
         side_info = torch.stack(tensors, dim=1).to(self.device, dtype=torch.float32).contiguous()
         return side_info
+
+    def set_side_information(self, side_info: Sequence[torch.Tensor]) -> None:
+        """Set the decoder-available side-information vectors used by decoding and conditional priors."""
+        assert not self.no_side_info, "A no-side-information quantizer cannot accept side information."
+        assert len(side_info) == self.side_info_size, (
+            f"Quantizer requires {self.side_info_size} side-information vectors, got {len(side_info)}.")
+        assert self.vector_size is None or all(value.numel() == self.vector_size for value in side_info), (
+            f"Each side-information vector must contain {self.vector_size} values.")
+        assert self.side_info_list_used is None, "Side information can only be set once per quantizer instance."
+        self.side_info_list_used = list(side_info)
 
 
 class SampledEncodingStats(NamedTuple):

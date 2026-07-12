@@ -150,8 +150,10 @@ class CompressionRecord:
     protocol_name_full: str | None = None
 
     model_size: int | None = None
+    setup_seconds: float | None = None
     encode_seconds: float | None = None
     decode_seconds: float | None = None
+    total_seconds: float | None = None
     final_bytes: float | None = None
     global_eval_metrics: dict[str, float] | None = None
     worker_eval_metrics: dict[str, dict[str, float]] | None = None
@@ -468,16 +470,31 @@ def simulate_compression(
     expected_len = num_metrics * 2
     assert len(worker_eval_metrics) == expected_len
 
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    total_start = time.perf_counter()
+    start_time = time.perf_counter()
     round_codec = protocol.create_round_codec(round_id, client_id)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    setup_seconds = time.perf_counter() - start_time
 
     record = round_codec.create_r_record(round_id, client_id)
 
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start_time = time.perf_counter()
     payload = round_codec.encode(delta_vec, record)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     encode_seconds = time.perf_counter() - start_time
 
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start_time = time.perf_counter()
     reconstructed = round_codec.decode(payload, record)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     decode_seconds = time.perf_counter() - start_time
     assert reconstructed.numel() == model_size
     if not protocol._recons_history.frozen:
@@ -487,6 +504,9 @@ def simulate_compression(
             round_codec.can_decode_where,
         )
 
+    final_bytes = _get_obj_storage_size(payload)
+    recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
+    total_seconds = time.perf_counter() - total_start
     record.update_record_fields(
         protocol_name_full=protocol.protocol_name_full,
         model_size=model_size,
@@ -495,13 +515,13 @@ def simulate_compression(
             'train': {key: worker_eval_metrics[i] for i, key in enumerate(metric_keys)},
             'test': {key: worker_eval_metrics[i + num_metrics] for i, key in enumerate(metric_keys)},
         },
-        final_bytes=_get_obj_storage_size(payload),
+        final_bytes=final_bytes,
+        setup_seconds=setup_seconds,
         encode_seconds=encode_seconds,
         decode_seconds=decode_seconds,
+        total_seconds=total_seconds,
+        **recons_error_and_metric,
     )
-
-    recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
-    record.update_record_fields(**recons_error_and_metric)
 
     record.append_record_to_csv(save_dir)
 
