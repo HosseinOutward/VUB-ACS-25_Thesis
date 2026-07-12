@@ -106,8 +106,8 @@ def seed_history(
                 else raw_delta
             )
             record = CompressionRecord(round_id, client_id, f"history_seed_{source.value}")
-            protocol.commit_reconstruction(
-                raw_delta, history_tensor, record, Access.TEMPORAL_TOO
+            protocol._recons_history.commit(
+                history_tensor.to(dtype=torch.float16), record, Access.TEMPORAL_TOO
             )
 
 

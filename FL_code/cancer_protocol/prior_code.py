@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -80,25 +79,31 @@ class PriorCalculator:
         ]).mean()
 
     @staticmethod
-    def retrain_prior_with_quantizer_loop(
-        model: EncoderDecoderLayeredRNN,
+    def make_trained_prior_model(
         bins_vec: torch.Tensor,
         soft_codes: torch.Tensor,
         side_info: torch.Tensor,
         c_cfg: WZcfgQuant,
         batch_size: int = 50_000,
     ) -> EncoderDecoderLayeredRNN:
-        """Retrain a saved quantizer's prior from plane-first fixed bins and soft codes."""
-        from .wz_quantizer import wz_model_training_loop
+        """Train a new conditional prior model from fixed quantizer bins and soft codes."""
+        from .wz_quantizer import new_rnn_model, wz_model_training_loop
 
-        assert bins_vec.shape == (model.num_planes, side_info.shape[0])
-        assert soft_codes.shape == (model.num_planes, side_info.shape[0], model.bins_per_plane)
+        assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
+        assert soft_codes.shape == (
+            c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
+        )
         prior_input = (bins_vec.T.contiguous(), soft_codes.transpose(0, 1).contiguous())
         attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
         for _ in range(c_cfg.prior_train_repeats + 2):
             if len(attempts) == c_cfg.prior_train_repeats:
                 break
-            candidate = deepcopy(model)
+            candidate = new_rnn_model(
+                c_cfg.num_planes,
+                c_cfg.bins_per_plane,
+                side_info.shape[1],
+                c_cfg.marginal_loss,
+            )
             prior_heads = (
                 candidate.conditionalPriors
                 if not candidate.shared_priors else (candidate.conditionalPrior,))

@@ -60,6 +60,7 @@ class FLConfig(BaseModel):
     debug_data_folder: Path = Path("_/data/federated_learning")
     debug_save_deltas: str = "client_deltas"
     debug_save_recons: str | None = None
+    debug_save_recons_rounds: int | None = None
     debug_load_from_saved_data: bool = False
     debug_continue_from_saved_data: bool = False
     debug_continue_then_save: bool = False

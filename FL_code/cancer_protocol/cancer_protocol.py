@@ -32,6 +32,7 @@ class CancerRecord(CompressionRecord):
     bins_per_plane: int | None = None
     num_planes: int | None = None
     prior_rate: float | None = None
+    training_prior_rate: float | None = None
     marginal_rate: float | None = None
     encoder_size: float | None = None
     decoder_size: float | None = None
@@ -99,11 +100,12 @@ class _WZRoundCodec(BaseRoundCodec):
         """Compute and store the prior and marginal rates in the record."""
         assert soft_codes is not None, "Prior retraining needs the encoder's soft codes; estimator quantizers do not produce them."
         side_info = self.quantizer.side_info_tensor()
-        prior_model = PriorCalculator.retrain_prior_with_quantizer_loop(
-            self.quantizer.coding_model, bins.long(), soft_codes, side_info, self.c_cfg)
+        prior_model = PriorCalculator.make_trained_prior_model(
+            bins.long(), soft_codes, side_info, self.c_cfg)
         prior_tensor = PriorCalculator.compute_prior_from_network(prior_model, bins, side_info)
 
         record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior_tensor, bins, self.c_cfg.num_planes)
+        record.training_prior_rate = self.quantizer.training_prior_rate
         marginal_prior = PriorCalculator.compute_marginal_prior(bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
         record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(marginal_prior, bins, self.c_cfg.num_planes)
 
@@ -144,6 +146,7 @@ class P_RoundCodec(_WZRoundCodec):
 
     def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
         assert x is None and si is None
+        self.c_cfg = self.c_cfg.model_copy(update={"marginal_loss": True})
         self.quantizer = quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=0)
 
         weight_path = self.c_cfg.pretrain_pth_dir / (
@@ -344,13 +347,6 @@ class T_RoundCodec(_WZRoundCodec):
         payload['quantizer_state'] = self.quantizer.coding_model.decoder_state_dict()
         return payload
     
-    def add_prior_to_record(self, bins: torch.Tensor, soft_codes: torch.Tensor | None, record: CancerRecord) -> None:
-        # use the prior_rate from the quantizer object since the inference data is the same as training
-        record.prior_rate = self.quantizer.training_prior_rate
-        temp = PriorCalculator.compute_marginal_prior(bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
-        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(temp, bins, self.c_cfg.num_planes)
-
-
 class Oracle_RoundCodec(T_RoundCodec):
     round_name: ClassVar[str] = "O"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
