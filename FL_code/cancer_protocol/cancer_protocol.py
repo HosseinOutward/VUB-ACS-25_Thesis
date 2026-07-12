@@ -17,7 +17,7 @@ from FL_code.FL_core.codec import (
 from FL_code.FL_core.utils import ParsedConfigurableName, compress_data_list, decompress_data_list
 from FL_code.cancer_protocol.prior_code import PriorCalculator
 
-from .wz_quantizer import DedupedDecodingWZQuantizerCancer, WZQuantizerCancer, WZcfgQuant
+from .wz_quantizer import DedupedDecodingWZQuantizerCancer, PreprocessMetadata, WZQuantizerCancer, WZcfgQuant
 
 
 def _compressed_size(obj: Any) -> float:
@@ -92,14 +92,20 @@ class _WZRoundCodec(BaseRoundCodec):
             meta_data_size=_compressed_size(prep_metadata),
         )
 
-        self.add_prior_to_record(bins, soft_codes, record)
+        self.add_prior_to_record(bins, soft_codes, prep_metadata, record)
 
         return {'payload_content': (bins, prep_metadata)}
 
-    def add_prior_to_record(self, bins: torch.Tensor, soft_codes: torch.Tensor | None, record: CancerRecord) -> None:
+    def add_prior_to_record(
+        self,
+        bins: torch.Tensor,
+        soft_codes: torch.Tensor | None,
+        metadata: PreprocessMetadata,
+        record: CancerRecord,
+    ) -> None:
         """Compute and store the prior and marginal rates in the record."""
         assert soft_codes is not None, "Prior retraining needs the encoder's soft codes; estimator quantizers do not produce them."
-        side_info = self.quantizer.side_info_tensor()
+        side_info = self.quantizer.side_info_tensor(metadata)
         prior_model = PriorCalculator.make_trained_prior_model(
             bins.long(), soft_codes, side_info, self.c_cfg)
         prior_tensor = PriorCalculator.compute_prior_from_network(prior_model, bins, side_info)
@@ -217,7 +223,7 @@ class S_RoundCodec(_WZRoundCodec):
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         assert isinstance(record, self.S_record)
 
-        delta_prep, _ = self.quantizer.preprocess_x(delta_vec)
+        delta_prep, metadata = self.quantizer.preprocess_x(delta_vec)
         self.sampling_quantizer = copy(self.quantizer)
         self.sampling_quantizer.coding_model = deepcopy(self.quantizer.coding_model)
 
@@ -230,7 +236,7 @@ class S_RoundCodec(_WZRoundCodec):
         sample_bins = self.sampling_quantizer.encode_subset(delta_prep, sample_indices)
         sample_recons_prep = self.sampling_quantizer.decode_subset(
             sample_bins, sample_indices)
-        retrain_loss = self._retrain_from_reconstructed_sample(sample_recons_prep, sample_indices)
+        retrain_loss = self._retrain_from_reconstructed_sample(sample_recons_prep, sample_indices, metadata)
 
         payload = super().get_encod_payload(delta_vec, record)
         full_bins, _ = payload["payload_content"]
@@ -283,11 +289,14 @@ class S_RoundCodec(_WZRoundCodec):
         return reconst
 
     def _retrain_from_reconstructed_sample(
-        self, sample_recons_prep: torch.Tensor, sample_indices: torch.Tensor
+        self,
+        sample_recons_prep: torch.Tensor,
+        sample_indices: torch.Tensor,
+        metadata: PreprocessMetadata,
     ) -> float:
         """Retrain the encoder head and downstream decoder/prior on the reproducible sample."""
         x_sample = sample_recons_prep.unsqueeze(1)
-        side_info = self.quantizer.side_info_tensor()[
+        side_info = self.quantizer.side_info_tensor(metadata)[
             sample_indices.to(self.quantizer.device)
         ]
         retrain_cfg = self.c_cfg.model_copy(update={"train_epochs": self.retrain_epochs})

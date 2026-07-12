@@ -16,16 +16,21 @@ class PriorCalculator:
     """Prior utilities used by NewQuant to estimate conditional symbol rates."""
 
     @staticmethod
-    def compute_rate_from_prior_tensor(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> float:
-        """Compute mean per-symbol code length from prior probabilities and realized bins."""
+    def compute_plane_rates(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> tuple[float, ...]:
+        """Compute each plane's mean code length from prior probabilities and realized bins."""
         prior = prior.float()
         sample_idx = torch.arange(bins.shape[1], device=prior.device)
-        return sum(
+        return tuple(
             -torch.log2(
                 prior[plane, sample_idx, bins[plane].to(prior.device, torch.long)].clamp(min=1e-8)
             ).mean().item()
             for plane in range(num_planes)
         )
+
+    @staticmethod
+    def compute_rate_from_prior_tensor(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> float:
+        """Compute cumulative mean code length from prior probabilities and realized bins."""
+        return sum(PriorCalculator.compute_plane_rates(prior, bins, num_planes))
 
     @staticmethod
     def compute_marginal_prior(bins_vec: torch.Tensor, bins_per_plane: int, num_planes: int) -> torch.Tensor:
@@ -64,18 +69,13 @@ class PriorCalculator:
         epoch: int,
         c_cfg: WZcfgQuant,
     ) -> torch.Tensor:
-        """Compute the quantizer's rate term from fixed bins and soft codes."""
-        progress = epoch / (c_cfg.train_epochs + 1)
-        tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
+        """Compute categorical code length for fixed transmitted bins."""
         bins = training_input[0].unbind(dim=1)
-        soft_codes = training_input[1].unbind(dim=1)
-        priors = model.get_priors(codes=soft_codes, y=side_info, tau=tau)
+        hard_codes = training_input[1].unbind(dim=1)
+        priors = model.get_priors(codes=hard_codes, y=side_info, force_softmax=True)
         return torch.stack([
-            torch.log(
-                (posterior.detach().gather(1, plane_bins[:, None]) + 1e-12)
-                / (prior.gather(1, plane_bins[:, None]) + 1e-12)
-            ).mean()
-            for plane_bins, posterior, prior in zip(bins, soft_codes, priors, strict=True)
+            -torch.log(prior.gather(1, plane_bins[:, None]) + 1e-12).mean()
+            for plane_bins, prior in zip(bins, priors, strict=True)
         ]).mean()
 
     @staticmethod
@@ -93,9 +93,10 @@ class PriorCalculator:
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
-        prior_input = (bins_vec.T.contiguous(), soft_codes.transpose(0, 1).contiguous())
+        hard_codes = F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
+        prior_input = (bins_vec.T.contiguous(), hard_codes.contiguous())
         attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
-        for _ in range(c_cfg.prior_train_repeats + 2):
+        for attempt_index in range(c_cfg.prior_train_repeats + 2):
             if len(attempts) == c_cfg.prior_train_repeats:
                 break
             candidate = new_rnn_model(
@@ -114,7 +115,8 @@ class PriorCalculator:
                 parameter.requires_grad_(True)
             loss = wz_model_training_loop(
                 PriorCalculator.prior_loss, candidate, iter(prior_params),
-                prior_input, side_info, c_cfg, batch_size,)
+                prior_input, side_info, c_cfg, batch_size,
+                label=f"Prior attempt {attempt_index + 1}",)
             candidate.requires_grad_(True)
             if np.isfinite(loss):
                 attempts.append((candidate, loss))

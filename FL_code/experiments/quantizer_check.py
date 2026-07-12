@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from FL_code.FL_core.codec import record_reconstruction_metrics
 from FL_code.FL_core.utils import set_global_seed
 from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.wz_quantizer import DedupedDecodingWZQuantizerCancer, WZcfgQuant, WZQuantizerCancer
+from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant, WZQuantizerCancer
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,11 +29,15 @@ class ExperimentConfig:
     quantizer_class: type[WZQuantizerCancer]
     bins_per_plane: int
     num_planes: int
+    reconst_ld: float
 
     @property
     def key(self) -> str:
         """Return the stable CSV and plotting key for this configuration."""
-        return f"{self.quantizer_class.__name__}|{self.bins_per_plane}b_{self.num_planes}p"
+        return (
+            f"{self.quantizer_class.__name__}|{self.bins_per_plane}b_"
+            f"{self.num_planes}p_ld{self.reconst_ld:g}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +53,11 @@ class PlotStyle:
 NUM_REPEATS = 2
 DATA_SIZE = 2_000_000
 NOISE_POWER = 0.01
-QUANTIZER_SETTINGS = ((6, 2), (2, 2), (2, 1))
-QUANTIZER_CLASSES = (WZQuantizerCancer, DedupedDecodingWZQuantizerCancer)
+QUANTIZER_SETTINGS = (
+    (2, 3, 60.0),
+    (4, 2, 80.0),
+)
+QUANTIZER_CLASSES = (WZQuantizerCancer,)
 EXPERIMENT_CONFIGS = tuple(
     ExperimentConfig(quantizer_class, *setting)
     for quantizer_class, setting in itertools.product(QUANTIZER_CLASSES, QUANTIZER_SETTINGS)
@@ -66,6 +73,9 @@ RATE_TYPES = {
 def append_to_csv(csv_path: Path, record: dict[str, Any]) -> None:
     """Append one result row, creating the CSV header when needed."""
     file_exists = csv_path.exists()
+    if file_exists:
+        with csv_path.open(newline="") as file:
+            assert next(csv.reader(file)) == list(record), f"CSV schema mismatch in {csv_path}."
     with csv_path.open("a", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=record)
         if not file_exists:
@@ -73,8 +83,12 @@ def append_to_csv(csv_path: Path, record: dict[str, Any]) -> None:
         writer.writerow(record)
 
 
-def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict[str, Any]:
-    """Train and evaluate one quantizer and its separately trained symbol prior."""
+def run_single_experiment(
+    config: ExperimentConfig,
+    trial_idx: int,
+    run_label: str,
+) -> list[dict[str, Any]]:
+    """Train one full layered model and return one evaluation record per refinement stage."""
     seed = trial_idx * 42
     set_global_seed(seed)
     generator = torch.Generator().manual_seed(seed)
@@ -88,8 +102,15 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict[str,
         bins_per_plane=config.bins_per_plane,
         num_planes=config.num_planes,
         norm_slices=(slice(None),),
-        reconst_ld = 50,
-        training_progress_bar=True,
+        reconst_ld=config.reconst_ld,
+        train_epochs=180,
+        train_sample_size=200_000,
+        train_batch_size=1_000,
+        lr_step=40,
+        training_progress_bar=False,
+        training_log_every_epochs=5,
+        quantizer_train_repeats=1,
+        fused_optimizer=False,
     )
     training_quantizer = config.quantizer_class(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])
@@ -100,7 +121,7 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict[str,
     if soft_codes is None:
         soft_codes = F.one_hot(bins.long(), num_classes=config.bins_per_plane).float()
     quantizer.set_side_information([inference_side_information])
-    formatted_side_information = quantizer.side_info_tensor()
+    formatted_side_information = quantizer.side_info_tensor(metadata)
 
     inference_prior = PriorCalculator.compute_prior_from_network(
         quantizer.coding_model, bins, formatted_side_information
@@ -114,33 +135,42 @@ def run_single_experiment(config: ExperimentConfig, trial_idx: int) -> dict[str,
     marginal_prior = PriorCalculator.compute_marginal_prior(
         bins, config.bins_per_plane, config.num_planes
     )
-    reconstruction = quantizer.decoding_process((bins, metadata))
+    reconstructions = quantizer.decoding_stages_process((bins, metadata))
+    inference_rates = PriorCalculator.compute_plane_rates(inference_prior, bins, config.num_planes)
+    retrained_rates = PriorCalculator.compute_plane_rates(retrained_prior, bins, config.num_planes)
+    marginal_rates = PriorCalculator.compute_plane_rates(marginal_prior, bins, config.num_planes)
 
-    return {
-        "config_key": config.key,
-        "trial_number": trial_idx,
-        "bins_per_plane": config.bins_per_plane,
-        "num_planes": config.num_planes,
-        "data_size": DATA_SIZE,
-        "noise_power": NOISE_POWER,
-        "side_info_count": 1,
-        "marginal_loss": quantizer_config.marginal_loss,
-        "training_prior_rate": training_quantizer.training_prior_rate,
-        "inference_prior_rate": PriorCalculator.compute_rate_from_prior_tensor(
-            inference_prior, bins, config.num_planes
-        ),
-        "prior_rate": PriorCalculator.compute_rate_from_prior_tensor(
-            retrained_prior, bins, config.num_planes
-        ),
-        "marginal_rate": PriorCalculator.compute_rate_from_prior_tensor(
-            marginal_prior, bins, config.num_planes
-        ),
-        **record_reconstruction_metrics(inference_target, reconstruction),
-    }
+    results: list[dict[str, Any]] = []
+    for stage in range(config.num_planes):
+        training_rate = sum(training_quantizer.training_prior_rates[:stage + 1])
+        inference_rate = sum(inference_rates[:stage + 1])
+        reconstruction_metrics = record_reconstruction_metrics(inference_target, reconstructions[stage])
+        results.append({
+            "config_key": f"{run_label}|{config.key}|stage{stage + 1}",
+            "trial_number": trial_idx,
+            "bins_per_plane": config.bins_per_plane,
+            "num_planes": stage + 1,
+            "model_num_planes": config.num_planes,
+            "data_size": DATA_SIZE,
+            "noise_power": NOISE_POWER,
+            "side_info_count": 1,
+            "marginal_loss": quantizer_config.marginal_loss,
+            "training_prior_rate": training_rate,
+            "inference_prior_rate": inference_rate,
+            "prior_rate": sum(retrained_rates[:stage + 1]),
+            "marginal_rate": sum(marginal_rates[:stage + 1]),
+            **reconstruction_metrics,
+            "inference_wz_gap_db": 10 * np.log10(
+                reconstruction_metrics["mse"] / (NOISE_POWER * 2 ** (-2 * inference_rate))
+            ),
+            "run_label": run_label,
+        })
+    return results
 
 
-def run_experiments(out_path: Path) -> Path:
+def run_experiments(out_path: Path, run_label: str = "shared_source_normalization") -> Path:
     """Run every configured quantizer trial, persisting its row and refreshed plot immediately."""
+    assert run_label and "|" not in run_label
     out_path.mkdir(exist_ok=True, parents=True)
     csv_path = out_path / "quantizer_check.csv"
     total_runs = len(EXPERIMENT_CONFIGS) * NUM_REPEATS
@@ -152,14 +182,15 @@ def run_experiments(out_path: Path) -> Path:
             f"\n=== {config.quantizer_class.__name__} | {config.bins_per_plane} bins/plane × "
             f"{config.num_planes} planes | trial {trial_idx} ==="
         )
-        result = run_single_experiment(config, trial_idx)
-        print(
-            f"[{current_run}/{total_runs}] MSE={result['mse']:.6f} | "
-            f"Quantizer={result['inference_prior_rate']:.3f} | "
-            f"Retrained={result['prior_rate']:.3f} | "
-            f"Marginal={result['marginal_rate']:.3f}"
-        )
-        append_to_csv(csv_path, result)
+        results = run_single_experiment(config, trial_idx, run_label)
+        for result in results:
+            print(
+                f"[{current_run}/{total_runs}] stage={result['num_planes']} | "
+                f"MSE={result['mse']:.6f} | Quantizer={result['inference_prior_rate']:.3f} | "
+                f"WZ gap={result['inference_wz_gap_db']:.2f} dB | "
+                f"Retrained={result['prior_rate']:.3f} | Marginal={result['marginal_rate']:.3f}"
+            )
+            append_to_csv(csv_path, result)
         plot_path = plot_rate_comparison(csv_path)
 
     print(f"\nResults saved to: {csv_path}")
@@ -170,7 +201,7 @@ def load_records(csv_path: Path) -> list[dict[str, str | float]]:
     """Load quantizer result rows and convert plotted metrics to floats."""
     numeric_fields = {
         "mse", "training_prior_rate", "inference_prior_rate", "prior_rate",
-        "marginal_rate", "bins_per_plane", "num_planes",
+        "marginal_rate", "inference_wz_gap_db", "bins_per_plane", "num_planes",
     }
     with csv_path.open(newline="") as file:
         return [
@@ -182,10 +213,11 @@ def load_records(csv_path: Path) -> list[dict[str, str | float]]:
         ]
 
 
-def compute_theoretical_bounds() -> dict[str, np.ndarray]:
+def compute_theoretical_bounds(minimum_mse: float = NOISE_POWER * 0.1) -> dict[str, np.ndarray]:
     """Return Gaussian Wyner-Ziv and point-to-point rate-distortion bounds."""
     conditional_variance = NOISE_POWER
-    mse_range = np.geomspace(conditional_variance * 1e-4, conditional_variance, 500)
+    assert minimum_mse > 0
+    mse_range = np.geomspace(min(minimum_mse, conditional_variance * 0.1), conditional_variance, 500)
     return {
         "distortion_db": 10 * np.log10(mse_range),
         "wz_rate": 0.5 * np.log2(conditional_variance / mse_range),
@@ -213,14 +245,22 @@ def plot_rate_comparison(csv_path: Path) -> Path:
     config_keys = sorted({str(record["config_key"]) for record in records})
     colors = plt.get_cmap("tab10").colors
     markers = ("o", "s", "^", "v", "D", "P")
-    styles = {
-        key: PlotStyle(colors[index % len(colors)], markers[index % len(markers)], key)
-        for index, key in enumerate(config_keys)
+    label_aliases = {
+        "independent_source_normalization": "legacy",
+        "shared_source_norm_author_init_hard_prior": "corrected",
     }
+    styles: dict[str, PlotStyle] = {}
+    for index, key in enumerate(config_keys):
+        run_label, _, architecture, stage = key.split("|")
+        label = f"{label_aliases.get(run_label, run_label)} | {architecture} | {stage}"
+        styles[key] = PlotStyle(colors[index % len(colors)], markers[index % len(markers)], label)
 
     figure, axes_array = plt.subplots(2, 2, figsize=(14, 11))
     axes = tuple(axes_array.flatten())
-    plot_theoretical_bounds(axes, compute_theoretical_bounds())
+    plot_theoretical_bounds(
+        axes,
+        compute_theoretical_bounds(min(float(record["mse"]) for record in records) / 10**0.2),
+    )
 
     for axis, (rate_key, title) in zip(axes, RATE_TYPES.items(), strict=True):
         for config_key, grouped_records in itertools.groupby(
@@ -242,11 +282,11 @@ def plot_rate_comparison(csv_path: Path) -> Path:
             )
         axis.set(xlabel="Rate (bits/symbol)", ylabel="Distortion (dB)", title=title)
         axis.grid(alpha=0.3)
-        axis.legend(fontsize=8, loc="best")
+        axis.legend(fontsize=8, loc="upper right")
 
     figure.tight_layout()
     plot_path = csv_path.with_suffix(".png")
-    figure.savefig(plot_path, dpi=200, bbox_inches="tight")
+    figure.savefig(plot_path, dpi=200, bbox_inches="tight", facecolor="white")
     plt.close(figure)
     return plot_path
 
@@ -255,6 +295,7 @@ def main() -> None:
     """Run the configured experiment unless skipped, then plot available results."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-run", action="store_true", help="Skip experiments and only plot existing results")
+    parser.add_argument("--run-label", default="shared_source_normalization")
     args = parser.parse_args()
 
     out_dir = Path(__file__).parent / "results"
@@ -263,7 +304,7 @@ def main() -> None:
         assert csv_path.exists(), f"No quantizer results found at {csv_path}."
         plot_path = plot_rate_comparison(csv_path)
     else:
-        plot_path = run_experiments(out_dir)
+        plot_path = run_experiments(out_dir, args.run_label)
     print(f"Plot saved to: {plot_path}")
 
 
