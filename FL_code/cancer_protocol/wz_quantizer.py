@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from time import perf_counter
 from typing import Any, ClassVar, NamedTuple, TypeAlias
 
 import numpy as np
@@ -53,11 +54,9 @@ def normalization_params(values: torch.Tensor) -> tuple[float, float]:
 
     scales: list[float] = []
     for _ in range(5):
-        q01, q99 = torch.quantile(
-            random_sample() - center,
-            torch.tensor([0.01, 0.99], device=values.device),
-        ).abs()
-        scales.extend((q01.item(), q99.item()))
+        centered = random_sample() - center
+        q01, q99 = torch.quantile(centered, torch.tensor([0.01, 0.99], device=values.device))
+        scales.append(centered.clamp(q01, q99).square().mean().sqrt().item())
     scale = float(np.float16(np.mean(scales)))
     assert scale != 0
     return scale, center
@@ -102,6 +101,8 @@ def new_rnn_model(
         layers=3,
         hidden_dim=100,
         marginal=marginal,
+        shared_encoder=True,
+        shared_decoder=True,
     )
 
 
@@ -131,6 +132,8 @@ def wz_model_training_loop(
     side_info: torch.Tensor,
     c_cfg: WZcfgQuant,
     batch_size: int = 50_000,
+    label: str = "Training",
+    metrics_fn: Callable[[EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], torch.Tensor], str] | None = None,
     **loss_fn_options,
 ) -> float:
     """Train one quantizer initialization and return its final epoch loss."""
@@ -140,19 +143,20 @@ def wz_model_training_loop(
     assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
     side_info = side_info.to('cuda')
 
-    optimizer = torch.optim.AdamW(parameters, fused=True, lr=c_cfg.lr, weight_decay=1e-4,)
+    optimizer = torch.optim.Adam(parameters, fused=c_cfg.fused_optimizer, lr=c_cfg.lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
-    scaler = torch.amp.GradScaler("cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=c_cfg.mixed_precision)
 
     input_size = training_inputs[0].shape[0]
     total_samples = min(c_cfg.train_sample_size, input_size)
     total_batches = (total_samples + batch_size - 1) // batch_size
     pbar = create_training_progress_bar(
         c_cfg.train_epochs * total_batches,
-        desc="Training Quantizer",
+        desc=label,
         disable=not c_cfg.training_progress_bar,)
 
     for epoch in range(c_cfg.train_epochs):
+        epoch_started = perf_counter()
         indices = torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
         epoch_loss = 0.0
         for start in range(0, total_samples, batch_size):
@@ -161,7 +165,7 @@ def wz_model_training_loop(
             si_batch = side_info[batch_indices]
 
             optimizer.zero_grad()
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
                 loss = compute_loss(model, input_batch, si_batch, epoch, c_cfg, **loss_fn_options)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -173,6 +177,22 @@ def wz_model_training_loop(
                 pbar.update(1)
         scheduler.step()
         epoch_loss /= total_batches
+        if c_cfg.training_log_every_epochs and (
+            (epoch + 1) % c_cfg.training_log_every_epochs == 0 or epoch + 1 == c_cfg.train_epochs
+        ):
+            epoch_seconds = perf_counter() - epoch_started
+            metrics = ""
+            if metrics_fn is not None:
+                model.eval()
+                with torch.inference_mode():
+                    metrics = f", {metrics_fn(model, training_inputs, side_info)}"
+                model.train()
+            print(
+                f"{label} epoch {epoch + 1}/{c_cfg.train_epochs}: "
+                f"loss={epoch_loss:.6f}, lr={optimizer.param_groups[0]['lr']:.3e}, "
+                f"seconds={epoch_seconds:.2f}, samples_per_second={total_samples / epoch_seconds:.0f}{metrics}",
+                flush=True,
+            )
 
     pbar.close()
     model.cpu()
@@ -196,16 +216,18 @@ class WZcfgQuant(BaseModel):
     train_epochs: int = 70
     reconst_ld: float = 120.0
     train_sample_size: int = 300_000
+    train_batch_size: int = 50_000
     lr: float = 1e-3
-    lr_step: int = 35
-    tau: float = 1.3
+    lr_step: int = 40
+    tau: float = 1.0
     quantizer_train_repeats: int = 3
     prior_train_repeats: int = 3
 
     training_progress_bar: bool = False
-    tf32: bool = True
+    training_log_every_epochs: int | None = None
+    tf32: bool = False
     fused_optimizer: bool = True
-    mixed_precision: bool = True
+    mixed_precision: bool = False
 
 
 class WZQuantizerCancer:
@@ -256,6 +278,28 @@ class WZQuantizerCancer:
         self.training_prior: torch.Tensor | None = None
 
     @staticmethod
+    def training_metrics(
+        model: EncoderDecoderLayeredRNN,
+        training_inputs: tuple[torch.Tensor, ...],
+        side_info: torch.Tensor,
+    ) -> str:
+        """Summarize hard-code stage distortion and cumulative rate on a fixed training sample."""
+        x = training_inputs[0][:10_000]
+        y = side_info[:x.shape[0]]
+        bins, codes = model.encode(x)
+        reconstructions = model.decode(codes, y)
+        priors = model.get_priors(codes, y)
+        sample_indices = torch.arange(x.shape[0], device=x.device)
+        plane_rates = [
+            -torch.log2(prior[sample_indices, symbols] + 1e-12).mean().item()
+            for prior, symbols in zip(priors, bins, strict=True)
+        ]
+        return (
+            f"hard_mse={[round(F.mse_loss(reconstruction, x).item(), 6) for reconstruction in reconstructions]}, "
+            f"cumulative_rate={[round(float(rate), 4) for rate in np.cumsum(plane_rates)]}"
+        )
+
+    @staticmethod
     def compute_loss(
         model: EncoderDecoderLayeredRNN,
         training_input: tuple[torch.Tensor],
@@ -266,8 +310,7 @@ class WZQuantizerCancer:
     ) -> torch.Tensor:
         """Compute reconstruction-plus-rate loss for one quantizer training batch."""
         x_batch, = training_input
-        x_batch = x_batch + torch.randn_like(x_batch) * (1e-5 * x_batch.abs().mean())
-        progress = epoch / (c_cfg.train_epochs + 1)
+        progress = epoch / c_cfg.train_epochs
         tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
         reconstructions, bins, soft_codes, priors = model(x_batch, si_batch, tau=tau)
 
@@ -279,7 +322,7 @@ class WZQuantizerCancer:
             prior_prob = priors[plane][sample_indices, bins[plane]]
             rate = torch.log((posterior_prob + 1e-12) / (prior_prob + 1e-12)).mean()
             loss = loss + c_cfg.reconst_ld * distortion + rate
-        return loss / model.num_planes
+        return loss
 
     def train_model(
         self,
@@ -295,16 +338,18 @@ class WZQuantizerCancer:
             assert si_raw_list
             self.set_side_information(si_raw_list)
             
-        x_prep, _ = self.preprocess_x(x_raw)
+        x_prep, metadata = self.preprocess_x(x_raw)
         wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
-        side_info = self.side_info_tensor()
+        side_info = self.side_info_tensor(metadata)
 
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
         bins, _ = self._encode_preprocessed(x_prep, 500_000)
         temp = self.prior_calculator.compute_prior_from_network(
                 self.coding_model, bins, side_info).to(torch.float16)
-        self.training_prior_rate = self.prior_calculator.compute_rate_from_prior_tensor(temp, bins, self.c_cfg.num_planes)
+        self.training_prior_rates = self.prior_calculator.compute_plane_rates(
+            temp, bins, self.c_cfg.num_planes)
+        self.training_prior_rate = sum(self.training_prior_rates)
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_prep: torch.Tensor,
@@ -312,15 +357,18 @@ class WZQuantizerCancer:
         failure_tolerance: int = 2
     ) -> EncoderDecoderLayeredRNN:
         made_quants_and_stat: list[tuple[EncoderDecoderLayeredRNN, float]] = []
-        for _ in range(self.quantizer_train_repeats + failure_tolerance):
+        for attempt_index in range(self.quantizer_train_repeats + failure_tolerance):
             if len(made_quants_and_stat) == self.quantizer_train_repeats:
                 break
 
-            model = new_rnn_model(
+            model = self.coding_model if attempt_index == 0 else new_rnn_model(
                 self.num_planes, self.bins_per_plane, side_info.shape[1], self.marginal_loss)
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
-                (x_prep,), side_info, self.c_cfg, wmspe_denom=wmspe_denom)
+                (x_prep,), side_info, self.c_cfg, batch_size=self.train_batch_size,
+                label=f"Quantizer attempt {attempt_index + 1}",
+                metrics_fn=self.training_metrics,
+                wmspe_denom=wmspe_denom)
 
             if np.isfinite(loss):
                 def reconstruct_batch(start: int, end: int) -> torch.Tensor:
@@ -369,9 +417,31 @@ class WZQuantizerCancer:
         assert self.vector_size is not None
         assert bins.shape == (self.num_planes, self.vector_size)
         assert bins.max().item() < self.bins_per_plane
-        side_info = self.side_info_tensor()
+        side_info = self.side_info_tensor(metadata)
         recons = self._decode_preprocessed(bins, side_info, batch_size)
         return self.postprocess(recons, metadata)
+
+    def decoding_stages_process(
+        self,
+        payload_content: tuple[torch.Tensor, PreprocessMetadata],
+        batch_size: int = 500_000,
+    ) -> torch.Tensor:
+        """Decode and postprocess the reconstruction produced by every refinement stage."""
+        bins, metadata = payload_content
+        assert self.vector_size is not None
+        assert bins.shape == (self.num_planes, self.vector_size)
+        side_info = self.side_info_tensor(metadata)
+
+        def decode_batch(start: int, end: int) -> torch.Tensor:
+            codes = [
+                F.one_hot(plane.long().to(self.device), num_classes=self.bins_per_plane).float()
+                for plane in bins[:, start:end]
+            ]
+            return torch.stack(self.coding_model.decode(codes, side_info[start:end])).cpu()
+
+        normalized = batch_loop(
+            decode_batch, self.coding_model, bins.shape[1], batch_size, cat_dim=1).squeeze(-1)
+        return torch.stack([self.postprocess(stage, metadata) for stage in normalized])
 
     def _decode_preprocessed(
         self,
@@ -390,16 +460,26 @@ class WZQuantizerCancer:
         recons = batch_loop(decode_batch, self.coding_model, bins.shape[1], batch_size)
         return recons.reshape(-1)
 
-    def preprocess_x(self, x_raw: torch.Tensor, skip_outliers: bool = False) -> tuple[torch.Tensor, PreprocessMetadata]:
+    def preprocess_x(
+        self,
+        x_raw: torch.Tensor,
+        skip_outliers: bool = False,
+        normalization_factors: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, PreprocessMetadata]:
         """Normalize a raw vector per slice, optionally extract outliers, and shape it for the model."""
         if self.vector_size is None:
             self.vector_size = x_raw.numel()
         assert self.vector_size == x_raw.numel(), f"Expected vector size {self.vector_size}, got {x_raw.numel()}."
 
         x_prep = x_raw.clone()
+        assert normalization_factors is None or normalization_factors.shape == (len(self.norm_slices), 2)
         norm_factors: list[tuple[float, float]] = []
-        for vector_slice in self.norm_slices:
-            scale, center = normalization_params(x_prep[vector_slice])
+        for index, vector_slice in enumerate(self.norm_slices):
+            scale, center = (
+                normalization_params(x_prep[vector_slice])
+                if normalization_factors is None
+                else map(float, normalization_factors[index])
+            )
             x_prep[vector_slice] = (x_prep[vector_slice] - center) / scale
             norm_factors.append((scale, center))
 
@@ -432,13 +512,17 @@ class WZQuantizerCancer:
             recons[vector_slice] = recons[vector_slice] * scale + center
         return recons
 
-    def side_info_tensor(self) -> torch.Tensor:
-        """Format the side information list into a contiguous tensor for model input."""
+    def side_info_tensor(self, source_metadata: PreprocessMetadata) -> torch.Tensor:
+        """Normalize decoder side information in the source coordinate system and stack it."""
         assert self.vector_size is not None, "Vector size must be known before side information is formatted."
         assert self.side_info_list_used is not None, "Side information must be set before formatting."
         side_info_list = list(self.side_info_list_used)
         tensors = [
-            self.preprocess_x(si, skip_outliers=True)[0].squeeze(1) 
+            self.preprocess_x(
+                si,
+                skip_outliers=True,
+                normalization_factors=source_metadata.norm_factors,
+            )[0].squeeze(1)
             for si in side_info_list
         ]
         if len(tensors) == 0:

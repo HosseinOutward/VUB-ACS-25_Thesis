@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from functools import partial
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from functools import partial
 
 
 class CustomRNN(nn.Module):
@@ -160,9 +162,15 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
         return reconstructed
 
-    def get_priors(self, codes, y=None, tau=1.):
+    def get_priors(
+        self,
+        codes: Sequence[torch.Tensor],
+        y: torch.Tensor | None = None,
+        tau: float = 1.0,
+        force_softmax: bool = False,
+    ) -> list[torch.Tensor]:
         # y is only needed if the prior is conditional
-        if self.training:
+        if self.training and not force_softmax:
             softmax = partial(F.gumbel_softmax, tau=tau, hard=False)
         else:
             softmax = F.softmax
