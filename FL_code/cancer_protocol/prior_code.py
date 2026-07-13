@@ -133,7 +133,7 @@ class DedupedPriorCalculator(PriorCalculator): # dont use / buggy
     equal to the full pass, lower values trade exactness for more reuse.
     """
 
-    si_match_bits: ClassVar[int] = 30
+    si_match_bits: ClassVar[int] = 18
 
     @classmethod
     def compute_prior_from_network(
