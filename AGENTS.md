@@ -9,6 +9,8 @@ The core research direction is a two-step compression pipeline:
 
 The central design question is always: what side information is available at the decoder, and can it legitimately be used as a prior?
 
+FYI. the .venv is a symbolink, and has all the packages.
+
 ---
 
 ## 0. Research Principles

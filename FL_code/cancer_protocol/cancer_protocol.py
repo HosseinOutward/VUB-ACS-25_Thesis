@@ -32,8 +32,11 @@ class CancerRecord(CompressionRecord):
     bins_per_plane: int | None = None
     num_planes: int | None = None
     prior_rate: float | None = None
+    prior_stage_rates: list[float] | None = None
     training_prior_rate: float | None = None
+    training_prior_stage_rates: list[float] | None = None
     marginal_rate: float | None = None
+    marginal_stage_rates: list[float] | None = None
     encoder_size: float | None = None
     decoder_size: float | None = None
     meta_data_size: float | None = None
@@ -103,17 +106,22 @@ class _WZRoundCodec(BaseRoundCodec):
         metadata: PreprocessMetadata,
         record: CancerRecord,
     ) -> None:
-        """Compute and store the prior and marginal rates in the record."""
+        """Compute and store cumulative and per-stage prior rates in the record."""
         assert soft_codes is not None, "Prior retraining needs the encoder's soft codes; estimator quantizers do not produce them."
         side_info = self.quantizer.side_info_tensor(metadata)
         prior_model = PriorCalculator.make_trained_prior_model(
             bins.long(), soft_codes, side_info, self.c_cfg)
         prior_tensor = PriorCalculator.compute_prior_from_network(prior_model, bins, side_info)
+        prior_stage_rates = PriorCalculator.compute_plane_rates(prior_tensor, bins, self.c_cfg.num_planes)
 
-        record.prior_rate = PriorCalculator.compute_rate_from_prior_tensor(prior_tensor, bins, self.c_cfg.num_planes)
+        record.prior_stage_rates = list(prior_stage_rates)
+        record.prior_rate = sum(prior_stage_rates)
+        record.training_prior_stage_rates = list(self.quantizer.training_prior_rates)
         record.training_prior_rate = self.quantizer.training_prior_rate
         marginal_prior = PriorCalculator.compute_marginal_prior(bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
-        record.marginal_rate = PriorCalculator.compute_rate_from_prior_tensor(marginal_prior, bins, self.c_cfg.num_planes)
+        marginal_stage_rates = PriorCalculator.compute_plane_rates(marginal_prior, bins, self.c_cfg.num_planes)
+        record.marginal_stage_rates = list(marginal_stage_rates)
+        record.marginal_rate = sum(marginal_stage_rates)
 
     def encode(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
         payload = self.get_encod_payload(delta_vec, record)

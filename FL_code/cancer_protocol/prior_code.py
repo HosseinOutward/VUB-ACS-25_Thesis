@@ -69,14 +69,21 @@ class PriorCalculator:
         epoch: int,
         c_cfg: WZcfgQuant,
     ) -> torch.Tensor:
-        """Compute categorical code length for fixed transmitted bins."""
+        """Compute conditional code length for fixed transmitted bins."""
         bins = training_input[0].unbind(dim=1)
-        hard_codes = training_input[1].unbind(dim=1)
-        priors = model.get_priors(codes=hard_codes, y=side_info, force_softmax=True)
-        return torch.stack([
+        context_codes = training_input[1].unbind(dim=1)
+        tau = c_cfg.tau * np.exp(epoch / c_cfg.train_epochs * np.log(0.1 / c_cfg.tau))
+        priors = model.get_priors(
+            codes=context_codes,
+            y=side_info,
+            tau=tau,
+            force_softmax=c_cfg.prior_probabilities == "categorical",
+        )
+        stage_mean = torch.stack([
             -torch.log(prior.gather(1, plane_bins[:, None]) + 1e-12).mean()
             for plane_bins, prior in zip(bins, priors, strict=True)
-        ]).mean()
+        ]).sum()
+        return stage_mean / c_cfg.num_planes
 
     @staticmethod
     def make_trained_prior_model(
@@ -93,8 +100,11 @@ class PriorCalculator:
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
-        hard_codes = F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
-        prior_input = (bins_vec.T.contiguous(), hard_codes.contiguous())
+        context_codes = (
+            F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
+            if c_cfg.prior_context == "hard" else soft_codes.transpose(0, 1)
+        )
+        prior_input = (bins_vec.T.contiguous(), context_codes.contiguous())
         attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
         for attempt_index in range(c_cfg.prior_train_repeats + 2):
             if len(attempts) == c_cfg.prior_train_repeats:
@@ -104,6 +114,7 @@ class PriorCalculator:
                 c_cfg.bins_per_plane,
                 side_info.shape[1],
                 c_cfg.marginal_loss,
+                c_cfg.shared_heads,
             )
             prior_heads = (
                 candidate.conditionalPriors

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from time import perf_counter
-from typing import Any, ClassVar, NamedTuple, TypeAlias
+from typing import Any, ClassVar, Literal, NamedTuple, TypeAlias
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
@@ -91,6 +91,7 @@ def new_rnn_model(
     bins_per_plane: int,
     side_info_size: int,
     marginal: bool,
+    shared_heads: bool = True,
 ) -> EncoderDecoderLayeredRNN:
     """Create the RNN network shared by the WZ quantizer and the conditional prior model."""
     return EncoderDecoderLayeredRNN(
@@ -101,8 +102,8 @@ def new_rnn_model(
         layers=3,
         hidden_dim=100,
         marginal=marginal,
-        shared_encoder=True,
-        shared_decoder=True,
+        shared_encoder=shared_heads,
+        shared_decoder=shared_heads,
     )
 
 
@@ -143,7 +144,15 @@ def wz_model_training_loop(
     assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
     side_info = side_info.to('cuda')
 
-    optimizer = torch.optim.Adam(parameters, fused=c_cfg.fused_optimizer, lr=c_cfg.lr)
+    # Both training losses are scaled by 1/K relative to their previous forms.
+    optimizer_epsilon = 1e-8 / model.num_planes
+    optimizer = torch.optim.Adam(
+        parameters,
+        fused=c_cfg.fused_optimizer,
+        lr=c_cfg.lr,
+        weight_decay=0,
+        eps=optimizer_epsilon,
+    )
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
     scaler = torch.amp.GradScaler("cuda", enabled=c_cfg.mixed_precision)
 
@@ -229,6 +238,10 @@ class WZcfgQuant(BaseModel):
     tf32: bool = False
     fused_optimizer: bool = True
     mixed_precision: bool = False
+    source_perturbation: Literal["none", "draw_discard", "add"] = "none"
+    shared_heads: bool = True
+    prior_context: Literal["hard", "soft"] = "hard"
+    prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
 
 
 class WZQuantizerCancer:
@@ -272,6 +285,7 @@ class WZQuantizerCancer:
             bins_per_plane=self.bins_per_plane,
             side_info_size=self.side_info_size,
             marginal=self.marginal_loss,
+            shared_heads=self.shared_heads,
         )
 
         self.side_info_list_used: list[torch.Tensor] | None = None
@@ -308,9 +322,16 @@ class WZQuantizerCancer:
         epoch: int,
         c_cfg: WZcfgQuant,
         wmspe_denom: float,
+        perturb_generator: torch.Generator,
     ) -> torch.Tensor:
-        """Compute reconstruction-plus-rate loss for one quantizer training batch."""
+        """Compute the stage-averaged reconstruction-plus-rate loss for one training batch."""
         x_batch, = training_input
+        if c_cfg.source_perturbation != "none":
+            perturbation = torch.randn(
+                x_batch.shape, device=x_batch.device, dtype=x_batch.dtype, generator=perturb_generator
+            ) * (1e-5 * x_batch.abs().mean())
+            if c_cfg.source_perturbation == "add":
+                x_batch = x_batch + perturbation
         progress = epoch / c_cfg.train_epochs
         tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
         reconstructions, bins, soft_codes, priors = model(x_batch, si_batch, tau=tau)
@@ -323,7 +344,7 @@ class WZQuantizerCancer:
             prior_prob = priors[plane][sample_indices, bins[plane]]
             rate = torch.log((posterior_prob + 1e-12) / (prior_prob + 1e-12)).mean()
             loss = loss + c_cfg.reconst_ld * distortion + rate
-        return loss
+        return loss / model.num_planes
 
     def train_model(
         self,
@@ -363,13 +384,16 @@ class WZQuantizerCancer:
                 break
 
             model = self.coding_model if attempt_index == 0 else new_rnn_model(
-                self.num_planes, self.bins_per_plane, side_info.shape[1], self.marginal_loss)
+                self.num_planes, self.bins_per_plane, side_info.shape[1], 
+                self.marginal_loss, self.shared_heads)
+            perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
                 (x_prep,), side_info, self.c_cfg, batch_size=self.train_batch_size,
                 label=f"Quantizer attempt {attempt_index + 1}",
                 metrics_fn=self.training_metrics,
-                wmspe_denom=wmspe_denom)
+                wmspe_denom=wmspe_denom,
+                perturb_generator=perturb_generator)
 
             if np.isfinite(loss):
                 def reconstruct_batch(start: int, end: int) -> torch.Tensor:
