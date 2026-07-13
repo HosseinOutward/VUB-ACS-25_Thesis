@@ -202,6 +202,7 @@ def wz_model_training_loop(
 
 class WZcfgQuant(BaseModel):
     """Quantizer and training configuration consumed by WZQuantizerCancer."""
+    # best config for FL delta (laplace like with b=0.356 but sharp peak around 0)
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
@@ -213,11 +214,11 @@ class WZcfgQuant(BaseModel):
     max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
-    train_epochs: int = 70
-    reconst_ld: float = 120.0
+    train_epochs: int = 80 # improvement up to 240 epochs
+    reconst_ld: float = 300
     train_sample_size: int = 300_000
     train_batch_size: int = 50_000
-    lr: float = 1e-3
+    lr: float = 3e-3
     lr_step: int = 40
     tau: float = 1.0
     quantizer_train_repeats: int = 3
@@ -756,7 +757,7 @@ class DedupedDecodingWZQuantizerCancer(DistanceSampledWZQuantizerCancer): # dont
     """
 
     prior_calculator: ClassVar[type[PriorCalculator]] = DedupedPriorCalculator
-    si_match_bits: ClassVar[int] = 30
+    si_match_bits: ClassVar[int] = 18
 
     last_decoding_stats: DedupedDecodingStats | None = None
 
