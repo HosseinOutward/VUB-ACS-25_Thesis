@@ -53,9 +53,9 @@ class PlotStyle:
 NUM_REPEATS = 2
 DATA_SIZE = 2_000_000
 NOISE_POWER = 0.01
-QUANTIZER_SETTINGS = (
-    (2, 3, 60.0),
-    (4, 2, 80.0),
+QUANTIZER_SETTINGS = ( # (bins_per_plane, num_planes, reconst_ld)
+    (2, 3, 120.0),
+    (4, 2, 160.0),
 )
 QUANTIZER_CLASSES = (WZQuantizerCancer,)
 EXPERIMENT_CONFIGS = tuple(
@@ -110,7 +110,11 @@ def run_single_experiment(
         training_progress_bar=False,
         training_log_every_epochs=5,
         quantizer_train_repeats=1,
-        fused_optimizer=False,
+        shared_heads=True,
+        prior_context="hard",
+        prior_probabilities="categorical",
+        tf32=False,
+        fused_optimizer=True,
     )
     training_quantizer = config.quantizer_class(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])
