@@ -13,6 +13,7 @@ from FL_code.FL_core.codec import (
     BaseRoundCodec,
     CompressionRecord,
     ReconstructionHistory,
+    record_reconstruction_metrics,
 )
 from FL_code.FL_core.utils import ParsedConfigurableName, compress_data_list, decompress_data_list
 from FL_code.cancer_protocol.prior_code import PriorCalculator
@@ -37,6 +38,9 @@ class CancerRecord(CompressionRecord):
     training_prior_stage_rates: list[float] | None = None
     marginal_rate: float | None = None
     marginal_stage_rates: list[float] | None = None
+    stage_mses: list[float] | None = None
+    stage_wmapes: list[float] | None = None
+    stage_wmspe_sqrts: list[float] | None = None
     encoder_size: float | None = None
     decoder_size: float | None = None
     meta_data_size: float | None = None
@@ -51,6 +55,7 @@ class _WZRoundCodec(BaseRoundCodec):
     quantizer: WZQuantizerCancer
 
     c_cfg: WZcfgQuant
+    _original_delta_vec: torch.Tensor | None = None
     quantizer_class: type[WZQuantizerCancer] = WZQuantizerCancer
 
     def create_r_record(self, round_id: int, client_id: int) -> CancerRecord:
@@ -87,6 +92,7 @@ class _WZRoundCodec(BaseRoundCodec):
 
     def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        self._original_delta_vec = delta_vec
 
         bins, soft_codes, prep_metadata = self.quantizer.encoding_process(delta_vec)
         record.update_record_fields(
@@ -123,15 +129,32 @@ class _WZRoundCodec(BaseRoundCodec):
         record.marginal_stage_rates = list(marginal_stage_rates)
         record.marginal_rate = sum(marginal_stage_rates)
 
+    def add_stage_distortion_to_record(self, stage_reconstructions: torch.Tensor, record: CancerRecord) -> None:
+        """Store distortion metrics for every decoder refinement stage when the source vector is available."""
+        if self._original_delta_vec is None:
+            return
+
+        stage_metrics = [
+            record_reconstruction_metrics(self._original_delta_vec, reconstruction)
+            for reconstruction in stage_reconstructions
+        ]
+        record.update_record_fields(
+            stage_mses=[metrics["mse"] for metrics in stage_metrics],
+            stage_wmapes=[metrics["wmape"] for metrics in stage_metrics],
+            stage_wmspe_sqrts=[metrics["wmspe_sqrt"] for metrics in stage_metrics],
+        )
+        self._original_delta_vec = None
+
     def encode(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
         payload = self.get_encod_payload(delta_vec, record)
         return compress_data_list(payload)
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
+        # S round does NOT use this decode method, it overrides it with its own.
         payload_dict = decompress_data_list(payload)
-        reconst = self.quantizer.decoding_process(payload_dict["payload_content"])
-
-        return reconst
+        stage_reconstructions = self.quantizer.decoding_stages_process(payload_dict["payload_content"])
+        self.add_stage_distortion_to_record(stage_reconstructions, record)
+        return stage_reconstructions[-1]
 
 
 class F_RoundCodec(_WZRoundCodec):
@@ -281,10 +304,12 @@ class S_RoundCodec(_WZRoundCodec):
         sample_indices, _ = self._split_indices(
             int(sampling_payload["seed"]), full_bins.shape[1], int(sampling_payload["count"]))
 
-        reconst = super().decode(payload, record)
-        sampling_reconst = self.sampling_quantizer.decoding_process(
+        stage_reconstructions = self.quantizer.decoding_stages_process(payload_dict["payload_content"])
+        sampling_stage_reconstructions = self.sampling_quantizer.decoding_stages_process(
             payload_dict["payload_content"])
-        reconst[sample_indices] = sampling_reconst[sample_indices]
+        stage_reconstructions[:, sample_indices] = sampling_stage_reconstructions[:, sample_indices]
+        self.add_stage_distortion_to_record(stage_reconstructions, record)
+        reconst = stage_reconstructions[-1]
 
         sample_error = reconst[sample_indices] - self._sample_original
         record.update_record_fields(
