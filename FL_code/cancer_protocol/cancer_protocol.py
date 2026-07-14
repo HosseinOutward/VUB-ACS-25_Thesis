@@ -233,8 +233,8 @@ class S_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "S"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
 
-    sample_fraction: ClassVar[float] = 0.02
-    retrain_epochs: ClassVar[int] = 10
+    sample_fraction: ClassVar[float] = 0.10
+    retrain_epochs: ClassVar[int] = 70
     _sample_original: torch.Tensor | None = None
 
     sampling_quantizer: WZQuantizerCancer
