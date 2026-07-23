@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from FL_code.FL_core.models import initialize_model
 from FL_code.FL_core.utils import StateDictManager, set_global_seed
 from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant, WZQuantizerCancer
+from FL_code.cancer_protocol.wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
 from FL_code.run_fl import FLConfig
 
 
@@ -191,7 +191,7 @@ def run_trial(
     )
 
     started = perf_counter()
-    training_quantizer = WZQuantizerCancer(config, si_size=1)
+    training_quantizer = DedupedWZQuantizerCancer(config, si_size=1)
     training_quantizer.train_model(training_target, [training_si])
     stage_rates: list[list[float]] = [[] for _ in range(NUM_PLANES)]
     stage_mses: list[list[float]] = [[] for _ in range(NUM_PLANES)]
@@ -199,7 +199,7 @@ def run_trial(
     for client_id in inference_clients:
         target = load_tensor(RAW_DIR, INFERENCE_SI_ROUND + 1, client_id)
         side_information = load_tensor(RECON_DIR, INFERENCE_SI_ROUND, client_id)
-        quantizer = WZQuantizerCancer(config, si_size=1)
+        quantizer = DedupedWZQuantizerCancer(config, si_size=1)
         quantizer.coding_model = training_quantizer.coding_model
         bins, _, metadata = quantizer.encoding_process(target)
         quantizer.set_side_information([side_information])

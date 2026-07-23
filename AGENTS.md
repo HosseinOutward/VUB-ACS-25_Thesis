@@ -31,6 +31,7 @@ Note: FYI. the .venv is a symbolink, and has all the packages.
 
 These standards apply to every module unless a more specific local instruction says otherwise.
 
+- **Caching** Many functtions and code blocks take a long time, so the cache.py helps by caching them and reusing when the configs and args are the same. this means when changing config, or even adding unrelated items to it, or modifying args, we need to be aware that it might cause cahce miss, and the cache functions need to be updated to consider the new config/args and assign it to the proper cache key.
 - **Use full type hints** on every function signature and class attribute.
 - **Use advanced python syntax**, Its encouraged to use python best practices and advanced syntax to improve the code logic and readability. avoid over engineering for the sake of syntax though. for example, `pathlib.Path` for filesystem paths over raw `str`, and many other uses of tools given by python and common libraries.
 - **Keep code to a minimum** Common thread among below standards too, is to make use of dynamic approaches, judgment of if an extra code had any real impact or use, and if an extra function and class needed to be made. Less is always better mostly since it helps with readibilty and debugging. all else is secondary.

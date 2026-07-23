@@ -20,7 +20,7 @@ from FL_code.FL_core.codec import (
 from FL_code.FL_core.utils import ParsedConfigurableName, compress_data_list, decompress_data_list
 from FL_code.cancer_protocol.prior_code import PriorCalculator
 
-from .wz_quantizer import DedupedDecodingWZQuantizerCancer, PreprocessMetadata, WZQuantizerCancer, WZcfgQuant
+from .wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, WZcfgQuant
 
 
 def _compressed_size(obj: Any) -> float:
@@ -53,12 +53,12 @@ class _WZRoundCodec(BaseRoundCodec):
     round_name: ClassVar[str]  # needs to be set in subclasses
     can_decode_where: ClassVar[Access]  # needs to be set in subclasses
 
-    quantizer: WZQuantizerCancer
+    quantizer: DedupedWZQuantizerCancer
 
     c_cfg: WZcfgQuant
     _original_delta_vec: torch.Tensor | None = None
     _prior_side_information: list[torch.Tensor] | None = None
-    quantizer_class: type[WZQuantizerCancer] = WZQuantizerCancer
+    quantizer_class: type[DedupedWZQuantizerCancer] = DedupedWZQuantizerCancer
 
     def create_r_record(self, round_id: int, client_id: int) -> CancerRecord:
         raw_record = super().create_r_record(round_id, client_id)
@@ -113,7 +113,7 @@ class _WZRoundCodec(BaseRoundCodec):
             for entry in client_history
         ]
 
-    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
+    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> DedupedWZQuantizerCancer:
         assert x is not None and si is not None
         self.quantizer = quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))
         self.quantizer.train_model(x, si)
@@ -214,7 +214,7 @@ class F_RoundCodec(_WZRoundCodec):
         self,
         cfg_options: Mapping[str, Any] | None,
         round_name_full: str,
-        f_quant: WZQuantizerCancer,
+        f_quant: DedupedWZQuantizerCancer,
         h_access: Access,
         side_information: list[torch.Tensor] | None = None,
     ) -> None:
@@ -232,7 +232,7 @@ class F_RoundCodec(_WZRoundCodec):
             self.quantizer = copy(f_quant)
             self.quantizer.side_info_list_used = list(side_information)
 
-    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
+    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> DedupedWZQuantizerCancer:
         raise NotImplementedError("F_RoundCodec does not support building a new quantizer. Use the frozen quantizer instead.")
 
 
@@ -241,7 +241,7 @@ class P_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "P"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
-    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
+    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> DedupedWZQuantizerCancer:
         assert x is None and si is None
         self.c_cfg = self.c_cfg.model_copy(update={"marginal_loss": True})
         self.quantizer = quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=0)
@@ -298,7 +298,7 @@ class S_RoundCodec(_WZRoundCodec):
     retrain_epochs: ClassVar[int] = 70
     _sample_original: torch.Tensor | None = None
 
-    sampling_quantizer: WZQuantizerCancer
+    sampling_quantizer: DedupedWZQuantizerCancer
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -435,7 +435,7 @@ class T_RoundCodec(_WZRoundCodec):
         assert si_entries[-1].access == Access.TEMPORAL_TOO
         return None, [entry.tensor for entry in si_entries]
 
-    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
+    def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> DedupedWZQuantizerCancer:
         assert x is None and si is not None
         self.si = si
         self.quantizer = quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))

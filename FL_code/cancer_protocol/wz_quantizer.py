@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Any, ClassVar, Literal, NamedTuple, TypeAlias
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
@@ -19,6 +19,8 @@ from .prior_code import DedupedPriorCalculator, PriorCalculator
 
 
 OUTLIER_CHUNK = 2**8
+# Below this point, exact grouping costs more than the avoided RNN work.
+TRAINING_DEDUPLICATION_MIN_FRACTION = 0.1
 
 
 class OutlierMetadata(NamedTuple):
@@ -128,8 +130,23 @@ def batch_loop(
     return torch.cat(batches, dim=cat_dim if cat_dim is not None else (1 if batches[0].ndim == 3 else 0))
 
 
+def _sample_mean(values: torch.Tensor, sample_weights: torch.Tensor | None) -> torch.Tensor:
+    """Average per-sample values while preserving duplicate multiplicities when supplied."""
+    return values.mean() if sample_weights is None else (values * sample_weights).sum() / sample_weights.sum()
+
+
+def float_prefix(values: torch.Tensor, match_bits: int) -> torch.Tensor:
+    """Return float32 values truncated to a shared leading-bit prefix."""
+    assert values.dtype == torch.float32
+    assert 1 <= match_bits <= 32
+    return (
+        values if match_bits == 32
+        else (values.view(torch.int32) & -(1 << (32 - match_bits))).view(torch.float32)
+    )
+
+
 def wz_model_training_loop(
-    compute_loss: Callable,
+    compute_loss: Callable[..., torch.Tensor],
     model: EncoderDecoderLayeredRNN,
     parameters: Iterator[Parameter],
     training_inputs: tuple[torch.Tensor, ...],
@@ -140,12 +157,44 @@ def wz_model_training_loop(
     metrics_fn: Callable[[EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], torch.Tensor], str] | None = None,
     **loss_fn_options,
 ) -> float:
-    """Train one quantizer initialization and return its final epoch loss."""
+    """Train one model, adaptively collapsing duplicate rows and preserving their loss mass."""
     model.to('cuda').train()
     training_inputs = tuple(value.to('cuda') for value in training_inputs)
     assert training_inputs
     assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
     side_info = side_info.to('cuda')
+
+    input_size = training_inputs[0].shape[0]
+    total_samples = min(c_cfg.train_sample_size, input_size)
+    batch_draws = min(batch_size, total_samples)
+    expected_index_duplicate_fraction = 1 - (
+        input_size * (1 - (1 - 1 / input_size) ** batch_draws) / batch_draws
+        if input_size > 1 else 1
+    )
+    row_groups = None
+    if c_cfg.deduplicate_training:
+        probe_size = min(batch_size, input_size)
+        probe_indices = (
+            torch.arange(probe_size, device=side_info.device) * input_size // probe_size
+        )
+        probe_rows = torch.cat([
+            value[probe_indices].flatten(start_dim=1)
+            for value in (*training_inputs, side_info)
+        ], dim=1)
+        probe_rows = float_prefix(probe_rows, c_cfg.training_match_bits)
+        content_duplicate_fraction = (
+            1 - torch.unique(probe_rows, dim=0).shape[0] / probe_rows.shape[0]
+        )
+        if content_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
+            rows = torch.cat([
+                value.flatten(start_dim=1) for value in (*training_inputs, side_info)
+            ], dim=1)
+            rows = float_prefix(rows, c_cfg.training_match_bits)
+            row_groups = torch.unique(rows, dim=0, return_inverse=True)[1]
+            del rows
+        elif expected_index_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
+            row_groups = torch.arange(input_size, device=side_info.device)
+        del probe_rows
 
     # Both training losses are scaled by 1/K relative to their previous forms.
     optimizer_epsilon = 1e-8 / model.num_planes
@@ -159,8 +208,6 @@ def wz_model_training_loop(
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
     scaler = torch.amp.GradScaler("cuda", enabled=c_cfg.mixed_precision)
 
-    input_size = training_inputs[0].shape[0]
-    total_samples = min(c_cfg.train_sample_size, input_size)
     total_batches = (total_samples + batch_size - 1) // batch_size
     pbar = create_training_progress_bar(
         c_cfg.train_epochs * total_batches,
@@ -171,15 +218,34 @@ def wz_model_training_loop(
         epoch_started = perf_counter()
         indices = torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
         epoch_loss = 0.0
+        epoch_model_samples = 0
         for start in range(0, total_samples, batch_size):
             batch_indices = indices[start:start + batch_size]
-            input_batch = tuple(value[batch_indices].clone() for value in training_inputs)
+            sample_weights = None
+            if row_groups is not None:
+                _, inverse, counts = torch.unique(
+                    row_groups[batch_indices], return_inverse=True, return_counts=True
+                )
+                if counts.numel() < batch_indices.numel():
+                    representatives = torch.full_like(counts, batch_indices.numel())
+                    representatives.scatter_reduce_(
+                        0,
+                        inverse,
+                        torch.arange(batch_indices.numel(), device=inverse.device),
+                        reduce="amin",
+                    )
+                    batch_indices = batch_indices[representatives]
+                    sample_weights = counts.to(training_inputs[0].dtype)
+            input_batch = tuple(value[batch_indices] for value in training_inputs)
             si_batch = side_info[batch_indices]
+            epoch_model_samples += batch_indices.numel()
 
-            # todo: remove duplicates from input_batch and si_batch to avoid redundant computation. then re-add duplicates results in the same order.
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
-                loss = compute_loss(model, input_batch, si_batch, epoch, c_cfg, **loss_fn_options)
+                loss = compute_loss(
+                    model, input_batch, si_batch, epoch, c_cfg,
+                    sample_weights=sample_weights, **loss_fn_options
+                )
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -203,7 +269,8 @@ def wz_model_training_loop(
             print(
                 f"{label} epoch {epoch + 1}/{c_cfg.train_epochs}: "
                 f"loss={epoch_loss:.6f}, lr={optimizer.param_groups[0]['lr']:.3e}, "
-                f"seconds={epoch_seconds:.2f}, samples_per_second={total_samples / epoch_seconds:.0f}{metrics}",
+                f"seconds={epoch_seconds:.2f}, samples_per_second={total_samples / epoch_seconds:.0f}, "
+                f"model_samples={epoch_model_samples}/{total_samples}{metrics}",
                 flush=True,
             )
 
@@ -234,14 +301,16 @@ class WZcfgQuant(BaseModel):
     lr: float = 3e-3
     lr_step: int = 40
     tau: float = 1.0
-    quantizer_train_repeats: int = 3
-    prior_train_repeats: int = 3
+    quantizer_train_repeats: int = 2
+    prior_train_repeats: int = 2
 
     training_progress_bar: bool = False
     training_log_every_epochs: int | None = None
     tf32: bool = False
     fused_optimizer: bool = True
     mixed_precision: bool = False
+    deduplicate_training: bool = True
+    training_match_bits: int = Field(default=26, ge=1, le=32)
     source_perturbation: Literal["none", "draw_discard", "add"] = "none"
     shared_heads: bool = True
     prior_context: Literal["hard", "soft"] = "hard"
@@ -332,6 +401,7 @@ class WZQuantizerCancer:
         si_batch: torch.Tensor,
         epoch: int,
         c_cfg: WZcfgQuant,
+        sample_weights: torch.Tensor | None,
         wmspe_denom: float,
         perturb_generator: torch.Generator,
     ) -> torch.Tensor:
@@ -350,11 +420,19 @@ class WZQuantizerCancer:
         loss = torch.zeros((), device=x_batch.device)
         sample_indices = torch.arange(x_batch.shape[0], device=x_batch.device)
         for plane in range(model.num_planes):
-            distortion = F.mse_loss(reconstructions[plane], x_batch)
+            distortion = _sample_mean(
+                F.mse_loss(
+                    reconstructions[plane], x_batch, reduction="none"
+                ).flatten(start_dim=1).mean(dim=1),
+                sample_weights,
+            )
 
             posterior_prob = soft_codes[plane][sample_indices, bins[plane]]
             prior_prob = priors[plane][sample_indices, bins[plane]]
-            rate = torch.log((posterior_prob + 1e-12) / (prior_prob + 1e-12)).mean()
+            rate = _sample_mean(
+                torch.log((posterior_prob + 1e-12) / (prior_prob + 1e-12)),
+                sample_weights,
+            )
 
             new_loss = (c_cfg.reconst_ld / wmspe_denom) * distortion + rate
             loss = loss + new_loss / model.num_planes
@@ -375,7 +453,9 @@ class WZQuantizerCancer:
             self.cache_dir / "quantizers",
             model_training_hash,
             self.cache_overwrite,
-            quantizer_class=type(self),
+            # Inference-only subclasses share this training implementation and
+            # restore the resulting state into their own instance below.
+            quantizer_class=WZQuantizerCancer,
             c_cfg=self.c_cfg,
             x_raw=x_raw,
             side_information=tuple(si_raw_list or ()),
@@ -407,7 +487,7 @@ class WZQuantizerCancer:
             None if self.cache_dir is None else self.cache_dir / "quantizers",
             model_training_hash,
             self.cache_overwrite,
-            quantizer_class=type(self),
+            quantizer_class=WZQuantizerCancer,
             c_cfg=c_cfg,
             initial_state=self.coding_model.state_dict(),
             x_prep=x_prep,
@@ -534,7 +614,16 @@ class WZQuantizerCancer:
         assert self.vector_size is not None
         assert bins.shape == (self.num_planes, self.vector_size)
         side_info = self.side_info_tensor(metadata)
+        normalized = self._decode_stages_preprocessed(bins, side_info, batch_size)
+        return torch.stack([self.postprocess(stage, metadata) for stage in normalized])
 
+    def _decode_stages_preprocessed(
+        self,
+        bins: torch.Tensor,
+        side_info: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Decode every normalized reconstruction stage from bins and side information."""
         def decode_batch(start: int, end: int) -> torch.Tensor:
             codes = [
                 F.one_hot(plane.long().to(self.device), num_classes=self.bins_per_plane).float()
@@ -542,9 +631,9 @@ class WZQuantizerCancer:
             ]
             return torch.stack(self.coding_model.decode(codes, side_info[start:end])).cpu()
 
-        normalized = batch_loop(
-            decode_batch, self.coding_model, bins.shape[1], batch_size, cat_dim=1).squeeze(-1)
-        return torch.stack([self.postprocess(stage, metadata) for stage in normalized])
+        return batch_loop(
+            decode_batch, self.coding_model, bins.shape[1], batch_size, cat_dim=1
+        ).squeeze(-1)
 
     def _decode_preprocessed(
         self,
@@ -552,16 +641,8 @@ class WZQuantizerCancer:
         side_info: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
-        """Decode normalized reconstruction values from bins and normalized side information."""
-        def decode_batch(start: int, end: int) -> torch.Tensor:
-            codes = [
-                F.one_hot(plane.long().to('cuda'), num_classes=self.bins_per_plane).float()
-                for plane in bins[:, start:end]
-            ]
-            return self.coding_model.decode(codes, side_info[start:end])[-1].cpu()
-
-        recons = batch_loop(decode_batch, self.coding_model, bins.shape[1], batch_size)
-        return recons.reshape(-1)
+        """Decode the final normalized reconstruction stage."""
+        return self._decode_stages_preprocessed(bins, side_info, batch_size)[-1]
 
     def preprocess_x(
         self,
@@ -695,200 +776,18 @@ def _retrain_quantizer_parameters(
     return quantizer.coding_model.state_dict(), loss
 
 
-class SampledEncodingStats(NamedTuple):
-    """Diagnostics from sampled-distance encoding, produced by the encoder for experiment logging."""
-
-    vector_size: int
-    sample_count: int
-    inferred_count: int
-    fallback_count: int
-    distance_threshold: float
-
-
-class DedupedDecodingStats(NamedTuple):
-    """Diagnostics from deduplicated decoding, produced by the decoder for experiment logging."""
-
-    vector_size: int
-    unique_count: int
-    reused_count: int
-    collision_count: int
-
-
-class DistanceSampledWZQuantizerCancer(WZQuantizerCancer):  # dont use / buggy
-    """WZ quantizer that encodes a sample exactly and infers safe remaining symbols by nearby sampled values.
-
-    The sampling knobs are runtime-speed trade-offs rather than experiment parameters, so they
-    are class constants instead of configuration.
-    """
-
-    sample_fraction: ClassVar[float] = 0.02
-    neighbor_count: ClassVar[int] = 4
-    distance_multiplier: ClassVar[float] = 64.0
-    exact_encode_threshold: ClassVar[float] = 1.4
-    assignment_batch_size: ClassVar[int] = 1_000_000
-    sample_seed: ClassVar[int] = 0
-
-    last_sampled_encoding_stats: SampledEncodingStats | None = None
-
-    def _encode_preprocessed(
-        self,
-        x_prep: torch.Tensor,
-        batch_size: int,
-    ) -> tuple[torch.Tensor, None]:
-        """Encode normalized model inputs from sampled anchors plus exact unsafe values."""
-        vector_size = x_prep.shape[0]
-        sample_count = min(
-            vector_size,
-            max(self.neighbor_count, int(np.ceil(vector_size * self.sample_fraction))),
-        )
-        if sample_count == vector_size:
-            bins, _ = super()._encode_preprocessed(x_prep, batch_size)
-            self.last_sampled_encoding_stats = SampledEncodingStats(vector_size, sample_count, 0, 0, 0.0)
-            return bins, None
-
-        # The neural encoder is used only for sampled anchors and values rejected by sample-based assignment.
-        generator = torch.Generator(device=self.device).manual_seed(self.sample_seed)
-        sample_indices = torch.randperm(vector_size, device=self.device, generator=generator)[:sample_count]
-        sample_bins, _ = super()._encode_preprocessed(x_prep[sample_indices], batch_size)
-        sample_bins = sample_bins.to(device=self.device, dtype=torch.long)
-
-        sampled = torch.zeros(vector_size, dtype=torch.bool, device=self.device)
-        sampled[sample_indices] = True
-        remaining_indices = sampled.logical_not().nonzero(as_tuple=False).flatten()
-
-        bins = torch.empty((self.num_planes, vector_size), dtype=torch.long, device=self.device)
-        bins[:, sample_indices] = sample_bins
-
-        # Pure 1D assignment: infer symbols from nearby sampled anchors and mark unsafe values for exact encoding.
-        inferred_bins, inferred_mask, distance_threshold = self._assign_bins_from_samples(
-            x_prep[sample_indices].squeeze(1),
-            sample_bins,
-            x_prep[remaining_indices].squeeze(1),
-        )
-        bins[:, remaining_indices[inferred_mask]] = inferred_bins[:, inferred_mask]
-
-        # Unsafe values include contradictory neighborhoods, sparse neighborhoods, and optional normalized tails.
-        fallback_indices = remaining_indices[~inferred_mask]
-        if fallback_indices.numel():
-            fallback_bins, _ = super()._encode_preprocessed(x_prep[fallback_indices], batch_size)
-            bins[:, fallback_indices] = fallback_bins.to(device=self.device, dtype=torch.long)
-
-        self.last_sampled_encoding_stats = SampledEncodingStats(
-            vector_size,
-            sample_count,
-            int(inferred_mask.sum().item()),
-            int(fallback_indices.numel()),
-            distance_threshold,
-        )
-        return bins.cpu(), None
-
-    def _assign_bins_from_samples(
-        self,
-        sample_values: torch.Tensor,
-        sample_bins: torch.Tensor,
-        values: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, float]:
-        """Infer bins from sampled value-symbol pairs and mark unsafe values for exact encoding."""
-        sort_order = sample_values.argsort()
-        sorted_values = sample_values[sort_order]
-        sorted_bins = sample_bins[:, sort_order]
-        keep = torch.ones(sorted_values.numel(), dtype=torch.bool, device=sorted_values.device)
-        keep[1:] = sorted_values[1:] != sorted_values[:-1]
-        sorted_values = sorted_values[keep].contiguous()
-        sorted_bins = sorted_bins[:, keep].contiguous()
-
-        gaps = sorted_values.diff().abs()
-        positive_gaps = gaps[gaps > 0]
-        distance_threshold = 0.0 if positive_gaps.numel() == 0 else float(
-            positive_gaps.median().item() * self.distance_multiplier
-        )
-        interval_lowers, interval_uppers, interval_bins = self._symbol_intervals(
-            sorted_values,
-            sorted_bins,
-            distance_threshold,
-        )
-        if interval_lowers.numel() == 0:
-            return (
-                torch.empty((self.num_planes, values.numel()), dtype=interval_bins.dtype, device=self.device),
-                torch.zeros(values.numel(), dtype=torch.bool, device=self.device),
-                float(distance_threshold),
-            )
-
-        inferred_bins_chunks: list[torch.Tensor] = []
-        inferred_mask_chunks: list[torch.Tensor] = []
-        for start in range(0, values.numel(), self.assignment_batch_size):
-            value_batch = values[start:start + self.assignment_batch_size]
-            interval_indices = torch.bucketize(value_batch, interval_lowers) - 1
-            candidate_indices = interval_indices.clamp(0, interval_lowers.numel() - 1)
-            inferred_mask = (interval_indices >= 0) & (value_batch <= interval_uppers[candidate_indices])
-            inferred_mask &= value_batch.abs() <= self.exact_encode_threshold
-            inferred_bins_chunks.append(interval_bins[:, candidate_indices])
-            inferred_mask_chunks.append(inferred_mask)
-        inferred_mask = torch.cat(inferred_mask_chunks)
-        return (
-            torch.cat(inferred_bins_chunks, dim=1),
-            inferred_mask,
-            float(distance_threshold),
-        )
-
-    def _symbol_intervals(
-        self,
-        sorted_values: torch.Tensor,
-        sorted_bins: torch.Tensor,
-        distance_threshold: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        changes = (sorted_bins[:, 1:] != sorted_bins[:, :-1]).any(dim=0)
-        starts = torch.cat((
-            torch.zeros(1, dtype=torch.long, device=self.device),
-            torch.nonzero(changes, as_tuple=False).flatten() + 1,
-        ))
-        ends = torch.cat((starts[1:] - 1, starts.new_tensor([sorted_values.numel() - 1])))
-        valid = ends - starts + 1 >= self.neighbor_count
-        if not valid.any():
-            empty = torch.empty(0, device=self.device)
-            return empty, empty, torch.empty((self.num_planes, 0), dtype=sorted_bins.dtype, device=self.device)
-
-        starts = starts[valid]
-        ends = ends[valid]
-        lower_positions = starts + self.neighbor_count - 1
-        upper_positions = ends - self.neighbor_count + 1
-        lower_bounds = sorted_values[lower_positions] - distance_threshold
-        upper_bounds = sorted_values[upper_positions] + distance_threshold
-
-        previous_conflicts = torch.full_like(lower_bounds, -torch.inf)
-        has_previous = starts > 0
-        previous_conflicts[has_previous] = sorted_values[starts[has_previous] - 1] + distance_threshold
-        next_conflicts = torch.full_like(upper_bounds, torch.inf)
-        has_next = ends < sorted_values.numel() - 1
-        next_conflicts[has_next] = sorted_values[ends[has_next] + 1] - distance_threshold
-        lower_bounds = torch.maximum(lower_bounds, previous_conflicts)
-        upper_bounds = torch.minimum(upper_bounds, next_conflicts)
-        valid_bounds = lower_bounds <= upper_bounds
-        return lower_bounds[valid_bounds].contiguous(), upper_bounds[valid_bounds].contiguous(), sorted_bins[
-            :,
-            starts[valid_bounds],
-        ].contiguous()
-
-
 def unique_row_groups(
     bins: torch.Tensor,
     side_info: torch.Tensor,
-    si_match_bits: int = 32,
+    match_bits: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Group positions with identical (bins, side info) rows so pure row functions run once per group.
-
-    ``si_match_bits`` sets how many leading float32 bits of each side-information value must agree
-    for rows to be grouped (32 means bitwise equality; bins always match exactly). Returns the
-    device-resident long bins plus (representatives, inverse, collisions): one member position per
-    unique row, the position-to-group map, and positions whose projection key collided with a
-    different row (those must be processed exactly).
-    """
-    assert 1 <= si_match_bits <= 32, "si_match_bits must be in [1, 32]."
+    """Group rows by exact bins and float-prefix side information."""
     device = side_info.device
     bins_device = bins.to(device, torch.long)
-    if si_match_bits < 32:
-        side_info = (side_info.view(torch.int32) & -(1 << (32 - si_match_bits))).view(torch.float32)
-    features = torch.cat([side_info, bins_device.T.to(side_info.dtype)], dim=1)
+    features = torch.cat([
+        float_prefix(side_info, match_bits),
+        bins_device.T.to(side_info.dtype),
+    ], dim=1)
     generator = torch.Generator(device=device).manual_seed(0)
     projection = torch.randn(features.shape[1], generator=generator, device=device, dtype=torch.float64)
 
@@ -899,40 +798,75 @@ def unique_row_groups(
     return bins_device, representatives, inverse, collisions
 
 
-class DedupedDecodingWZQuantizerCancer(DistanceSampledWZQuantizerCancer): # dont use / buggy
-    """Distance-sampled WZ quantizer that decodes each unique (bins, side info) row only once.
+class DeduplicationStats(NamedTuple):
+    """Diagnostics from one encoder or decoder deduplication pass."""
 
-    Decoder outputs and conditional priors are pure functions of the per-position bin symbols
-    and side information, and in practice both are heavily discretized (side information is
-    built from earlier quantized reconstructions), so duplicates are reused and the results
-    stay bitwise equal to the full neural passes.
-    """
+    vector_size: int
+    unique_count: int
+    reused_count: int
+    collision_count: int
+
+
+class DedupedWZQuantizerCancer(WZQuantizerCancer):
+    """WZ quantizer that reuses encoder, decoder, and prior results across float-prefix rows."""
 
     prior_calculator: ClassVar[type[PriorCalculator]] = DedupedPriorCalculator
-    si_match_bits: ClassVar[int] = 18
+    match_bits: ClassVar[int] = 24
 
-    last_decoding_stats: DedupedDecodingStats | None = None
+    last_encoding_stats: DeduplicationStats | None = None
+    last_decoding_stats: DeduplicationStats | None = None
 
-    def _decode_preprocessed(
+    def _encode_preprocessed(
+        self,
+        x_prep: torch.Tensor,
+        batch_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode one representative per normalized float-prefix group."""
+        empty_bins = torch.empty((0, x_prep.shape[0]), dtype=torch.long, device=self.device)
+        _, representatives, inverse, collisions = unique_row_groups(
+            empty_bins, x_prep, self.match_bits
+        )
+        bins, soft_codes = super()._encode_preprocessed(x_prep[representatives], batch_size)
+        inverse_cpu = inverse.cpu()
+        bins = bins[:, inverse_cpu]
+        soft_codes = soft_codes[:, inverse_cpu]
+        if collisions.numel():
+            collision_bins, collision_codes = super()._encode_preprocessed(
+                x_prep[collisions], batch_size
+            )
+            collisions_cpu = collisions.cpu()
+            bins[:, collisions_cpu] = collision_bins
+            soft_codes[:, collisions_cpu] = collision_codes
+        self.last_encoding_stats = DeduplicationStats(
+            x_prep.shape[0],
+            representatives.numel(),
+            x_prep.shape[0] - representatives.numel() - collisions.numel(),
+            collisions.numel(),
+        )
+        return bins, soft_codes
+
+    def _decode_stages_preprocessed(
         self,
         bins: torch.Tensor,
         side_info: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
-        """Decode each unique (bins, side info) row once and reuse the result for exact duplicates."""
-        bins_device, representatives, inverse, collisions = unique_row_groups(bins, side_info, self.si_match_bits)
-        recons = super()._decode_preprocessed(
+        """Decode every stage once per symbol-and-SI float-prefix group."""
+        bins_device, representatives, inverse, collisions = unique_row_groups(
+            bins, side_info, self.match_bits
+        )
+        recons = super()._decode_stages_preprocessed(
             bins_device[:, representatives], side_info[representatives], batch_size
-        ).to(self.device)[inverse]
+        ).to(self.device)[:, inverse]
         if collisions.numel():
-            recons[collisions] = super()._decode_preprocessed(
+            recons[:, collisions] = super()._decode_stages_preprocessed(
                 bins_device[:, collisions], side_info[collisions], batch_size
             ).to(self.device)
 
-        self.last_decoding_stats = DedupedDecodingStats(
-            recons.numel(),
-            int(representatives.numel()),
-            int(recons.numel() - representatives.numel() - collisions.numel()),
-            int(collisions.numel()),
+        self.last_decoding_stats = DeduplicationStats(
+            bins.shape[1],
+            representatives.numel(),
+            bins.shape[1] - representatives.numel() - collisions.numel(),
+            collisions.numel(),
         )
         return recons.cpu()

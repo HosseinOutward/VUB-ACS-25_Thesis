@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 
-from FL_code.cancer_protocol.cancer_quantizer import WZQuantizerCancer
+from FL_code.cancer_protocol.wz_quantizer import DedupedWZQuantizerCancer
 from FL_code.cancer_protocol import CancerConfig
 from FL_code.cancer_protocol.prior_calculator import PriorCalculator
 
@@ -27,7 +27,7 @@ side_info = [base.clone()]
 print("Training quantizer...")
 c_cfg = CancerConfig()
 c_cfg.training_progress_bar = True
-quantizer = WZQuantizerCancer(
+quantizer = DedupedWZQuantizerCancer(
     c_cfg=c_cfg, num_planes=NP, bins_per_plane=BPP, si_size=len(side_info))
 quantizer.train_model(y, side_info)
 
