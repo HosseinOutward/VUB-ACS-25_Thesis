@@ -114,6 +114,8 @@ class PriorCalculator:
                 c_cfg.bins_per_plane,
                 side_info.shape[1],
                 c_cfg.marginal_loss,
+                c_cfg.hidden_dim,
+                c_cfg.layers,
                 c_cfg.shared_heads,
             )
             prior_heads = (

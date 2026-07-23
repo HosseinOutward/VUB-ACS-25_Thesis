@@ -1,30 +1,33 @@
 # Project Context
 
-This repository supports PhD-level research into gradient compression for federated learning using distributed source coding, especially learned Wyner-Ziv methods.
+This repository supports PhD-level research into gradient compression for federated learning using distributed source coding, especially learned Wyner-Ziv quantization (LWZQ) methods.
 
 The core research direction is a two-step compression pipeline:
-
 1. A distributed source coding quantizer, preferably a learned Wyner-Ziv quantizer.
-2. A conditional entropy coder, ideally based on Slepian-Wolf coding.
+2. A conditional entropy coder, ideally based on Slepian-Wolf coding. 
+
+notes on conditional entropy coder: 
+    - this is not the topic of our research, but is part of the pipeline.
+    - the prior rate of the current learned wz quantizer is an estimate of the rate of the SW coding.
 
 The central design question is always: what side information is available at the decoder, and can it legitimately be used as a prior?
 
-FYI. the .venv is a symbolink, and has all the packages.
 
 ---
 
 ## 0. Research Principles
 
+- **rate-distortion** - our goal is to reduce RD, not just rate or distortion in isolation. RD gap between 2 experiments is only possible if we have an idea of the RD curves. the LWZQ outputs in stages, and each stage can be a node on the curve. by comparing how far a curve is under another methods curve, we can get a metric for how improve the resutls are. To have this gap be human readable, it's best to convert the gap with the slop in mind, i.e. the perpendicular distance between curves, into rate and distortion components and report the rate change, which is in a way the rate difference for the same distortion. The slope has to be computed as an average of the stage to stage slope.
 - **Two-step compression.** Keep quantization and entropy coding conceptually separate. The quantizer produces symbols; the conditional entropy coder compresses those symbols using decoder-available side information.
 - **Decoder-side priors matter.** Both the DSC quantizer and the conditional entropy coder need priors. Before using a prior, identify where decoding happens and which data is actually available there. Do not assume worker-only or server-only information is available everywhere.
-- **Multi-stage learned quantization per float.** A learned quantizer may emit several vectors of indices per float. Each stage can use earlier stage outputs as side information for later stages, producing multiple low-bit symbols from one floating-point value.
-- **Staging may extend beyond single floats.** The same staged logic may later flow across broader quantization and coding stages. The exact method is still a research question, so keep implementations explicit and easy to inspect.
-- **Secrets never touch saved artifacts.** Configuration files store the name of an environment variable, never the secret value itself.
-- **Structural validation only.** Pydantic validates types, formats, enums, and required fields. Do not add fabrication checks, provenance checks, length checks, or page-count checks.
+- **Multi-stage learned quantization per float.** A learned quantizer emit several vectors of indices per float. Each stage can use earlier stage outputs as side information for later stages, producing multiple low-bit symbols from one floating-point value.
+- **Structural validation only.** Pydantic, validation, formats, enums, and required fields. though also don't bomb a code based with a manual check for everthing. This is mostly to validate assumptions where it wont automaticall cause any error or wanrning.
 
 ---
 
 ## 1. Coding Standards
+
+Note: FYI. the .venv is a symbolink, and has all the packages.
 
 These standards apply to every module unless a more specific local instruction says otherwise.
 
@@ -41,18 +44,20 @@ These standards apply to every module unless a more specific local instruction s
 - **Keep control flow shallow.** Avoid unnecessary nested loops and conditionals. Prefer direct, readable logic.
 - **Avoid meaningless intermediate variables.** Create new names only when they clarify a non-trivial transformation or prevent repeated complex expressions.
 
+
 ---
 
 ## 2. Repository Structure
 
-- `FL_code/` contains the federated learning and compression implementation.
-- `FL_code/other_protocols/` contains alternative or baseline protocol implementations.
-- `FL_code/experiments/` contains notebooks and scripts for analysis, diagnostics, and experiment setup.
-- `FL_code/records/` contains experiment outputs and run configurations.
-- `FL_code/docs/` contains implementation notes and protocol documentation.
-- `FL_code/data/` contains local data assets and pretrained model files used by experiments.
-- `Thesis_doc/` contains the thesis LaTeX source.
-- `Paper_doc/` contains paper LaTeX source and related figures.
+Important ones:
+- `_/data/federated_learning/raw_client_deltas/` Contains raw, cached gradient delta for an uncompressed training test speed ups, or analysis, or for use to test protocols
+
+Rest:
+- `FL_code/` contains the core of the code, with FL logic, and also the main body of protocols, codec, quantizer and wyner-ziv logic and training.
+- `Experiments/` A directory with other folders where tests, checks and small scale runs are experimented with.
+
+- `Thesis_doc/` contains the thesis LaTeX source. ignore this
+- `Paper_doc/` contains paper LaTeX source and related figures. ignore this
 
 ---
 

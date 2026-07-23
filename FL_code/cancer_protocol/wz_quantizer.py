@@ -91,6 +91,8 @@ def new_rnn_model(
     bins_per_plane: int,
     side_info_size: int,
     marginal: bool,
+    hidden_dim: int,
+    layers: int,
     shared_heads: bool = True,
 ) -> EncoderDecoderLayeredRNN:
     """Create the RNN network shared by the WZ quantizer and the conditional prior model."""
@@ -99,8 +101,8 @@ def new_rnn_model(
         bins_per_plane=bins_per_plane,
         side_info_size=max(1, side_info_size),
         input_dim=1,
-        layers=3,
-        hidden_dim=100,
+        layers=layers,
+        hidden_dim=hidden_dim,
         marginal=marginal,
         shared_encoder=shared_heads,
         shared_decoder=shared_heads,
@@ -173,6 +175,7 @@ def wz_model_training_loop(
             input_batch = tuple(value[batch_indices].clone() for value in training_inputs)
             si_batch = side_info[batch_indices]
 
+            # todo: remove duplicates from input_batch and si_batch to avoid redundant computation. then re-add duplicates results in the same order.
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
                 loss = compute_loss(model, input_batch, si_batch, epoch, c_cfg, **loss_fn_options)
@@ -242,6 +245,8 @@ class WZcfgQuant(BaseModel):
     shared_heads: bool = True
     prior_context: Literal["hard", "soft"] = "hard"
     prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
+    hidden_dim: int = 100
+    layers: int = 3
 
 
 class WZQuantizerCancer:
@@ -286,11 +291,14 @@ class WZQuantizerCancer:
             side_info_size=self.side_info_size,
             marginal=self.marginal_loss,
             shared_heads=self.shared_heads,
+            hidden_dim=self.hidden_dim,
+            layers=self.layers,
         )
 
         self.side_info_list_used: list[torch.Tensor] | None = None
         self.vector_size: int | None = None
-        self.training_prior: torch.Tensor | None = None
+        self.training_prior_stage_rates: tuple[float, ...] | None = None
+        self.training_prior_rate: float | None = None
 
     @staticmethod
     def training_metrics(
@@ -339,12 +347,15 @@ class WZQuantizerCancer:
         loss = torch.zeros((), device=x_batch.device)
         sample_indices = torch.arange(x_batch.shape[0], device=x_batch.device)
         for plane in range(model.num_planes):
-            distortion = F.mse_loss(reconstructions[plane], x_batch) / wmspe_denom
+            distortion = F.mse_loss(reconstructions[plane], x_batch)
+
             posterior_prob = soft_codes[plane][sample_indices, bins[plane]]
             prior_prob = priors[plane][sample_indices, bins[plane]]
             rate = torch.log((posterior_prob + 1e-12) / (prior_prob + 1e-12)).mean()
-            loss = loss + c_cfg.reconst_ld * distortion + rate
-        return loss / model.num_planes
+
+            new_loss = (c_cfg.reconst_ld / wmspe_denom) * distortion + rate
+            loss = loss + new_loss / model.num_planes
+        return loss
 
     def train_model(
         self,
@@ -369,9 +380,9 @@ class WZQuantizerCancer:
         bins, _ = self._encode_preprocessed(x_prep, 500_000)
         temp = self.prior_calculator.compute_prior_from_network(
                 self.coding_model, bins, side_info).to(torch.float16)
-        self.training_prior_rates = self.prior_calculator.compute_plane_rates(
+        self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             temp, bins, self.c_cfg.num_planes)
-        self.training_prior_rate = sum(self.training_prior_rates)
+        self.training_prior_rate = sum(self.training_prior_stage_rates)
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_prep: torch.Tensor,
@@ -385,7 +396,7 @@ class WZQuantizerCancer:
 
             model = self.coding_model if attempt_index == 0 else new_rnn_model(
                 self.num_planes, self.bins_per_plane, side_info.shape[1], 
-                self.marginal_loss, self.shared_heads)
+                self.marginal_loss, self.shared_heads, self.hidden_dim, self.layers)
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
@@ -538,23 +549,33 @@ class WZQuantizerCancer:
         return recons
 
     def side_info_tensor(self, source_metadata: PreprocessMetadata) -> torch.Tensor:
-        """Normalize decoder side information in the source coordinate system and stack it."""
-        assert self.vector_size is not None, "Vector size must be known before side information is formatted."
+        """Normalize and stack the quantizer's stored side information."""
         assert self.side_info_list_used is not None, "Side information must be set before formatting."
-        side_info_list = list(self.side_info_list_used)
+        return self.format_side_info_tensor(source_metadata, self.side_info_list_used)
+
+    def format_side_info_tensor(
+        self,
+        source_metadata: PreprocessMetadata,
+        side_information: Sequence[torch.Tensor],
+    ) -> torch.Tensor:
+        """Normalize and stack a supplied SI list without reading or changing stored SI."""
+        assert self.vector_size is not None, "Vector size must be known before side information is formatted."
+        assert all(value.numel() == self.vector_size for value in side_information), (
+            f"Each side-information vector must contain {self.vector_size} values.")
+
         tensors = [
             self.preprocess_x(
                 si,
                 skip_outliers=True,
                 normalization_factors=source_metadata.norm_factors,
             )[0].squeeze(1)
-            for si in side_info_list
+            for si in side_information
         ]
         if len(tensors) == 0:
-            tensors = [torch.zeros(self.vector_size, device='cuda')]
+            tensors = [torch.zeros(self.vector_size, device=self.device)]
 
-        side_info = torch.stack(tensors, dim=1).to(self.device, dtype=torch.float32).contiguous()
-        return side_info
+        return torch.stack(tensors, dim=1).to(
+            self.device, dtype=torch.float32).contiguous()
 
     def set_side_information(self, side_info: Sequence[torch.Tensor]) -> None:
         """Set the decoder-available side-information vectors used by decoding and conditional priors."""
