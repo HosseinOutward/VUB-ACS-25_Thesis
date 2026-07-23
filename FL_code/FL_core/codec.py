@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from .utils import StateDictManager
 
 
+DEFAULT_PROTOCOL_CACHE_DIR = Path("_/data/protocol_cache")
+
+
 # --- History management --- #
 class Access(Enum):
     """Which reconstructed-gradient history entries a process may inspect."""
@@ -342,6 +345,8 @@ class BaseProtocol:
     max_per_client_recons_history: ClassVar[int | None]
     _recons_history: ReconstructionHistory
     sd_slices: Sequence[slice] | None
+    cache_dir: Path | None
+    cache_overwrite: bool
 
     def __init_subclass__(cls) -> None:
         """Require concrete protocols to declare their warmup and routine round codec plans.
@@ -361,7 +366,9 @@ class BaseProtocol:
         self,
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
-        sd_slices: Sequence[slice] | None = None
+        sd_slices: Sequence[slice] | None = None,
+        cache_dir: Path | None = None,
+        cache_overwrite: bool = False,
     ) -> None:
         self.protocol_name_full = protocol_name_full or type(self).protocol_name
         if options:
@@ -377,6 +384,8 @@ class BaseProtocol:
             ]
         )
         self.sd_slices = sd_slices
+        self.cache_dir = cache_dir
+        self.cache_overwrite = cache_overwrite
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
@@ -395,6 +404,27 @@ class BaseProtocol:
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         raise NotImplementedError
 
+    def config_snapshot(self) -> dict[str, Any]:
+        """Return the protocol schedule and explicit options used by a records run."""
+        parsed_protocol = parse_configurable_name(self.protocol_name_full, "protocol")
+        return {
+            "implementation": f"{type(self).__module__}.{type(self).__qualname__}",
+            "protocol_name_full": self.protocol_name_full,
+            "options": parsed_protocol.options,
+            "warmup_round_codecs": self.warmup_round_codecs,
+            "routine_round_codecs": self.routine_round_codecs,
+            "max_per_client_recons_history": self.max_per_client_recons_history,
+            "round_codecs": {
+                round_name: {
+                    "implementation": (
+                        f"{round_codec.__module__}.{round_codec.__qualname__}"
+                    ),
+                    "options": parse_configurable_name(round_name, "round codec").options,
+                }
+                for round_name, round_codec in sorted(self._round_codec_classes.items())
+            },
+        }
+
     def _validate_round_codecs(self) -> dict[str, type[BaseRoundCodec]]:
         round_codec_classes: dict[str, type[BaseRoundCodec]] = {}
         for round_name_full in set(self.warmup_round_codecs + self.routine_round_codecs):
@@ -406,12 +436,23 @@ class BaseProtocol:
         return round_codec_classes
 
 
-def create_protocol(protocol_name: str, sd_slices: Sequence[slice] | None = None) -> BaseProtocol:
+def create_protocol(
+    protocol_name: str,
+    sd_slices: Sequence[slice] | None = None,
+    cache_dir: Path | None = None,
+    cache_overwrite: bool = False,
+) -> BaseProtocol:
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
     from FL_code.other_protocols import n_split_protocol
     parsed = parse_configurable_name(protocol_name, "protocol")
-    return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(parsed.options, protocol_name, sd_slices=sd_slices)
+    return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(
+        parsed.options,
+        protocol_name,
+        sd_slices=sd_slices,
+        cache_dir=cache_dir,
+        cache_overwrite=cache_overwrite,
+    )
 
 
 def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:

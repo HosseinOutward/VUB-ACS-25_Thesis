@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from FL_code.FL_core.cache import cache_call, model_training_hash
+
 from .brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
@@ -94,48 +96,98 @@ class PriorCalculator:
         batch_size: int = 50_000,
     ) -> EncoderDecoderLayeredRNN:
         """Train a new conditional prior model from fixed quantizer bins and soft codes."""
-        from .wz_quantizer import new_rnn_model, wz_model_training_loop
-
         assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
-        context_codes = (
-            F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
-            if c_cfg.prior_context == "hard" else soft_codes.transpose(0, 1)
-        )
-        prior_input = (bins_vec.T.contiguous(), context_codes.contiguous())
-        attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
-        for attempt_index in range(c_cfg.prior_train_repeats + 2):
-            if len(attempts) == c_cfg.prior_train_repeats:
-                break
-            candidate = new_rnn_model(
-                c_cfg.num_planes,
-                c_cfg.bins_per_plane,
-                side_info.shape[1],
-                c_cfg.marginal_loss,
-                c_cfg.hidden_dim,
-                c_cfg.layers,
-                c_cfg.shared_heads,
-            )
-            prior_heads = (
-                candidate.conditionalPriors
-                if not candidate.shared_priors else (candidate.conditionalPrior,))
-            candidate.requires_grad_(False)
-            prior_params = tuple(candidate.conditionalRNN.parameters()) + tuple(
-                parameter for head in prior_heads for parameter in head.parameters())
-            for parameter in prior_params:
-                parameter.requires_grad_(True)
-            loss = wz_model_training_loop(
-                PriorCalculator.prior_loss, candidate, iter(prior_params),
-                prior_input, side_info, c_cfg, batch_size,
-                label=f"Prior attempt {attempt_index + 1}",)
-            candidate.requires_grad_(True)
-            if np.isfinite(loss):
-                attempts.append((candidate, loss))
+        if c_cfg.cache_dir is None:
+            return _train_prior_model(bins_vec, soft_codes, side_info, c_cfg, batch_size)
 
-        assert len(attempts) == c_cfg.prior_train_repeats, "Too many failed prior-retraining attempts."
-        return min(attempts, key=lambda attempt: attempt[1])[0]
+        from .wz_quantizer import new_rnn_model
+
+        state_dict = cache_call(
+            _train_prior_parameters,
+            c_cfg.cache_dir / "priors",
+            model_training_hash,
+            c_cfg.cache_overwrite,
+            bins_vec=bins_vec,
+            soft_codes=soft_codes,
+            side_info=side_info,
+            c_cfg=c_cfg,
+            batch_size=batch_size,
+        )
+        # Recreate the configured architecture so the cache stores parameters,
+        # rather than a mutable model instance tied to an earlier replay.
+        model = new_rnn_model(
+            c_cfg.num_planes,
+            c_cfg.bins_per_plane,
+            side_info.shape[1],
+            c_cfg.marginal_loss,
+            c_cfg.hidden_dim,
+            c_cfg.layers,
+            c_cfg.shared_heads,
+        )
+        model.load_state_dict(state_dict)
+        return model
+
+
+def _train_prior_model(
+    bins_vec: torch.Tensor,
+    soft_codes: torch.Tensor,
+    side_info: torch.Tensor,
+    c_cfg: WZcfgQuant,
+    batch_size: int,
+) -> EncoderDecoderLayeredRNN:
+    from .wz_quantizer import new_rnn_model, wz_model_training_loop
+
+    context_codes = (
+        F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
+        if c_cfg.prior_context == "hard" else soft_codes.transpose(0, 1)
+    )
+    prior_input = (bins_vec.T.contiguous(), context_codes.contiguous())
+    attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
+    for attempt_index in range(c_cfg.prior_train_repeats + 2):
+        if len(attempts) == c_cfg.prior_train_repeats:
+            break
+        candidate = new_rnn_model(
+            c_cfg.num_planes,
+            c_cfg.bins_per_plane,
+            side_info.shape[1],
+            c_cfg.marginal_loss,
+            c_cfg.hidden_dim,
+            c_cfg.layers,
+            c_cfg.shared_heads,
+        )
+        prior_heads = (
+            candidate.conditionalPriors
+            if not candidate.shared_priors else (candidate.conditionalPrior,))
+        candidate.requires_grad_(False)
+        prior_params = tuple(candidate.conditionalRNN.parameters()) + tuple(
+            parameter for head in prior_heads for parameter in head.parameters())
+        for parameter in prior_params:
+            parameter.requires_grad_(True)
+        loss = wz_model_training_loop(
+            PriorCalculator.prior_loss, candidate, iter(prior_params),
+            prior_input, side_info, c_cfg, batch_size,
+            label=f"Prior attempt {attempt_index + 1}",)
+        candidate.requires_grad_(True)
+        if np.isfinite(loss):
+            attempts.append((candidate, loss))
+
+    assert len(attempts) == c_cfg.prior_train_repeats, "Too many failed prior-retraining attempts."
+    return min(attempts, key=lambda attempt: attempt[1])[0]
+
+
+def _train_prior_parameters(
+    bins_vec: torch.Tensor,
+    soft_codes: torch.Tensor,
+    side_info: torch.Tensor,
+    c_cfg: WZcfgQuant,
+    batch_size: int,
+) -> dict[str, torch.Tensor]:
+    return _train_prior_model(
+        bins_vec, soft_codes, side_info, c_cfg, batch_size
+    ).state_dict()
 
 
 class DedupedPriorCalculator(PriorCalculator): # dont use / buggy

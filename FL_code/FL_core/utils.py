@@ -345,6 +345,8 @@ class StateDictManager:
 
 def _prepare_records_dir(cfg: FLConfig) -> None:
     """Create the numbered run directory and save configuration snapshots."""
+    from .codec import create_protocol
+
     run_name = cfg.run_name if cfg.run_name is not None else cfg.protocol
 
     records_root = Path(cfg.records_dir)
@@ -359,6 +361,8 @@ def _prepare_records_dir(cfg: FLConfig) -> None:
     cfg.records_dir = run_dir
 
     write_fl_config_snapshot(cfg, run_dir)
+    with (run_dir / "protocol_config.json").open("w") as config_file:
+        json.dump(create_protocol(cfg.protocol).config_snapshot(), config_file, indent=2)
 
 
 def write_fl_config_snapshot(cfg: FLConfig, save_dir: Path) -> None:
@@ -366,62 +370,6 @@ def write_fl_config_snapshot(cfg: FLConfig, save_dir: Path) -> None:
     save_dir.mkdir(exist_ok=True, parents=True)
     with (save_dir / "fl_config.json").open("w") as f:
         json.dump(cfg.model_dump(mode="json"), f, indent=2)
-
-
-def assert_debug_fl_config_matches(cfg: FLConfig, save_dir: Path) -> None:
-    """Assert that saved debug data was produced with the same non-protocol FL configuration."""
-    config_path = save_dir / "fl_config.json"
-    with config_path.open() as f:
-        saved_config = json.load(f)
-
-    saved_num_clients = saved_config["num_clients"]
-    assert cfg.num_clients <= saved_num_clients, (
-        f"Debug data in {save_dir} contains {saved_num_clients} clients, "
-        f"but {cfg.num_clients} were requested."
-    )
-
-    # Fields that cannot affect the saved training data, so replays may differ in them.
-    ignored_fields = {
-        "protocol",
-        "codec",
-        "run_name",
-        "rounds",
-        "records_dir",
-        "master_port",
-        "master_addr",
-        "num_loader_workers",
-        "training_progress_bar",
-        "debug_save_train_data",
-        "debug_load_from_saved_data",
-        "debug_data_folder",
-        "debug_save_deltas",
-        "debug_save_recons",
-        "debug_save_recons_rounds",
-        "num_clients",
-        "dataset_fraction",
-    }
-    unknown_fields = ignored_fields - (type(cfg).model_fields.keys() | {"codec"})
-    assert not unknown_fields, f"Unknown debug config ignored field(s): {tuple(sorted(unknown_fields))}."
-
-    saved_config = {field: value for field, value in saved_config.items() if field not in ignored_fields}
-    current_config = cfg.model_dump(mode="json", exclude=ignored_fields)
-
-    assert saved_config == current_config, (
-        f"Debug data in {save_dir} was saved with a different FLConfig: "
-        f"{_format_config_mismatch(saved_config, current_config)}"
-    )
-
-
-def _format_config_mismatch(saved_config: dict[str, Any], current_config: dict[str, Any]) -> str:
-    differing_fields = sorted(
-        field
-        for field in saved_config.keys() | current_config.keys()
-        if saved_config.get(field) != current_config.get(field)
-    )
-    return "; ".join(
-        f"{field}: saved={saved_config.get(field)!r}, current={current_config.get(field)!r}"
-        for field in differing_fields
-    )
 
 
 def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Tensor, cfg: FLConfig) -> None:
