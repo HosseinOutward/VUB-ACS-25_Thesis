@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import torch
 
@@ -12,6 +12,7 @@ from FL_code.FL_core.codec import (
     BaseProtocol,
     BaseRoundCodec,
     CompressionRecord,
+    HistoryEntry,
     ReconstructionHistory,
     record_reconstruction_metrics,
 )
@@ -29,7 +30,6 @@ def _compressed_size(obj: Any) -> float:
 class CancerRecord(CompressionRecord):
     """Compression record for one NewCancer client-round."""
 
-    phase: str | None = None
     bins_per_plane: int | None = None
     num_planes: int | None = None
     prior_rate: float | None = None
@@ -56,13 +56,16 @@ class _WZRoundCodec(BaseRoundCodec):
 
     c_cfg: WZcfgQuant
     _original_delta_vec: torch.Tensor | None = None
+    _prior_side_information: list[torch.Tensor] | None = None
     quantizer_class: type[WZQuantizerCancer] = WZQuantizerCancer
 
     def create_r_record(self, round_id: int, client_id: int) -> CancerRecord:
         raw_record = super().create_r_record(round_id, client_id)
         assert isinstance(raw_record, CancerRecord)
-        raw_record.bins_per_plane = self.c_cfg.bins_per_plane
-        raw_record.num_planes = self.c_cfg.num_planes
+        raw_record.update_record_fields(
+            bins_per_plane=self.c_cfg.bins_per_plane,
+            num_planes=self.c_cfg.num_planes,
+        )
         return raw_record
 
     def options_to_config(self, bins_per_plane: int, num_planes: int, sd_slices: Sequence[slice] | None) -> None:
@@ -81,6 +84,16 @@ class _WZRoundCodec(BaseRoundCodec):
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
         raise NotImplementedError("Subclasses must return the quantizer training data.")
+
+    def set_retrained_prior_si(
+        self, history: ReconstructionHistory, client_id: int
+    ) -> None:
+        """Store server-visible side information for conditional prior estimation."""
+        self._prior_side_information = [
+            entry.tensor
+            for client_history in history.view(Access.SERVER_ONLY, client_id).values()
+            for entry in client_history
+        ]
 
     def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
         assert x is not None and si is not None
@@ -114,20 +127,35 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> None:
         """Compute and store cumulative and per-stage prior rates in the record."""
         assert soft_codes is not None, "Prior retraining needs the encoder's soft codes; estimator quantizers do not produce them."
-        side_info = self.quantizer.side_info_tensor(metadata)
+        prior_cfg = self.c_cfg.model_copy(update={"marginal_loss": False})
+        prior_side_information = (
+            self.quantizer.side_info_list_used
+            if self._prior_side_information is None
+            else self._prior_side_information
+        )
+        assert prior_side_information is not None
+        side_info = self.quantizer.format_side_info_tensor(
+            metadata, prior_side_information)
         prior_model = PriorCalculator.make_trained_prior_model(
-            bins.long(), soft_codes, side_info, self.c_cfg)
-        prior_tensor = PriorCalculator.compute_prior_from_network(prior_model, bins, side_info)
+            bins.long(), soft_codes, side_info, prior_cfg)
+        prior_tensor = PriorCalculator.compute_prior_from_network(
+            prior_model, bins, side_info)
         prior_stage_rates = PriorCalculator.compute_plane_rates(prior_tensor, bins, self.c_cfg.num_planes)
 
-        record.prior_stage_rates = list(prior_stage_rates)
-        record.prior_rate = sum(prior_stage_rates)
-        record.training_prior_stage_rates = list(self.quantizer.training_prior_rates)
-        record.training_prior_rate = self.quantizer.training_prior_rate
         marginal_prior = PriorCalculator.compute_marginal_prior(bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
         marginal_stage_rates = PriorCalculator.compute_plane_rates(marginal_prior, bins, self.c_cfg.num_planes)
-        record.marginal_stage_rates = list(marginal_stage_rates)
-        record.marginal_rate = sum(marginal_stage_rates)
+        record.update_record_fields(
+            prior_stage_rates=list(prior_stage_rates),
+            prior_rate=sum(prior_stage_rates),
+            marginal_stage_rates=list(marginal_stage_rates),
+            marginal_rate=sum(marginal_stage_rates),
+        )
+        assert self.quantizer.training_prior_stage_rates is not None
+        assert self.quantizer.training_prior_rate is not None
+        record.update_record_fields(
+            training_prior_stage_rates=list(self.quantizer.training_prior_stage_rates),
+            training_prior_rate=self.quantizer.training_prior_rate,
+        )
 
     def add_stage_distortion_to_record(self, stage_reconstructions: torch.Tensor, record: CancerRecord) -> None:
         """Store distortion metrics for every decoder refinement stage when the source vector is available."""
@@ -150,16 +178,19 @@ class _WZRoundCodec(BaseRoundCodec):
         return compress_data_list(payload)
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
-        # S round does NOT use this decode method, it overrides it with its own.
+        # Codecs overriding this methid: S
         payload_dict = decompress_data_list(payload)
-        stage_reconstructions = self.quantizer.decoding_stages_process(payload_dict["payload_content"])
+        stage_reconstructions = self.quantizer.decoding_stages_process(
+            payload_dict["payload_content"])
         self.add_stage_distortion_to_record(stage_reconstructions, record)
         return stage_reconstructions[-1]
 
 
 class F_RoundCodec(_WZRoundCodec):
+    """Reuse a frozen quantizer, optionally advancing every inference-SI round slot."""
+
     round_name: ClassVar[str] = "F"
-    can_decode_where:Access
+    can_decode_where: Access
 
     def __init__(
         self,
@@ -167,17 +198,28 @@ class F_RoundCodec(_WZRoundCodec):
         round_name_full: str,
         f_quant: WZQuantizerCancer,
         h_access: Access,
+        side_information: list[torch.Tensor] | None = None,
     ) -> None:
         self.can_decode_where = h_access
         super().__init__(cfg_options, round_name_full)
         assert not cfg_options
         self.c_cfg = f_quant.c_cfg
         self.quantizer = f_quant
+        if side_information is not None:
+            assert not f_quant.no_side_info, (
+                "A no-SI frozen quantizer cannot refresh side information.")
+            assert len(side_information) == f_quant.side_info_size
+            assert f_quant.vector_size is not None
+            assert all(value.numel() == f_quant.vector_size for value in side_information)
+            self.quantizer = copy(f_quant)
+            self.quantizer.side_info_list_used = list(side_information)
 
     def build_quantizer(self, x: torch.Tensor | None, si: list[torch.Tensor] | None) -> WZQuantizerCancer:
         raise NotImplementedError("F_RoundCodec does not support building a new quantizer. Use the frozen quantizer instead.")
 
+
 class P_RoundCodec(_WZRoundCodec):
+    """Load a pretrained marginal quantizer (for the first round)."""
     round_name: ClassVar[str] = "P"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
@@ -195,6 +237,7 @@ class P_RoundCodec(_WZRoundCodec):
 
 
 class R_RoundCodec(_WZRoundCodec):
+    """Train a quantizer on the existing server reconstructions, with training target being the most recent recon, and excluding it from the side information."""
     round_name: ClassVar[str] = "R"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
 
@@ -361,6 +404,7 @@ class S_RoundCodec(_WZRoundCodec):
 
 
 class T_RoundCodec(_WZRoundCodec):
+    """Train on client side only recons as SI, and current raw delta as target, then send the quantizer to the server for F rounds."""
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
@@ -390,6 +434,7 @@ class T_RoundCodec(_WZRoundCodec):
         return payload
     
 class Oracle_RoundCodec(T_RoundCodec):
+    """it has magical access to the current raw delta as target while still having access to the server reconstructions as side information. for study purposes only."""
     round_name: ClassVar[str] = "O"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
 
@@ -409,6 +454,8 @@ class _WZProtocol(BaseProtocol):
     protocol_name: ClassVar[str]
 
     last_frozen_state: dict[int, dict[str, Any]]
+    refresh_frozen_si: bool = True
+    retrained_prior_uses_server_si: bool = True
 
     def __init__(
         self,
@@ -419,22 +466,53 @@ class _WZProtocol(BaseProtocol):
         super().__init__(options, protocol_name_full, sd_slices)
         self.last_frozen_state = {}
 
+    def _shifted_side_informations(
+        self,
+        frozen_state: Mapping[str, Any],
+        client_id: int,
+    ) -> list[torch.Tensor]:
+        """Return the current history window in the frozen quantizer's SI slot order."""
+        side_information = [
+            entry.tensor
+            for client_history in self._recons_history.view(
+                frozen_state["h_access"], client_id
+            ).values()
+            for entry in client_history
+        ]
+        assert len(side_information) == frozen_state["f_quant"].side_info_size, (
+            "Refreshed side information no longer matches the frozen quantizer.")
+        return side_information
+
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
         if not issubclass(rc_class, _WZRoundCodec):
             return rc_class(parsed.options, round_name_full)
-        
+
         if rc_class is F_RoundCodec:
             frozen_state = self.last_frozen_state.get(client_id)
             assert frozen_state is not None, f"No frozen quantizer state exists yet for client {client_id}."
-            return F_RoundCodec(None, round_name_full, **frozen_state,)
+            side_information = None
+            if self.refresh_frozen_si:
+                side_information = self._shifted_side_informations(frozen_state, client_id)
+
+            codec = F_RoundCodec(
+                None,
+                round_name_full,
+                frozen_state["f_quant"],
+                frozen_state["h_access"],
+                side_information,
+            )
+            if self.retrained_prior_uses_server_si:
+                codec.set_retrained_prior_si(self._recons_history, client_id)
+            return codec
 
         assert isinstance(parsed.options, dict)
-        parsed.options['sd_slices'] = self.sd_slices
-        codec = rc_class(parsed.options, round_name_full)
+        codec = rc_class(parsed.options | {"sd_slices": self.sd_slices}, round_name_full)
         assert isinstance(codec, _WZRoundCodec)
 
         t_x, t_si = codec.get_training_data(self._recons_history, client_id)
+        if self.retrained_prior_uses_server_si:
+            codec.set_retrained_prior_si(self._recons_history, client_id)
         quantizer = codec.build_quantizer(t_x, t_si)
 
         self.last_frozen_state[client_id] = {
@@ -445,16 +523,16 @@ class _WZProtocol(BaseProtocol):
 
 
 class WZCancerProtocol(_WZProtocol):
-    """WZ cancer replay schedule using identity warmup, temporal rounds, then frozen temporal reuse."""
+    """WZ cancer schedule using identity warmup, training rounds, then frozen models with refreshed SI."""
 
     warmup_round_codecs: tuple[str, ...] = (
         "I",
         "I",
-        f"T|bins_per_plane=8|num_planes=3",
-        f"T|bins_per_plane=4|num_planes=3",
+        f"O|bins_per_plane=8|num_planes=3",
+        f"O|bins_per_plane=4|num_planes=3",
     )
     routine_round_codecs: tuple[str, ...] = (
-        f"T|bins_per_plane=3|num_planes=3",
+        f"O|bins_per_plane=3|num_planes=3",
         "F",
         "F",
         "F",
@@ -462,11 +540,22 @@ class WZCancerProtocol(_WZProtocol):
     )
     protocol_name: ClassVar[str] = "wz_cancer"
 
-    def options_to_config(self, replace_T_with: str | None = None) -> None:
-        if replace_T_with is not None:
+    def options_to_config(
+        self,
+        replace_O_with: str | None = None,
+        refresh_frozen_si: bool = True,
+        retrained_prior_uses_server_si: bool = True,
+    ) -> None:
+        """Configure prior SI overrides and optionally replace every scheduled Oracle round."""
+        assert isinstance(refresh_frozen_si, bool), "refresh_frozen_si must be boolean."
+        assert isinstance(retrained_prior_uses_server_si, bool), (
+            "retrained_prior_uses_server_si must be boolean.")
+        self.refresh_frozen_si = refresh_frozen_si
+        self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
+        if replace_O_with is not None:
             self.warmup_round_codecs = tuple(
-                rc.replace("T|", f"{replace_T_with}|")
-                if rc.startswith("T|") else rc for rc in self.warmup_round_codecs)
+                rc.replace("O|", f"{replace_O_with}|")
+                if rc.startswith("O|") else rc for rc in self.warmup_round_codecs)
             self.routine_round_codecs = tuple(
-                rc.replace("T|", f"{replace_T_with}|")
-                if rc.startswith("T|") else rc for rc in self.routine_round_codecs)
+                rc.replace("O|", f"{replace_O_with}|")
+                if rc.startswith("O|") else rc for rc in self.routine_round_codecs)

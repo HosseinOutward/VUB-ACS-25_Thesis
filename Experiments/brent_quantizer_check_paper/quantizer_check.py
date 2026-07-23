@@ -1,4 +1,4 @@
-"""Validate learned WZ quantizer models on synthetic Gaussian side information."""
+"""Validate learned WZ quantizer models on synthetic Gaussian side information, as done in the original paper to see if it is at least as good."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 import numpy as np
 import torch
-import torch.nn.functional as F
 
-from FL_code.FL_core.codec import record_reconstruction_metrics
-from FL_code.FL_core.utils import set_global_seed
+from FL_code.FL_core.codec import Access, record_reconstruction_metrics
+from FL_code.FL_core.utils import decompress_data_list, set_global_seed
+from FL_code.cancer_protocol.cancer_protocol import F_RoundCodec
 from FL_code.cancer_protocol.prior_code import PriorCalculator
 from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant, WZQuantizerCancer
 
@@ -119,34 +119,32 @@ def run_single_experiment(
     training_quantizer = config.quantizer_class(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])
 
-    quantizer = config.quantizer_class(quantizer_config, si_size=1)
-    quantizer.coding_model = training_quantizer.coding_model
-    bins, soft_codes, metadata = quantizer.encoding_process(inference_target)
-    if soft_codes is None:
-        soft_codes = F.one_hot(bins.long(), num_classes=config.bins_per_plane).float()
-    quantizer.set_side_information([inference_side_information])
-    formatted_side_information = quantizer.side_info_tensor(metadata)
-
+    round_codec = F_RoundCodec(
+        None,
+        "F",
+        training_quantizer,
+        Access.SERVER_ONLY,
+        [inference_side_information],
+    )
+    record = round_codec.create_r_record(trial_idx, 0)
+    payload = round_codec.encode(inference_target, record)
+    payload_content = decompress_data_list(payload)["payload_content"]
+    bins, metadata = payload_content
+    formatted_side_information = round_codec.quantizer.side_info_tensor(metadata)
     inference_prior = PriorCalculator.compute_prior_from_network(
-        quantizer.coding_model, bins, formatted_side_information
-    )
-    prior_model = PriorCalculator.make_trained_prior_model(
-        bins.long(), soft_codes, formatted_side_information, quantizer_config
-    )
-    retrained_prior = PriorCalculator.compute_prior_from_network(
-        prior_model, bins, formatted_side_information
-    )
-    marginal_prior = PriorCalculator.compute_marginal_prior(
-        bins, config.bins_per_plane, config.num_planes
-    )
-    reconstructions = quantizer.decoding_stages_process((bins, metadata))
+        round_codec.quantizer.coding_model, bins, formatted_side_information)
+    reconstructions = round_codec.quantizer.decoding_stages_process(payload_content)
+    decoded = round_codec.decode(payload, record)
+    torch.testing.assert_close(decoded, reconstructions[-1], rtol=0, atol=0)
+
     inference_rates = PriorCalculator.compute_plane_rates(inference_prior, bins, config.num_planes)
-    retrained_rates = PriorCalculator.compute_plane_rates(retrained_prior, bins, config.num_planes)
-    marginal_rates = PriorCalculator.compute_plane_rates(marginal_prior, bins, config.num_planes)
+    assert record.prior_stage_rates is not None
+    assert record.marginal_stage_rates is not None
 
     results: list[dict[str, Any]] = []
     for stage in range(config.num_planes):
-        training_rate = sum(training_quantizer.training_prior_rates[:stage + 1])
+        assert training_quantizer.training_prior_stage_rates
+        training_rate = sum(training_quantizer.training_prior_stage_rates[:stage + 1])
         inference_rate = sum(inference_rates[:stage + 1])
         reconstruction_metrics = record_reconstruction_metrics(inference_target, reconstructions[stage])
         results.append({
@@ -161,8 +159,8 @@ def run_single_experiment(
             "marginal_loss": quantizer_config.marginal_loss,
             "training_prior_rate": training_rate,
             "inference_prior_rate": inference_rate,
-            "prior_rate": sum(retrained_rates[:stage + 1]),
-            "marginal_rate": sum(marginal_rates[:stage + 1]),
+            "prior_rate": sum(record.prior_stage_rates[:stage + 1]),
+            "marginal_rate": sum(record.marginal_stage_rates[:stage + 1]),
             **reconstruction_metrics,
             "inference_wz_gap_db": 10 * np.log10(
                 reconstruction_metrics["mse"] / (NOISE_POWER * 2 ** (-2 * inference_rate))
