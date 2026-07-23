@@ -6,27 +6,23 @@ from enum import StrEnum
 import json
 from pathlib import Path
 import sys
-from unittest.mock import patch
 import warnings
 
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from FL_code.FL_core.codec import (
     Access,
     BaseProtocol,
     CompressionRecord,
+    DEFAULT_PROTOCOL_CACHE_DIR,
     create_protocol,
     simulate_compression,
 )
 from FL_code.FL_core.models import initialize_model
 from FL_code.FL_core.utils import StateDictManager, _prepare_records_dir, set_global_seed
-from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
-from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.brent_wz_models import EncoderDecoderLayeredRNN
-from FL_code.cancer_protocol.wz_quantizer import WZQuantizerCancer, WZcfgQuant, new_rnn_model
 from FL_code.run_fl import FLConfig
 
 
@@ -66,17 +62,16 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="After each simulated decode, replace the committed reconstruction history with the raw delta.",
     )
-    model_group = parser.add_mutually_exclusive_group()
-    model_group.add_argument(
-        "--save-models",
-        action="store_true",
-        help="Save each client-round quantizer and retrained prior under the generated records directory.",
-    )
-    model_group.add_argument(
-        "--load-models",
+    parser.add_argument(
+        "--protocol-cache-dir",
         type=Path,
-        metavar="RECORDS_DIR",
-        help="Load saved models from a prior replay records directory instead of training them.",
+        default=PROJECT_ROOT / DEFAULT_PROTOCOL_CACHE_DIR,
+        help="Reusable learned-model cache independent of FL update caches and replay round selection.",
+    )
+    parser.add_argument(
+        "--protocol-cache-overwrite",
+        action="store_true",
+        help="Retrain and replace compatible entries in --protocol-cache-dir.",
     )
     parser.add_argument("--seed", type=int, default=43)
     return parser.parse_args()
@@ -102,14 +97,14 @@ def _load_replay_config(
 ) -> FLConfig:
     """Load the cached FL setup and set replay-only protocol and records fields."""
     assert config_path.is_file(), f"Missing replay FL configuration: {config_path}."
-    cached_cfg = FLConfig.model_validate_json(config_path.read_text())
-    return FLConfig(
-        **(cached_cfg.model_dump() | {
+    cached_options = json.loads(config_path.read_text())
+    return FLConfig.model_validate(
+        cached_options | {
             "protocol": protocol,
             "run_name": name,
             "records_dir": records_root,
             "seed": seed,
-        })
+        }
     )
 
 
@@ -171,116 +166,6 @@ def replace_latest_reconstruction(
     )
 
 
-def simulate_with_models(
-    protocol: _WZProtocol,
-    delta: torch.Tensor,
-    client_id: int,
-    round_id: int,
-    state_manager: StateDictManager,
-    output_dir: Path,
-    checkpoint_path: Path | None,
-    load_models: bool,
-) -> None:
-    """Simulate one replay step while optionally saving or loading its learned models."""
-    if checkpoint_path is None:
-        simulate_compression(
-            protocol, delta, client_id, round_id, state_manager, output_dir, {}, (), ()
-        )
-        return
-
-    checkpoint = (
-        torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        if load_models else None
-    )
-    if load_models:
-        assert isinstance(checkpoint, dict), f"Invalid model checkpoint: {checkpoint_path}."
-
-    original_train_model = WZQuantizerCancer.train_model
-    original_train_prior = PriorCalculator.make_trained_prior_model
-    prior_model: EncoderDecoderLayeredRNN | None = None
-    prior_side_info_size: int | None = None
-
-    def train_or_load_quantizer(
-        quantizer: WZQuantizerCancer,
-        x_raw: torch.Tensor,
-        side_information: list[torch.Tensor] | None,
-    ) -> None:
-        if checkpoint is None:
-            original_train_model(quantizer, x_raw, side_information)
-            return
-        assert checkpoint["quantizer_side_info_size"] == quantizer.side_info_size, (
-            f"Quantizer side-information size mismatch in {checkpoint_path}."
-        )
-        if quantizer.no_side_info:
-            assert not side_information
-            quantizer.side_info_list_used = []
-        else:
-            assert side_information
-            quantizer.set_side_information(side_information)
-        quantizer.vector_size = x_raw.numel()
-        assert checkpoint["vector_size"] == quantizer.vector_size, (
-            f"Quantizer vector size mismatch in {checkpoint_path}."
-        )
-        quantizer.coding_model.load_state_dict(checkpoint["quantizer_model"])
-        quantizer.training_prior_stage_rates = tuple(checkpoint["training_prior_stage_rates"])
-        quantizer.training_prior_rate = float(checkpoint["training_prior_rate"])
-
-    def train_or_load_prior(
-        bins: torch.Tensor,
-        soft_codes: torch.Tensor,
-        side_information: torch.Tensor,
-        c_cfg: WZcfgQuant,
-        batch_size: int = 50_000,
-    ) -> EncoderDecoderLayeredRNN:
-        nonlocal prior_model, prior_side_info_size
-        prior_side_info_size = side_information.shape[1]
-        if checkpoint is None:
-            prior_model = original_train_prior(bins, soft_codes, side_information, c_cfg, batch_size)
-            return prior_model
-        assert checkpoint["prior_side_info_size"] == side_information.shape[1], (
-            f"Prior side-information size mismatch in {checkpoint_path}."
-        )
-        prior_model = new_rnn_model(
-            c_cfg.num_planes,
-            c_cfg.bins_per_plane,
-            side_information.shape[1],
-            c_cfg.marginal_loss,
-            c_cfg.hidden_dim,
-            c_cfg.layers,
-            c_cfg.shared_heads,
-        )
-        prior_model.load_state_dict(checkpoint["prior_model"])
-        return prior_model
-
-    with (
-        patch.object(WZQuantizerCancer, "train_model", train_or_load_quantizer),
-        patch.object(PriorCalculator, "make_trained_prior_model", train_or_load_prior),
-    ):
-        simulate_compression(
-            protocol, delta, client_id, round_id, state_manager, output_dir, {}, (), ()
-        )
-
-    if checkpoint is None:
-        quantizer = protocol.last_frozen_state[client_id]["f_quant"]
-        assert (
-            isinstance(quantizer, WZQuantizerCancer)
-            and prior_model is not None
-            and prior_side_info_size is not None
-        )
-        torch.save(
-            {
-                "quantizer_model": quantizer.coding_model.state_dict(),
-                "quantizer_side_info_size": quantizer.side_info_size,
-                "training_prior_stage_rates": quantizer.training_prior_stage_rates,
-                "training_prior_rate": quantizer.training_prior_rate,
-                "vector_size": quantizer.vector_size,
-                "prior_model": prior_model.state_dict(),
-                "prior_side_info_size": prior_side_info_size,
-            },
-            checkpoint_path,
-        )
-
-
 def main() -> None:
     """Replay cached client-round deltas through one protocol and save compression records."""
     args = _parse_args()
@@ -313,31 +198,16 @@ def main() -> None:
         args.records_root,
         args.seed,
     )
+    cfg.protocol_cache_dir = args.protocol_cache_dir
+    cfg.protocol_cache_overwrite = args.protocol_cache_overwrite
     clients = args.clients if args.clients is not None else cfg.num_clients
     assert clients > 0, "clients must be positive."
-    model_config = cfg.model_dump(mode="json", exclude={"records_dir", "run_name"}) | {
-        "clients": clients,
-        "history_source": args.history_source.value,
-        "replace_commits_with_raw": args.replace_commits_with_raw,
-    }
-    load_models_dir = args.load_models / "models" if args.load_models else None
-    if load_models_dir is not None:
-        config_path = load_models_dir / "config.json"
-        assert config_path.is_file(), f"Missing saved model configuration: {config_path}."
-        saved_model_config = json.loads(config_path.read_text())
-        differing_fields = sorted(
-            field for field in saved_model_config.keys() | model_config.keys()
-            if saved_model_config.get(field) != model_config.get(field)
-        )
-        assert not differing_fields, (
-            f"Saved models in {load_models_dir} have an incompatible configuration; "
-            f"different fields: {', '.join(differing_fields)}."
-        )
-
     state_manager = _build_state_manager(cfg)
-    protocol = create_protocol(args.protocol, state_manager.get_slices())
-    assert isinstance(protocol, _WZProtocol) or not (args.save_models or args.load_models), (
-        "Model save/load is only supported for learned WZ protocols."
+    protocol = create_protocol(
+        args.protocol,
+        state_manager.get_slices(),
+        cache_dir=cfg.protocol_cache_dir,
+        cache_overwrite=cfg.protocol_cache_overwrite,
     )
     client_ids = range(clients)
     seed_history(
@@ -351,11 +221,6 @@ def main() -> None:
 
     _prepare_records_dir(cfg)
     output_dir = cfg.records_dir
-    models_dir = load_models_dir
-    if args.save_models:
-        models_dir = output_dir / "models"
-        models_dir.mkdir()
-        (models_dir / "config.json").write_text(json.dumps(model_config, indent=2))
 
     for round_id in range(args.start_round, args.end_round + 1):
         for client_id in client_ids:
@@ -365,23 +230,8 @@ def main() -> None:
                 f"the configured model has {state_manager.param_count}."
             )
             print(f"Simulating round {round_id}, client {client_id} with {args.protocol}")
-            checkpoint_path = (
-                models_dir / f"round_{round_id}_client_{client_id}.pt"
-                if models_dir is not None else None
-            )
-            if args.load_models:
-                assert checkpoint_path is not None and checkpoint_path.is_file(), (
-                    f"Missing model checkpoint: {checkpoint_path}."
-                )
-            simulate_with_models(
-                protocol,
-                delta,
-                client_id,
-                round_id,
-                state_manager,
-                output_dir,
-                checkpoint_path,
-                args.load_models is not None,
+            simulate_compression(
+                protocol, delta, client_id, round_id, state_manager, output_dir, {}, (), ()
             )
             if args.replace_commits_with_raw:
                 replace_latest_reconstruction(protocol, delta, round_id, client_id)

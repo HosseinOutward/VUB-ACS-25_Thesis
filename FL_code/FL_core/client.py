@@ -1,11 +1,45 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 import torch.distributed as dist
+from torch.utils.data import DataLoader
 
 from FL_code.run_fl import FLConfig
+from .cache import cache_call, client_update_hash
+from .models import FLModelTemplate
 from .utils import (
-    EVAL_METRIC_KEYS, set_global_seed, recalibrate_batchnorm, evaluate, setup_fl_worker, format_metrics)
+    EVAL_METRIC_KEYS,
+    StateDictManager,
+    evaluate,
+    format_metrics,
+    recalibrate_batchnorm,
+    set_global_seed,
+    setup_fl_worker,
+)
+
+
+def _train_client_update(
+    model: FLModelTemplate,
+    train_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    sd_manager: StateDictManager,
+    cfg: FLConfig,
+    round_id: int,
+    client_id: int,
+) -> torch.Tensor:
+    """Train one local round and return its flattened update for optional persistence."""
+    pre_train_state = sd_manager.clone_trainable(model.state_dict())
+    for _ in range(cfg.local_epochs):
+        model.train_epoch(train_loader, optimizer, scaler)
+    return sd_manager.flatten(
+        sd_manager.compute_delta(
+            sd_manager.clone_trainable(model.state_dict()),
+            pre_train_state,
+        )
+    ).cpu().contiguous()
 
 
 def run_federated_client(
@@ -29,6 +63,9 @@ def run_federated_client(
 
     optimizer = model.configure_optimizer()
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.mixed_precision)
+    client_update_cache_dir: Path | None = None
+    if cfg.debug_save_train_data or cfg.debug_load_from_saved_data:
+        client_update_cache_dir = cfg.debug_data_folder / cfg.debug_save_deltas
 
     # Reused receive buffers; dist.broadcast overwrites them in place each round.
     round_signal = torch.zeros(1, dtype=torch.long)
@@ -60,19 +97,27 @@ def run_federated_client(
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
-        if not cfg.debug_load_from_saved_data:
-            for _ in range(cfg.local_epochs):
-                model.train_epoch(train_loader, optimizer, scaler)
-        else:
-            assert not cfg.debug_save_train_data
-            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
-            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
-            print(f"[Client {client_id}] Debug mode: Skipping actual training and using pre-trained model state")
-            loaded_state_dict = sd_manager.unflatten(-torch.load(delta_data_path))
-            loaded_state_dict = sd_manager.compute_delta(pre_train_state, loaded_state_dict)
-            sd_manager.load_trainable_state(model, loaded_state_dict)
-            if cfg.recalibrate_bn:
-                recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
+        delta_vec = cache_call(
+            _train_client_update,
+            client_update_cache_dir,
+            client_update_hash,
+            cfg.debug_save_train_data,
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            scaler=scaler,
+            sd_manager=sd_manager,
+            cfg=cfg,
+            round_id=curr_rnd_i,
+            client_id=client_id,
+        )
+
+        # A miss trains `model`, while a hit does not; rebuilding from the returned
+        # update gives both paths the same post-training model state.
+        sd_manager.load_trainable_state(model, pre_train_state)
+        sd_manager.apply_delta_inplace(model, sd_manager.unflatten(delta_vec))
+        if cfg.debug_load_from_saved_data and cfg.recalibrate_bn:
+            recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 
@@ -102,11 +147,5 @@ def run_federated_client(
         dist.send(worker_metrics_vec, dst=0)
 
         print(f"[Client {client_id}] Broadcast complete for round {srvr_rnd}")
-
-        if cfg.debug_save_train_data:
-            print(f"[Client {client_id}] Debug mode: Saving delta vector for round {curr_rnd_i}")
-            delta_data_path = cfg.debug_data_folder / cfg.debug_save_deltas
-            delta_data_path = delta_data_path / f'round_{curr_rnd_i}_client_{client_id}.pt'
-            torch.save(delta_vec, delta_data_path)
 
         curr_rnd_i += 1

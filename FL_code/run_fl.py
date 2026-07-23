@@ -6,14 +6,14 @@ from datetime import timedelta
 from typing import Any
 
 from FL_code.FL_core.dataset import _force_class_coverage
-from FL_code.FL_core.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, assert_debug_fl_config_matches, write_fl_config_snapshot
+from FL_code.FL_core.utils import _assert_class_coverage_before_spawn, _prepare_records_dir, write_fl_config_snapshot
 import torch
 import torch.distributed as dist
 from torch.multiprocessing.spawn import start_processes
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from FL_code.FL_core.codec import parse_and_validate_protocol
+from FL_code.FL_core.codec import DEFAULT_PROTOCOL_CACHE_DIR, parse_and_validate_protocol
 
 
 class FLConfig(BaseModel):
@@ -56,6 +56,9 @@ class FLConfig(BaseModel):
     master_addr: str = "localhost"
     master_port: str = "29500"
 
+    protocol_cache_dir: Path | None = DEFAULT_PROTOCOL_CACHE_DIR
+    protocol_cache_overwrite: bool = False
+
     debug_save_train_data: bool = False
     debug_data_folder: Path = Path("_/data/federated_learning")
     debug_save_deltas: str = "client_deltas"
@@ -88,6 +91,8 @@ class FLConfig(BaseModel):
             self.debug_continue_from_saved_data or self.debug_continue_then_save
         ), ("debug_continue_from_saved_data and debug_continue_then_save were removed because they "
             "change behavior when saved debug files are missing.")
+        assert self.protocol_cache_dir is not None or not self.protocol_cache_overwrite, (
+            "protocol_cache_overwrite requires protocol_cache_dir.")
         assert self.dataset_fraction is None or 0.0 < self.dataset_fraction < 1.0, (
             "dataset_fraction must be None or a value in (0.0, 1.0).")
         assert self.client_eval_every_n_rounds > 0, "client_eval_every_n_rounds must be positive."
@@ -158,8 +163,30 @@ if __name__ == "__main__":
     ap.add_argument("--dataset-fraction", type=float, default=FLConfig.model_fields["dataset_fraction"].default)
     ap.add_argument("--records-dir", type=Path, default=FLConfig.model_fields["records_dir"].default)
     ap.add_argument("--data-folder", type=Path, default=FLConfig.model_fields["data_folder"].default)
-    ap.add_argument("--debug-save-train-data", action="store_true", default=False)
-    ap.add_argument("--debug-load-from-saved-data", action="store_true", default=False)
+    ap.add_argument(
+        "--protocol-cache-dir",
+        type=Path,
+        default=FLConfig.model_fields["protocol_cache_dir"].default,
+        help="Separate Cachier store for learned protocol models.",
+    )
+    ap.add_argument(
+        "--protocol-cache-overwrite",
+        action="store_true",
+        default=False,
+        help="Retrain and replace compatible learned protocol model entries.",
+    )
+    ap.add_argument(
+        "--debug-save-train-data",
+        action="store_true",
+        default=False,
+        help="Train and overwrite compatible FL client-update cache entries.",
+    )
+    ap.add_argument(
+        "--debug-load-from-saved-data",
+        action="store_true",
+        default=False,
+        help="Reuse compatible FL client-update entries and compute any cache misses.",
+    )
     ap.add_argument("--debug-data-folder", type=Path, default=FLConfig.model_fields["debug_data_folder"].default)
     ap.add_argument("--debug-save-deltas", type=str, default=FLConfig.model_fields["debug_save_deltas"].default)
     ap.add_argument("--debug-save-recons", type=str, default=FLConfig.model_fields["debug_save_recons"].default)
@@ -184,6 +211,8 @@ if __name__ == "__main__":
         dataset_fraction=args.dataset_fraction,
         records_dir=args.records_dir,
         data_folder=args.data_folder,
+        protocol_cache_dir=args.protocol_cache_dir,
+        protocol_cache_overwrite=args.protocol_cache_overwrite,
         debug_save_train_data=args.debug_save_train_data,
         debug_load_from_saved_data=args.debug_load_from_saved_data,
         debug_data_folder=args.debug_data_folder,
@@ -218,15 +247,6 @@ if __name__ == "__main__":
         _force_class_coverage(y_train, y_test, cfg)
     _assert_class_coverage_before_spawn(y_train, y_test, cfg)
 
-    debug_delta_dir = cfg.debug_data_folder / cfg.debug_save_deltas
-    if cfg.debug_save_train_data:
-        assert not debug_delta_dir.exists() or not any(debug_delta_dir.iterdir()), (
-            f"debug_save_train_data refuses to write into non-empty {debug_delta_dir}; "
-            f"remove stale saved deltas first."
-        )
-        write_fl_config_snapshot(cfg, debug_delta_dir)
-    if cfg.debug_load_from_saved_data:
-        assert_debug_fl_config_matches(cfg, debug_delta_dir)
     if cfg.debug_save_recons is not None:
         write_fl_config_snapshot(cfg, cfg.debug_data_folder / cfg.debug_save_recons)
 

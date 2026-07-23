@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 from collections.abc import Mapping, Sequence
 from copy import copy, deepcopy
+from pathlib import Path
 from typing import Any, ClassVar
 
 import torch
@@ -68,17 +69,34 @@ class _WZRoundCodec(BaseRoundCodec):
         )
         return raw_record
 
-    def options_to_config(self, bins_per_plane: int, num_planes: int, sd_slices: Sequence[slice] | None) -> None:
-        self.c_cfg = WZcfgQuant(bins_per_plane=bins_per_plane, num_planes=num_planes, norm_slices=sd_slices)
+    def options_to_config(
+        self,
+        bins_per_plane: int,
+        num_planes: int,
+        sd_slices: Sequence[slice] | None,
+        cache_dir: Path | None = None,
+        cache_overwrite: bool = False,
+    ) -> None:
+        self.c_cfg = WZcfgQuant(
+            bins_per_plane=bins_per_plane,
+            num_planes=num_planes,
+            norm_slices=sd_slices,
+            cache_dir=cache_dir,
+            cache_overwrite=cache_overwrite,
+        )
 
     @staticmethod
     def validate_cfg(
         bins_per_plane: int,
         num_planes: int,
         sd_slices: Sequence[slice] | None = None,
+        cache_dir: Path | None = None,
+        cache_overwrite: bool = False,
     ) -> None:
         assert isinstance(bins_per_plane, int) and bins_per_plane > 0
         assert isinstance(num_planes, int) and num_planes > 0
+        assert cache_dir is None or isinstance(cache_dir, Path)
+        assert isinstance(cache_overwrite, bool)
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -376,8 +394,7 @@ class S_RoundCodec(_WZRoundCodec):
             sample_indices.to(self.quantizer.device)
         ]
         retrain_cfg = self.c_cfg.model_copy(update={"train_epochs": self.retrain_epochs})
-        return self.quantizer.train_attempt(
-            self.quantizer.coding_model,
+        return self.quantizer.retrain_model(
             x_sample,
             side_info,
             retrain_cfg,
@@ -462,8 +479,16 @@ class _WZProtocol(BaseProtocol):
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
         sd_slices: Sequence[slice] | None = None,
+        cache_dir: Path | None = None,
+        cache_overwrite: bool = False,
     ) -> None:
-        super().__init__(options, protocol_name_full, sd_slices)
+        super().__init__(
+            options,
+            protocol_name_full,
+            sd_slices,
+            cache_dir,
+            cache_overwrite,
+        )
         self.last_frozen_state = {}
 
     def _shifted_side_informations(
@@ -507,7 +532,14 @@ class _WZProtocol(BaseProtocol):
             return codec
 
         assert isinstance(parsed.options, dict)
-        codec = rc_class(parsed.options | {"sd_slices": self.sd_slices}, round_name_full)
+        codec = rc_class(
+            parsed.options | {
+                "sd_slices": self.sd_slices,
+                "cache_dir": self.cache_dir,
+                "cache_overwrite": self.cache_overwrite,
+            },
+            round_name_full,
+        )
         assert isinstance(codec, _WZRoundCodec)
 
         t_x, t_si = codec.get_training_data(self._recons_history, client_id)
@@ -520,6 +552,26 @@ class _WZProtocol(BaseProtocol):
             'h_access': codec.can_decode_where,
         }
         return codec
+
+    def config_snapshot(self) -> dict[str, Any]:
+        """Return the WZ schedule, quantizer defaults, and protocol-side-information policy."""
+        snapshot = super().config_snapshot()
+        snapshot["quantizer_defaults"] = WZcfgQuant(
+            bins_per_plane=1,
+            num_planes=1,
+        ).model_dump(
+            mode="json",
+            exclude={
+                "bins_per_plane",
+                "num_planes",
+                "norm_slices",
+                "cache_dir",
+                "cache_overwrite",
+            },
+        )
+        snapshot["refresh_frozen_si"] = self.refresh_frozen_si
+        snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
+        return snapshot
 
 
 class WZCancerProtocol(_WZProtocol):

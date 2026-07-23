@@ -11,6 +11,7 @@ import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
 
+from FL_code.FL_core.cache import cache_call, model_training_hash
 from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
@@ -247,6 +248,8 @@ class WZcfgQuant(BaseModel):
     prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
     hidden_dim: int = 100
     layers: int = 3
+    cache_dir: Path | None = None
+    cache_overwrite: bool = False
 
 
 class WZQuantizerCancer:
@@ -363,6 +366,64 @@ class WZQuantizerCancer:
         si_raw_list: Sequence[torch.Tensor] | None
     ) -> None:
         """Train repeated quantizer attempts and keep the finite attempt with the lowest loss."""
+        if self.cache_dir is None:
+            self._train_model_uncached(x_raw, si_raw_list)
+            return
+
+        state_dict, training_prior_stage_rates = cache_call(
+            _train_quantizer_parameters,
+            self.cache_dir / "quantizers",
+            model_training_hash,
+            self.cache_overwrite,
+            quantizer_class=type(self),
+            c_cfg=self.c_cfg,
+            x_raw=x_raw,
+            side_information=tuple(si_raw_list or ()),
+        )
+        # Cache only portable training results; bind the current decoder-available
+        # side information to this fresh quantizer instance.
+        assert self.side_info_list_used is None
+        if self.no_side_info:
+            assert not si_raw_list
+            self.side_info_list_used = []
+        else:
+            assert si_raw_list
+            self.set_side_information(si_raw_list)
+        self.vector_size = x_raw.numel()
+        self.coding_model.load_state_dict(state_dict)
+        self.training_prior_stage_rates = training_prior_stage_rates
+        self.training_prior_rate = sum(training_prior_stage_rates)
+
+    def retrain_model(
+        self,
+        x_prep: torch.Tensor,
+        side_info: torch.Tensor,
+        c_cfg: WZcfgQuant,
+        wmspe_denom: float,
+    ) -> float:
+        """Retrain from the current model and restore the cached final model when available."""
+        state_dict, loss = cache_call(
+            _retrain_quantizer_parameters,
+            None if self.cache_dir is None else self.cache_dir / "quantizers",
+            model_training_hash,
+            self.cache_overwrite,
+            quantizer_class=type(self),
+            c_cfg=c_cfg,
+            initial_state=self.coding_model.state_dict(),
+            x_prep=x_prep,
+            side_info=side_info,
+            wmspe_denom=wmspe_denom,
+        )
+        # The cache boundary is the completed retraining process, not its
+        # optimizer steps or failed attempts.
+        self.coding_model.load_state_dict(state_dict)
+        return loss
+
+    def _train_model_uncached(
+        self,
+        x_raw: torch.Tensor,
+        si_raw_list: Sequence[torch.Tensor] | None,
+    ) -> None:
         assert self.side_info_list_used is None
         if self.no_side_info:
             assert not si_raw_list, "Marginal quantizer training expects no side information."
@@ -395,8 +456,14 @@ class WZQuantizerCancer:
                 break
 
             model = self.coding_model if attempt_index == 0 else new_rnn_model(
-                self.num_planes, self.bins_per_plane, side_info.shape[1], 
-                self.marginal_loss, self.shared_heads, self.hidden_dim, self.layers)
+                num_planes=self.num_planes,
+                bins_per_plane=self.bins_per_plane,
+                side_info_size=side_info.shape[1],
+                marginal=self.marginal_loss,
+                hidden_dim=self.hidden_dim,
+                layers=self.layers,
+                shared_heads=self.shared_heads,
+            )
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
@@ -586,6 +653,46 @@ class WZQuantizerCancer:
             f"Each side-information vector must contain {self.vector_size} values.")
         assert self.side_info_list_used is None, "Side information can only be set once per quantizer instance."
         self.side_info_list_used = list(side_info)
+
+
+def _train_quantizer_parameters(
+    quantizer_class: type[WZQuantizerCancer],
+    c_cfg: WZcfgQuant,
+    x_raw: torch.Tensor,
+    side_information: tuple[torch.Tensor, ...],
+) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
+    quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
+    quantizer._train_model_uncached(x_raw, side_information)
+    assert quantizer.training_prior_stage_rates is not None
+    return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
+
+
+def _retrain_quantizer_parameters(
+    quantizer_class: type[WZQuantizerCancer],
+    c_cfg: WZcfgQuant,
+    initial_state: dict[str, torch.Tensor],
+    x_prep: torch.Tensor,
+    side_info: torch.Tensor,
+    wmspe_denom: float,
+) -> tuple[dict[str, torch.Tensor], float]:
+    """Run sampled retraining and return only its final portable result."""
+    quantizer = quantizer_class(c_cfg=c_cfg, si_size=side_info.shape[1])
+    quantizer.coding_model.load_state_dict(initial_state)
+    perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
+    loss = wz_model_training_loop(
+        quantizer.compute_loss,
+        quantizer.coding_model,
+        quantizer.coding_model.parameters(),
+        (x_prep,),
+        side_info,
+        c_cfg,
+        batch_size=c_cfg.train_batch_size,
+        label="Sample retraining",
+        metrics_fn=quantizer.training_metrics,
+        wmspe_denom=wmspe_denom,
+        perturb_generator=perturb_generator,
+    )
+    return quantizer.coding_model.state_dict(), loss
 
 
 class SampledEncodingStats(NamedTuple):
