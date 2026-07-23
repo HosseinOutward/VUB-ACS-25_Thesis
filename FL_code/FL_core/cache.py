@@ -14,6 +14,33 @@ import torch
 
 T = TypeVar("T")
 
+# This explicit contract prevents new logging or execution fields from silently
+# invalidating every learned-model entry. Add a field only when changing it must
+# select a separately trained model.
+MODEL_TRAINING_CONFIG_FIELDS: frozenset[str] = frozenset({
+    "bins_per_plane",
+    "num_planes",
+    "norm_slices",
+    "outlier_threshold",
+    "marginal_loss",
+    "train_epochs",
+    "reconst_ld",
+    "train_sample_size",
+    "train_batch_size",
+    "lr",
+    "lr_step",
+    "tau",
+    "prior_train_repeats",
+    "fused_optimizer",
+    "mixed_precision",
+    "source_perturbation",
+    "shared_heads",
+    "prior_context",
+    "prior_probabilities",
+    "hidden_dim",
+    "layers",
+})
+
 
 def cache_call(
     function: Callable[..., T],
@@ -85,14 +112,23 @@ def client_update_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 
 def model_training_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
-    """Hash learned-model inputs while excluding cache storage policy."""
+    """Hash inputs that determine the learned model, excluding execution-only settings."""
     assert not args
     c_cfg = kwargs["c_cfg"]
     assert isinstance(c_cfg, BaseModel)
-    # Target, side-information, bins, and soft codes remain in `kwargs` and are
-    # content-hashed. Only where/how the result is stored is irrelevant.
+    assert MODEL_TRAINING_CONFIG_FIELDS <= type(c_cfg).model_fields.keys()
+    # Target, side-information, bins, and soft codes remain content-hashed.
+    # Configuration is opt-in so unrelated future fields reuse existing work.
     hashed_kwargs = kwargs | {
-        "c_cfg": c_cfg.model_dump(exclude={"cache_dir", "cache_overwrite"})
+        "c_cfg": c_cfg.model_dump(include=MODEL_TRAINING_CONFIG_FIELDS) | {
+            # Preserve keys written before the allowlist without letting these
+            # non-semantic historical fields vary the cache identity.
+            "max_side_info_count": 5,
+            "pretrain_pth_dir": Path("FL_code/data/pre_trained_pth"),
+            "training_progress_bar": False,
+            "training_log_every_epochs": None,
+            "tf32": False,
+        }
     }
     return content_hash((), {"cache_version": 1, **hashed_kwargs})
 

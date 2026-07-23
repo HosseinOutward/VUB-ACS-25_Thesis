@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -70,8 +70,11 @@ class PriorCalculator:
         side_info: torch.Tensor,
         epoch: int,
         c_cfg: WZcfgQuant,
+        sample_weights: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute conditional code length for fixed transmitted bins."""
+        from .wz_quantizer import _sample_mean
+
         bins = training_input[0].unbind(dim=1)
         context_codes = training_input[1].unbind(dim=1)
         tau = c_cfg.tau * np.exp(epoch / c_cfg.train_epochs * np.log(0.1 / c_cfg.tau))
@@ -82,7 +85,10 @@ class PriorCalculator:
             force_softmax=c_cfg.prior_probabilities == "categorical",
         )
         stage_mean = torch.stack([
-            -torch.log(prior.gather(1, plane_bins[:, None]) + 1e-12).mean()
+            _sample_mean(
+                -torch.log(prior.gather(1, plane_bins.long()[:, None]).squeeze(1) + 1e-12),
+                sample_weights,
+            )
             for plane_bins, prior in zip(bins, priors, strict=True)
         ]).sum()
         return stage_mean / c_cfg.num_planes
@@ -190,28 +196,27 @@ def _train_prior_parameters(
     ).state_dict()
 
 
-class DedupedPriorCalculator(PriorCalculator): # dont use / buggy
+class DedupedPriorCalculator(PriorCalculator):
     """PriorCalculator that runs the prior network once per unique (bins, side info) row.
 
     Priors are a pure function of each position's bin symbols and side information, so duplicate
-    rows reuse the representative's probabilities; with ``si_match_bits`` at 32 the result stays
+    rows reuse the representative's probabilities; with ``match_bits`` at 32 the result stays
     equal to the full pass, lower values trade exactness for more reuse.
     """
 
-    si_match_bits: ClassVar[int] = 18
-
-    @classmethod
+    @staticmethod
     def compute_prior_from_network(
-        cls,
         model: EncoderDecoderLayeredRNN,
         bins_vec: torch.Tensor,
         side_info: torch.Tensor,
         batch_size: int = 500_000,
     ) -> torch.Tensor:
         """Compute priors for unique (bins, side info) rows and broadcast them back to duplicates."""
-        from .wz_quantizer import unique_row_groups
+        from .wz_quantizer import DedupedWZQuantizerCancer, unique_row_groups
 
-        bins_device, representatives, inverse, collisions = unique_row_groups(bins_vec, side_info, cls.si_match_bits)
+        bins_device, representatives, inverse, collisions = unique_row_groups(
+            bins_vec, side_info, DedupedWZQuantizerCancer.match_bits
+        )
         prior = PriorCalculator.compute_prior_from_network(
             model, bins_device[:, representatives], side_info[representatives], batch_size
         ).to(side_info.device)[:, inverse]

@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 # import numpy as np
 
-from FL_code.cancer_protocol.cancer_quantizer import WZQuantizerCancer
+from FL_code.cancer_protocol.wz_quantizer import DedupedWZQuantizerCancer
 from FL_code.cancer_protocol.prior_calculator import PriorCalculator
 from FL_code.cancer_protocol import CancerConfig
 # from FL_reworked.brent_wz_models import EncoderDecoderLayeredRNN
@@ -158,7 +158,7 @@ class DebugInspector:
         for cid, reconst_list in enumerate(d['srvr_past_reconst']):
             print(f"  Client {cid}: {len(reconst_list)} reconstructions")
 
-    def recreate_quantizer(self) -> WZQuantizerCancer:
+    def recreate_quantizer(self) -> DedupedWZQuantizerCancer:
         """Recreate the quantizer from saved state."""
         d = self.data
         cfg = d['quantizer_config']
@@ -169,7 +169,7 @@ class DebugInspector:
         si_list = d['side_info_list_used']
         si_size = len(si_list) if isinstance(si_list, list) else 0
 
-        quantizer = WZQuantizerCancer(
+        quantizer = DedupedWZQuantizerCancer(
             c_cfg=c_cfg,
             num_planes=cfg['num_planes'],
             bins_per_plane=cfg['bins_per_plane'],

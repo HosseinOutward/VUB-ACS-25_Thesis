@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import itertools
 from pathlib import Path
+import sys
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -15,18 +16,23 @@ from matplotlib.axes import Axes
 import numpy as np
 import torch
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from FL_code.FL_core.codec import Access, record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
 from FL_code.cancer_protocol.cancer_protocol import F_RoundCodec
 from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant, WZQuantizerCancer
+from FL_code.cancer_protocol.wz_quantizer import (
+    DedupedWZQuantizerCancer,
+    WZcfgQuant,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class ExperimentConfig:
     """One quantizer architecture evaluated by this experiment and consumed by its plots."""
 
-    quantizer_class: type[WZQuantizerCancer]
     bins_per_plane: int
     num_planes: int
     reconst_ld: float
@@ -34,10 +40,7 @@ class ExperimentConfig:
     @property
     def key(self) -> str:
         """Return the stable CSV and plotting key for this configuration."""
-        return (
-            f"{self.quantizer_class.__name__}|{self.bins_per_plane}b_"
-            f"{self.num_planes}p_ld{self.reconst_ld:g}"
-        )
+        return f"{self.bins_per_plane}b_{self.num_planes}p_ld{self.reconst_ld:g}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,15 +56,11 @@ class PlotStyle:
 NUM_REPEATS = 2
 DATA_SIZE = 2_000_000
 NOISE_POWER = 0.01
-QUANTIZER_SETTINGS = ( # (bins_per_plane, num_planes, reconst_ld)
+QUANTIZER_SETTINGS = (  # (bins_per_plane, num_planes, reconst_ld)
     (2, 3, 120.0),
     (4, 2, 160.0),
 )
-QUANTIZER_CLASSES = (WZQuantizerCancer,)
-EXPERIMENT_CONFIGS = tuple(
-    ExperimentConfig(quantizer_class, *setting)
-    for quantizer_class, setting in itertools.product(QUANTIZER_CLASSES, QUANTIZER_SETTINGS)
-)
+EXPERIMENT_CONFIGS = tuple(ExperimentConfig(*setting) for setting in QUANTIZER_SETTINGS)
 RATE_TYPES = {
     "training_prior_rate": "Training-data prior rate",
     "inference_prior_rate": "Quantizer prior rate",
@@ -116,7 +115,7 @@ def run_single_experiment(
         tf32=False,
         fused_optimizer=True,
     )
-    training_quantizer = config.quantizer_class(quantizer_config, si_size=1)
+    training_quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])
 
     round_codec = F_RoundCodec(
@@ -148,7 +147,10 @@ def run_single_experiment(
         inference_rate = sum(inference_rates[:stage + 1])
         reconstruction_metrics = record_reconstruction_metrics(inference_target, reconstructions[stage])
         results.append({
-            "config_key": f"{run_label}|{config.key}|stage{stage + 1}",
+            "config_key": (
+                f"{run_label}|{DedupedWZQuantizerCancer.__name__}|"
+                f"{config.key}|stage{stage + 1}"
+            ),
             "trial_number": trial_idx,
             "bins_per_plane": config.bins_per_plane,
             "num_planes": stage + 1,
@@ -181,7 +183,7 @@ def run_experiments(out_path: Path, run_label: str = "shared_source_normalizatio
         itertools.product(EXPERIMENT_CONFIGS, range(NUM_REPEATS)), start=1
     ):
         print(
-            f"\n=== {config.quantizer_class.__name__} | {config.bins_per_plane} bins/plane × "
+            f"\n=== {config.bins_per_plane} bins/plane × "
             f"{config.num_planes} planes | trial {trial_idx} ==="
         )
         results = run_single_experiment(config, trial_idx, run_label)
