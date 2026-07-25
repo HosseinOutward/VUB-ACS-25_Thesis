@@ -295,7 +295,6 @@ class S_RoundCodec(_WZRoundCodec):
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
 
     sample_fraction: ClassVar[float] = 0.10
-    retrain_epochs: ClassVar[int] = 70
     _sample_original: torch.Tensor | None = None
 
     sampling_quantizer: DedupedWZQuantizerCancer
@@ -393,11 +392,10 @@ class S_RoundCodec(_WZRoundCodec):
         side_info = self.quantizer.side_info_tensor(metadata)[
             sample_indices.to(self.quantizer.device)
         ]
-        retrain_cfg = self.c_cfg.model_copy(update={"train_epochs": self.retrain_epochs})
         return self.quantizer.retrain_model(
             x_sample,
             side_info,
-            retrain_cfg,
+            self.c_cfg,
             x_sample.float().square().mean().item() / 2 + 1e-8,
         )
 
