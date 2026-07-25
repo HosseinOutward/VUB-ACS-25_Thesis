@@ -105,7 +105,9 @@ def run_single_experiment(
         train_epochs=180,
         train_sample_size=200_000,
         train_batch_size=1_000,
+        lr=3e-3,
         lr_step=40,
+        tau=1.0,
         training_progress_bar=False,
         training_log_every_epochs=5,
         quantizer_train_repeats=1,
@@ -114,6 +116,8 @@ def run_single_experiment(
         prior_probabilities="categorical",
         tf32=False,
         fused_optimizer=True,
+        hidden_dim=100,
+        layers=3,
     )
     training_quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])

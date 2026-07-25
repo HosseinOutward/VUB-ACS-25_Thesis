@@ -294,13 +294,13 @@ class WZcfgQuant(BaseModel):
     max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
-    train_epochs: int = 80 # improvement up to 240 epochs
-    reconst_ld: float = 300
-    train_sample_size: int = 300_000
-    train_batch_size: int = 50_000
-    lr: float = 3e-3
-    lr_step: int = 40
-    tau: float = 1.0
+    train_epochs: int = 120
+    reconst_ld: float = 36.73683767756248
+    train_sample_size: int = 750_000
+    train_batch_size: int = 12_500
+    lr: float = 0.004530430161538338
+    lr_step: int = 37
+    tau: float = 2.3406302935091077
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
 
@@ -315,8 +315,8 @@ class WZcfgQuant(BaseModel):
     shared_heads: bool = True
     prior_context: Literal["hard", "soft"] = "hard"
     prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
-    hidden_dim: int = 100
-    layers: int = 3
+    hidden_dim: int = 74
+    layers: int = 6
     cache_dir: Path | None = None
     cache_overwrite: bool = False
 
