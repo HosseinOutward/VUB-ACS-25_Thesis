@@ -14,6 +14,12 @@ if TYPE_CHECKING:
     from .wz_quantizer import WZcfgQuant
 
 
+# Rows per full-vector inference pass. The layered RNN holds one hidden state per layer per
+# batch row, so this directly sets peak VRAM; larger batches buy no throughput past this size.
+# Defined here because wz_quantizer imports this module, never the reverse.
+INFERENCE_BATCH = 100_000
+
+
 class PriorCalculator:
     """Prior utilities used by NewQuant to estimate conditional symbol rates."""
 
@@ -48,7 +54,7 @@ class PriorCalculator:
         model: EncoderDecoderLayeredRNN,
         bins_vec: torch.Tensor,
         side_info: torch.Tensor,
-        batch_size: int = 500_000,
+        batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Run a trained quantizer/prior network over all bins and return per-plane probabilities."""
         from .wz_quantizer import batch_loop
@@ -209,13 +215,14 @@ class DedupedPriorCalculator(PriorCalculator):
         model: EncoderDecoderLayeredRNN,
         bins_vec: torch.Tensor,
         side_info: torch.Tensor,
-        batch_size: int = 500_000,
+        batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Compute priors for unique (bins, side info) rows and broadcast them back to duplicates."""
         from .wz_quantizer import DedupedWZQuantizerCancer, unique_row_groups
 
-        bins_device, representatives, inverse, collisions = unique_row_groups(
-            bins_vec, side_info, DedupedWZQuantizerCancer.match_bits
+        bins_device = bins_vec.to(side_info.device, torch.long)
+        representatives, inverse, collisions = unique_row_groups(
+            (side_info, bins_device.T), DedupedWZQuantizerCancer.match_bits
         )
         prior = PriorCalculator.compute_prior_from_network(
             model, bins_device[:, representatives], side_info[representatives], batch_size

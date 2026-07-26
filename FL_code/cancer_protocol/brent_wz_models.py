@@ -25,32 +25,38 @@ class CustomRNN(nn.Module):
         self.input_layers = nn.ModuleList(input_layers)
         self.transition_layers = nn.ModuleList([nn.Linear(hidden_dim, hidden_dim) for _ in range(layers)])
 
-    def forward(self, x, h_0=None):
+    def forward(self, x: torch.Tensor, h_0: Sequence[torch.Tensor] | None = None) -> torch.Tensor:
+        """Run the layered recurrence and return the top layer's output per timestep.
 
-        B, T, D = x.shape
+        Only the previous timestep's hidden states are retained, because the recurrence never
+        reaches further back. Materializing every (timestep, layer) state costs gigabytes at
+        inference batch sizes and no caller ever consumed it.
+        """
+        batch_size, timesteps, _ = x.shape
 
         if h_0 is None:
-            temp=self.transition_layers[0].weight
-            h_0 = [torch.zeros(B, self.hidden_dim).to(temp.device).to(temp.dtype) for _ in
-                   range(self.layers)]
+            reference = self.transition_layers[0].weight
+            h_0 = [
+                torch.zeros(batch_size, self.hidden_dim, device=reference.device, dtype=reference.dtype)
+                for _ in range(self.layers)
+            ]
 
-        h_outputs = [h_0]
-
-        for t in range(T):
-            h_outputs.append([])
+        previous = list(h_0)
+        outputs = []
+        for t in range(timesteps):
+            current: list[torch.Tensor] = []
             for l in range(self.layers):
-                if l == 0:
-                    y = F.leaky_relu(self.input_layers[l](x[:, t]) + self.transition_layers[l](h_outputs[-2][l]))
-                elif l < self.layers - 1 or self.output_activation:
-                    y = F.leaky_relu(
-                        self.input_layers[l](h_outputs[-1][l - 1]) + self.transition_layers[l](h_outputs[-2][l]))
-                else:
-                    y = self.input_layers[l](h_outputs[-1][l - 1]) + self.transition_layers[l](h_outputs[-2][l])
-                h_outputs[-1].append(y)
+                y = (
+                    self.input_layers[l](x[:, t] if l == 0 else current[l - 1])
+                    + self.transition_layers[l](previous[l])
+                )
+                if l == 0 or l < self.layers - 1 or self.output_activation:
+                    y = F.leaky_relu(y)
+                current.append(y)
+            outputs.append(current[-1])
+            previous = current
 
-        all_h_output = torch.stack([torch.stack(ht, dim=1) for ht in h_outputs], dim=1)
-
-        return all_h_output[:, 1:, -1, :], all_h_output[:, 1:, :, :]
+        return torch.stack(outputs, dim=1)
 
 
 class EncoderDecoderLayeredRNN(nn.Module):
@@ -122,7 +128,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             softmax = F.softmax
 
         rnn_inputs = x.unsqueeze(1).repeat(1, self.num_planes, 1)
-        rnn_out, _ = self.encoder(rnn_inputs)
+        rnn_out = self.encoder(rnn_inputs)
         if self.shared_encoder is False:
             soft_codes = [softmax(binner(rnn_out[:, binner_idx]), dim=-1)
                           for binner_idx, binner in enumerate(self.binners)]
@@ -151,7 +157,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
     def decode(self, codes, y):
         rnn_d_inputs = torch.stack([torch.cat([c, y], dim=-1) for c in codes], dim=1)
-        rnn_d_out, _ = self.decoder(rnn_d_inputs)
+        rnn_d_out = self.decoder(rnn_d_inputs)
         if self.shared_decoder is False:
             reconstructed = [rec(rnn_d_out[:, rec_idx]) for rec_idx, rec in enumerate(self.reconstructors)]
         else:
@@ -186,7 +192,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             rnn_inputs_prior = rnn_inputs_prior.detach()
         else:
             rnn_inputs_prior = rnn_inputs_prior.float()
-        prior_logits, _ = self.conditionalRNN(rnn_inputs_prior)
+        prior_logits = self.conditionalRNN(rnn_inputs_prior)
         if self.shared_priors is False:
             priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors)]
             priors = [softmax(p, dim=-1) for p in priors]

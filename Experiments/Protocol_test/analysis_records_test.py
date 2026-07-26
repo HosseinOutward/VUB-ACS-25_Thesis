@@ -3,13 +3,14 @@ from __future__ import annotations
 import ast
 import logging
 from dataclasses import dataclass
-from itertools import cycle
 from pathlib import Path
 from typing import Callable
 
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -19,7 +20,9 @@ PROJECT_DIR = Path(__file__).resolve().parent
 RECORDS_DIR = PROJECT_DIR / "exp_records"
 PLOTS_DIR = PROJECT_DIR / "analysis_plots"
 RECORD_FILE_NAME = "compression_records.csv"
-REQUIRED_COLUMNS = {"round_id", "prior_stage_rates", "stage_wmapes", "protocol_name_full"}
+REQUIRED_COLUMNS = {"round_id", "client_id", "prior_stage_rates", "stage_wmapes", "protocol_name_full"}
+LINE_STYLES = ("-", "--", "-.", ":")
+CLIENT_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class Curve:
     label: str
     cumulative_prior_rates: NDArray[np.float64]
     distortion_db: NDArray[np.float64]
+    client_id: int | None = None
 
 
 def parse_float_list(value: str, csv_path: Path, field_name: str) -> list[float]:
@@ -114,8 +118,9 @@ def build_curves(
     records_by_path: dict[Path, pd.DataFrame],
     subset: str,
     selector: Callable[[pd.DataFrame], pd.DataFrame],
+    per_client: bool = False,
 ) -> list[Curve]:
-    """Build averaged curves for every experiment file that has rows in a subset."""
+    """Build averaged curves for every experiment file that has rows in a subset, optionally split per worker."""
     curves: list[Curve] = []
     for csv_path, records in records_by_path.items():
         df = selector(records)
@@ -131,25 +136,68 @@ def build_curves(
             csv_path,
             f" at source indices {df.index.tolist()}" if len(df) <= 5 else "",
         )
-        cumulative_prior_rates, distortion_db = averaged_curve(df, csv_path)
-        curves.append(Curve(subset, experiment_label(csv_path, df), cumulative_prior_rates, distortion_db))
+        label = experiment_label(csv_path, df)
+        groups = df.groupby("client_id") if per_client else [(None, df)]
+        for client_id, group in groups:
+            cumulative_prior_rates, distortion_db = averaged_curve(group, csv_path)
+            curves.append(
+                Curve(
+                    subset,
+                    label,
+                    cumulative_prior_rates,
+                    distortion_db,
+                    None if client_id is None else int(client_id),
+                )
+            )
     assert curves, f"Subset {subset!r} matched no rows in any records file."
     return curves
+
+
+def shade(color: str | tuple[float, float, float], amount: float) -> tuple[float, float, float]:
+    """Blend a color toward white (amount > 0) or black (amount < 0) to separate same-protocol client curves."""
+    rgb = np.array(mcolors.to_rgb(color))
+    return tuple(rgb + ((1.0 if amount > 0 else 0.0) - rgb) * abs(amount))
+
+
+def protocol_styles(labels: list[str]) -> dict[str, tuple[str, str]]:
+    """Map every experiment label to a distinct color and line-style pair."""
+    palette = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    if len(labels) > len(palette) * len(LINE_STYLES):
+        logging.warning(
+            "Only %d color/style pairs available for %d labels.", len(palette) * len(LINE_STYLES), len(labels)
+        )
+    return {
+        label: (palette[index % len(palette)], LINE_STYLES[index % len(LINE_STYLES)])
+        for index, label in enumerate(labels)
+    }
+
+
+def client_styles(client_ids: list[int]) -> dict[int, tuple[str, float]]:
+    """Map every client id to a marker shape and a color-shading amount."""
+    span = max(len(client_ids) - 1, 1)
+    return {
+        client_id: (CLIENT_MARKERS[index % len(CLIENT_MARKERS)], 0.7 * (index / span - 0.5))
+        for index, client_id in enumerate(client_ids)
+    }
 
 
 def plot_curve(
     ax: Axes,
     curve: Curve,
-    color: str | None = None,
+    color: str | tuple[float, float, float] | None = None,
     alpha: float = 0.9,
     annotate: bool = True,
     include_in_legend: bool = True,
+    linestyle: str = "-",
+    marker: str = "o",
 ) -> None:
     """Draw one stage-wise curve on an axis."""
     ax.plot(
         curve.cumulative_prior_rates,
         curve.distortion_db,
-        marker="o",
+        marker=marker,
+        markersize=6,
+        linestyle=linestyle,
         linewidth=2.0,
         color=color,
         alpha=alpha,
@@ -211,51 +259,71 @@ def axis_limits(curves: list[Curve]) -> tuple[tuple[float, float], tuple[float, 
 
 def plot_comparison(
     curves_by_subset: dict[str, list[Curve]],
+    client_curves_by_subset: dict[str, list[Curve]],
     titles_by_subset: dict[str, str],
     output_path: Path,
 ) -> None:
-    """Plot all subsets side-by-side with shared axes and faint non-active context curves."""
+    """Plot every subset as a row: worker-averaged curves with faint context, beside per-worker curves."""
     all_curves = [curve for curves in curves_by_subset.values() for curve in curves]
-    assert all_curves, "No curves available for comparison plot."
-    xlim, ylim = axis_limits(all_curves)
-    labels = sorted({curve.label for curve in all_curves})
-    palette = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    if len(labels) > len(palette):
-        logging.warning("Reusing %d plot colors across %d experiment labels.", len(palette), len(labels))
-    colors = dict(zip(labels, cycle(palette), strict=False))
+    all_client_curves = [curve for curves in client_curves_by_subset.values() for curve in curves]
+    assert all_curves and all_client_curves, "No curves available for comparison plot."
+    xlim, ylim = axis_limits(all_curves + all_client_curves)
+    styles = protocol_styles(sorted({curve.label for curve in all_curves}))
+    clients = client_styles(sorted({curve.client_id for curve in all_client_curves}))
     fig, axes = plt.subplots(
-        1,
         len(curves_by_subset),
-        figsize=(18, 6),
+        2,
+        figsize=(15, 6 * len(curves_by_subset)),
         sharex=True,
         sharey=True,
         constrained_layout=True,
     )
 
-    for ax, (subset, active_curves) in zip(np.atleast_1d(axes), curves_by_subset.items(), strict=True):
+    for (mean_ax, client_ax), subset in zip(np.atleast_2d(axes), curves_by_subset, strict=True):
         context_curves = [curve for curve in all_curves if curve.subset != subset]
         logging.info(
-            "Comparison panel %r draws %d active and %d faint context curves; "
-            "context curves are excluded from the legend.",
+            "Comparison row %r draws %d worker-averaged (plus %d faint context) and %d per-worker curves.",
             subset,
-            len(active_curves),
+            len(curves_by_subset[subset]),
             len(context_curves),
+            len(client_curves_by_subset[subset]),
         )
         for curve in context_curves:
+            color, linestyle = styles[curve.label]
+            plot_curve(mean_ax, curve, color, alpha=0.08, annotate=False, include_in_legend=False, linestyle=linestyle)
+        for curve in curves_by_subset[subset]:
+            color, linestyle = styles[curve.label]
+            plot_curve(mean_ax, curve, color, linestyle=linestyle)
+        style_axis(mean_ax, f"{titles_by_subset[subset]}\nworker-averaged")
+        mean_ax.legend(fontsize="x-small")
+
+        for curve in client_curves_by_subset[subset]:
+            color, linestyle = styles[curve.label]
+            marker, shading = clients[curve.client_id]
             plot_curve(
-                ax,
+                client_ax,
                 curve,
-                color=colors[curve.label],
-                alpha=0.08,
+                shade(color, shading),
                 annotate=False,
                 include_in_legend=False,
+                linestyle=linestyle,
+                marker=marker,
             )
-        for curve in active_curves:
-            plot_curve(ax, curve, color=colors[curve.label], alpha=0.9, annotate=True)
-        style_axis(ax, titles_by_subset[subset])
+        style_axis(client_ax, f"{titles_by_subset[subset]}\nper worker")
+        client_ax.legend(
+            handles=[
+                Line2D([], [], color=shade("0.35", shading), marker=marker, linestyle="", label=f"client {client_id}")
+                for client_id, (marker, shading) in clients.items()
+            ],
+            fontsize="x-small",
+            title="worker (color/style = protocol)",
+            title_fontsize="x-small",
+            ncol=2,
+        )
+
+    for ax in np.atleast_2d(axes).ravel():
         ax.set_xlim(xlim)
         ax.set_ylim(ylim)
-        ax.legend(fontsize="x-small")
 
     save_plot(fig, output_path, dpi=220)
 
@@ -288,10 +356,15 @@ def main() -> None:
         subset: build_curves(records_by_path, subset, selector)
         for subset, (_title, _output_path, selector) in selectors.items()
     }
+    client_curves_by_subset = {
+        subset: build_curves(records_by_path, subset, selector, per_client=True)
+        for subset, (_title, _output_path, selector) in selectors.items()
+    }
     for subset, (title, output_path, _selector) in selectors.items():
         plot_subset(curves_by_subset[subset], title, output_path)
     plot_comparison(
         curves_by_subset,
+        client_curves_by_subset,
         {subset: title for subset, (title, _output_path, _selector) in selectors.items()},
         PLOTS_DIR / "rate_distortion_comparison_triple.png",
     )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from time import perf_counter
-from typing import Any, ClassVar, Literal, NamedTuple, TypeAlias
+from typing import Any, ClassVar, Literal, NamedTuple
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,7 +15,7 @@ from FL_code.FL_core.cache import cache_call, model_training_hash
 from FL_code.FL_core.utils import create_training_progress_bar
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .prior_code import DedupedPriorCalculator, PriorCalculator
+from .prior_code import INFERENCE_BATCH, DedupedPriorCalculator, PriorCalculator
 
 
 OUTLIER_CHUNK = 2**8
@@ -173,28 +173,22 @@ def wz_model_training_loop(
     )
     row_groups = None
     if c_cfg.deduplicate_training:
+        blocks = tuple(value.flatten(start_dim=1) for value in (*training_inputs, side_info))
         probe_size = min(batch_size, input_size)
         probe_indices = (
             torch.arange(probe_size, device=side_info.device) * input_size // probe_size
         )
-        probe_rows = torch.cat([
-            value[probe_indices].flatten(start_dim=1)
-            for value in (*training_inputs, side_info)
-        ], dim=1)
-        probe_rows = float_prefix(probe_rows, c_cfg.training_match_bits)
-        content_duplicate_fraction = (
-            1 - torch.unique(probe_rows, dim=0).shape[0] / probe_rows.shape[0]
-        )
+        probe_groups = unique_row_groups(
+            tuple(block[probe_indices] for block in blocks), c_cfg.training_match_bits)[1]
+        content_duplicate_fraction = 1 - (int(probe_groups.max()) + 1) / probe_size
         if content_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
-            rows = torch.cat([
-                value.flatten(start_dim=1) for value in (*training_inputs, side_info)
-            ], dim=1)
-            rows = float_prefix(rows, c_cfg.training_match_bits)
-            row_groups = torch.unique(rows, dim=0, return_inverse=True)[1]
-            del rows
+            representatives, row_groups, collisions = unique_row_groups(
+                blocks, c_cfg.training_match_bits)
+            # Colliding rows are not provably equal, so they must not share a weighted group.
+            row_groups[collisions] = representatives.numel() + torch.arange(
+                collisions.numel(), device=row_groups.device)
         elif expected_index_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
             row_groups = torch.arange(input_size, device=side_info.device)
-        del probe_rows
 
     # Both training losses are scaled by 1/K relative to their previous forms.
     optimizer_epsilon = 1e-8 / model.num_planes
@@ -518,7 +512,7 @@ class WZQuantizerCancer:
 
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
-        bins, _ = self._encode_preprocessed(x_prep, 500_000)
+        bins, _ = self._encode_preprocessed(x_prep, INFERENCE_BATCH)
         temp = self.prior_calculator.compute_prior_from_network(
                 self.coding_model, bins, side_info).to(torch.float16)
         self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
@@ -554,12 +548,11 @@ class WZQuantizerCancer:
                 perturb_generator=perturb_generator)
 
             if np.isfinite(loss):
-                def reconstruct_batch(start: int, end: int) -> torch.Tensor:
-                    _, codes = model.encode(x_prep[start:end])
-                    return model.decode(codes, side_info[start:end])[-1].cpu()
-
-                reconstruction = batch_loop(
-                    reconstruct_batch, model, x_prep.shape[0], 500_000).reshape(-1)
+                # Check through this quantizer's own encode/decode so the pass benefits from
+                # row deduplication; the caller overwrites coding_model with the winner below.
+                self.coding_model = model
+                bins, _ = self._encode_preprocessed(x_prep, INFERENCE_BATCH)
+                reconstruction = self._decode_preprocessed(bins, side_info, INFERENCE_BATCH)
                 if torch.isfinite(reconstruction).all():
                     attempt = (model, loss)
                     made_quants_and_stat.append(attempt)
@@ -568,7 +561,7 @@ class WZQuantizerCancer:
         return min(made_quants_and_stat, key=lambda attempt: attempt[1])[0]
 
     def encoding_process(
-        self, x_raw: torch.Tensor, batch_size: int = 500_000,
+        self, x_raw: torch.Tensor, batch_size: int = INFERENCE_BATCH,
     ) -> tuple[torch.Tensor, torch.Tensor | None, PreprocessMetadata]:
         """Preprocess and quantize one raw vector into per-plane bin indices and soft code posteriors.
 
@@ -593,7 +586,7 @@ class WZQuantizerCancer:
     def decoding_process(
         self,
         payload_content: tuple[torch.Tensor, PreprocessMetadata],
-        batch_size: int = 500_000,
+        batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Decode bin indices with side information and invert preprocessing metadata."""
         bins, metadata = payload_content
@@ -607,7 +600,7 @@ class WZQuantizerCancer:
     def decoding_stages_process(
         self,
         payload_content: tuple[torch.Tensor, PreprocessMetadata],
-        batch_size: int = 500_000,
+        batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Decode and postprocess the reconstruction produced by every refinement stage."""
         bins, metadata = payload_content
@@ -711,19 +704,20 @@ class WZQuantizerCancer:
         assert all(value.numel() == self.vector_size for value in side_information), (
             f"Each side-information vector must contain {self.vector_size} values.")
 
-        tensors = [
-            self.preprocess_x(
+        # Filled column by column: stacking the normalized list would hold every vector and
+        # the stacked copy at once, doubling peak memory at full vector size.
+        formatted = torch.zeros(
+            (self.vector_size, max(len(side_information), 1)),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        for index, si in enumerate(side_information):
+            formatted[:, index] = self.preprocess_x(
                 si,
                 skip_outliers=True,
                 normalization_factors=source_metadata.norm_factors,
             )[0].squeeze(1)
-            for si in side_information
-        ]
-        if len(tensors) == 0:
-            tensors = [torch.zeros(self.vector_size, device=self.device)]
-
-        return torch.stack(tensors, dim=1).to(
-            self.device, dtype=torch.float32).contiguous()
+        return formatted
 
     def set_side_information(self, side_info: Sequence[torch.Tensor]) -> None:
         """Set the decoder-available side-information vectors used by decoding and conditional priors."""
@@ -777,25 +771,47 @@ def _retrain_quantizer_parameters(
 
 
 def unique_row_groups(
-    bins: torch.Tensor,
-    side_info: torch.Tensor,
+    blocks: Sequence[torch.Tensor],
     match_bits: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Group rows by exact bins and float-prefix side information."""
-    device = side_info.device
-    bins_device = bins.to(device, torch.long)
-    features = torch.cat([
-        float_prefix(side_info, match_bits),
-        bins_device.T.to(side_info.dtype),
-    ], dim=1)
-    generator = torch.Generator(device=device).manual_seed(0)
-    projection = torch.randn(features.shape[1], generator=generator, device=device, dtype=torch.float64)
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Group rows agreeing on every column of every block, floats compared on a leading-bit prefix.
 
-    unique_keys, inverse = torch.unique(features.double() @ projection, return_inverse=True)
+    Columns are folded into a single float64 key one at a time, because materializing the
+    full-width row matrix costs gigabytes at full vector size. Distinct rows can in principle
+    share a key, so rows that do not match their representative are returned for exact
+    recomputation. Returns the representative row of each group, each row's group, and the
+    colliding rows.
+    """
+    assert blocks
+    device, size = blocks[0].device, blocks[0].shape[0]
+    assert all(block.ndim == 2 and block.shape[0] == size for block in blocks)
+
+    def columns() -> Iterator[torch.Tensor]:
+        for block in blocks:
+            for index in range(block.shape[1]):
+                column = block[:, index].contiguous()
+                yield (
+                    float_prefix(column, match_bits) if column.dtype == torch.float32
+                    else column.to(torch.float32)
+                )
+
+    generator = torch.Generator(device=device).manual_seed(0)
+    projection = torch.randn(
+        sum(block.shape[1] for block in blocks), generator=generator, device=device, dtype=torch.float64)
+
+    key = torch.zeros(size, device=device, dtype=torch.float64)
+    for weight, column in zip(projection, columns(), strict=True):
+        key += column.double() * weight
+
+    unique_keys, inverse = torch.unique(key, return_inverse=True)
     representatives = torch.empty(unique_keys.numel(), dtype=torch.long, device=device)
-    representatives[inverse] = torch.arange(features.shape[0], device=device)
-    collisions = (features != features[representatives[inverse]]).any(dim=1).nonzero(as_tuple=False).flatten()
-    return bins_device, representatives, inverse, collisions
+    representatives[inverse] = torch.arange(size, device=device)
+
+    reference = representatives[inverse]
+    mismatched = torch.zeros(size, dtype=torch.bool, device=device)
+    for column in columns():
+        mismatched |= column != column[reference]
+    return representatives, inverse, mismatched.nonzero(as_tuple=False).flatten()
 
 
 class DeduplicationStats(NamedTuple):
@@ -822,10 +838,7 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode one representative per normalized float-prefix group."""
-        empty_bins = torch.empty((0, x_prep.shape[0]), dtype=torch.long, device=self.device)
-        _, representatives, inverse, collisions = unique_row_groups(
-            empty_bins, x_prep, self.match_bits
-        )
+        representatives, inverse, collisions = unique_row_groups((x_prep,), self.match_bits)
         bins, soft_codes = super()._encode_preprocessed(x_prep[representatives], batch_size)
         inverse_cpu = inverse.cpu()
         bins = bins[:, inverse_cpu]
@@ -852,8 +865,9 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
         batch_size: int,
     ) -> torch.Tensor:
         """Decode every stage once per symbol-and-SI float-prefix group."""
-        bins_device, representatives, inverse, collisions = unique_row_groups(
-            bins, side_info, self.match_bits
+        bins_device = bins.to(self.device, torch.long)
+        representatives, inverse, collisions = unique_row_groups(
+            (side_info, bins_device.T), self.match_bits
         )
         recons = super()._decode_stages_preprocessed(
             bins_device[:, representatives], side_info[representatives], batch_size

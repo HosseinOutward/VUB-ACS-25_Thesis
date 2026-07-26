@@ -17,6 +17,11 @@ T = TypeVar("T")
 # This explicit contract prevents new logging or execution fields from silently
 # invalidating every learned-model entry. Add a field only when changing it must
 # select a separately trained model.
+# deduplicate_training and training_match_bits are deliberately absent: collapsing duplicate
+# rows preserves the batch loss exactly, so both settings train statistically equivalent
+# models and may share cache entries. They are not bit-reproducible across the flag, though,
+# because duplicates share one Gumbel draw instead of one each; a run that must compare the
+# two settings has to pass cache_overwrite rather than rely on the key.
 MODEL_TRAINING_CONFIG_FIELDS: frozenset[str] = frozenset({
     "bins_per_plane",
     "num_planes",

@@ -156,7 +156,9 @@ class _WZRoundCodec(BaseRoundCodec):
             metadata, prior_side_information)
         prior_model = PriorCalculator.make_trained_prior_model(
             bins.long(), soft_codes, side_info, prior_cfg)
-        prior_tensor = PriorCalculator.compute_prior_from_network(
+        # The quantizer's calculator dedupes identical (bins, side info) rows; the priors it
+        # returns are identical to the full pass because they are a pure function of that row.
+        prior_tensor = self.quantizer.prior_calculator.compute_prior_from_network(
             prior_model, bins, side_info)
         prior_stage_rates = PriorCalculator.compute_plane_rates(prior_tensor, bins, self.c_cfg.num_planes)
 
@@ -271,6 +273,11 @@ class R_RoundCodec(_WZRoundCodec):
 
 class S_RoundCodec(_WZRoundCodec):
     """Two-pass sampled-retraining round against the quantizer's train-inference mismatch.
+
+    NON-FUNCTIONAL as of 2026-07-26: get_encod_payload calls quantizer.encode_subset,
+    quantizer.decode_subset and coding_model.encoder_head_state_dict, none of which survived
+    the quantizer simplification in 22689ae. Scheduling an S round raises AttributeError on the
+    first call. No active protocol references it, so it is kept as a design record only.
 
     A seeded sample of the delta is coded with a frozen copy of the initial server-trained
     model; its reconstruction is reproducible on the server, so both sides can retrain the
