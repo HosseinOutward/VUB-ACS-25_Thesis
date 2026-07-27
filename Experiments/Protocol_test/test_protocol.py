@@ -122,8 +122,8 @@ def seed_history(
     reconstructions_dir: Path,
     deltas_dir: Path,
 ) -> None:
-    """Recreate the bounded protocol history immediately before the first replayed round."""
-    history_depth = protocol._recons_history.max_per_client
+    """Recreate every bounded protocol history immediately before the first replayed round."""
+    history_depth = max(history.max_per_client for history in protocol.histories())
     assert history_depth > 0, (
         f"Protocol {protocol.protocol_name_full!r} does not retain reconstruction history."
     )
@@ -139,7 +139,7 @@ def seed_history(
                 else _load_tensor(deltas_dir, round_id, client_id)
             )
             record = CompressionRecord(round_id, client_id, f"history_seed_{source.value}")
-            protocol._recons_history.commit(
+            protocol.commit_history(
                 history_tensor.to(dtype=torch.float16), record, Access.TEMPORAL_TOO
             )
 
@@ -150,16 +150,17 @@ def replace_latest_reconstruction(
     round_id: int,
     client_id: int,
 ) -> None:
-    """Replace the history entry just committed by simulate_compression with raw delta."""
-    history = protocol._recons_history
-    replacement = raw_delta.detach().to(device="cpu", dtype=history.dtype)
+    """Replace the history entries just committed by simulate_compression with raw delta."""
+    replacement = raw_delta.detach().to(device="cpu", dtype=torch.float16)
     replaced = False
-    for ledger in (history._server.get(client_id), history._temporal.get(client_id)):
-        if ledger is None or not ledger or ledger[-1].round_id != round_id:
-            continue
-        assert ledger[-1].client_id == client_id
-        ledger[-1] = replace(ledger[-1], tensor=replacement)
-        replaced = True
+    for history in protocol.histories():
+        assert history.dtype == replacement.dtype
+        for ledger in (history._server.get(client_id), history._temporal.get(client_id)):
+            if ledger is None or not ledger or ledger[-1].round_id != round_id:
+                continue
+            assert ledger[-1].client_id == client_id
+            ledger[-1] = replace(ledger[-1], tensor=replacement)
+            replaced = True
     assert replaced, (
         f"simulate_compression did not commit reconstruction history for round {round_id}, "
         f"client {client_id}."

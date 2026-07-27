@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,9 +21,21 @@ PROJECT_DIR = Path(__file__).resolve().parent
 RECORDS_DIR = PROJECT_DIR / "exp_records"
 PLOTS_DIR = PROJECT_DIR / "analysis_plots"
 RECORD_FILE_NAME = "compression_records.csv"
-REQUIRED_COLUMNS = {"round_id", "client_id", "prior_stage_rates", "stage_wmapes", "protocol_name_full"}
+REQUIRED_COLUMNS = {
+    "round_id",
+    "client_id",
+    "round_name_full",
+    "prior_stage_rates",
+    "stage_wmapes",
+    "protocol_name_full",
+}
 LINE_STYLES = ("-", "--", "-.", ":")
 CLIENT_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
+VARIANT_TOKEN = re.compile(r"replace_O_with='(\w+)'")
+GAP_METRICS = {
+    "rate_gap_bits": "T minus O rate at matched distortion (bits)",
+    "rate_gap_percent": "T minus O rate at matched distortion (%)",
+}
 
 
 @dataclass(frozen=True)
@@ -72,10 +85,11 @@ def load_records(csv_paths: list[Path]) -> dict[Path, pd.DataFrame]:
         assert len(protocols) == 1, f"Expected one protocol_name_full in {csv_path}, found {protocols}."
         records_by_path[csv_path] = records
         logging.info(
-            "Loaded %s: %d rows, rounds %s, protocol %r",
+            "Loaded %s: %d rows, rounds %s, training round %d, protocol %r",
             csv_path,
             len(records),
             sorted(records["round_id"].unique().tolist()),
+            training_round_id(records, csv_path),
             protocols[0],
         )
     return records_by_path
@@ -102,11 +116,6 @@ def averaged_curve(df: pd.DataFrame, csv_path: Path) -> tuple[NDArray[np.float64
     )
 
 
-def round_14_first_5_indices(df: pd.DataFrame) -> pd.Index:
-    """Return the selected row indices for the first five round-14 records."""
-    return df.index[df["round_id"].eq(14)][:5]
-
-
 def experiment_label(csv_path: Path, df: pd.DataFrame) -> str:
     """Build a concise label from the experiment folder and protocol name."""
     protocols = df["protocol_name_full"].drop_duplicates().tolist()
@@ -117,13 +126,13 @@ def experiment_label(csv_path: Path, df: pd.DataFrame) -> str:
 def build_curves(
     records_by_path: dict[Path, pd.DataFrame],
     subset: str,
-    selector: Callable[[pd.DataFrame], pd.DataFrame],
+    selector: Callable[[pd.DataFrame, Path], pd.DataFrame],
     per_client: bool = False,
 ) -> list[Curve]:
     """Build averaged curves for every experiment file that has rows in a subset, optionally split per worker."""
     curves: list[Curve] = []
     for csv_path, records in records_by_path.items():
-        df = selector(records)
+        df = selector(records, csv_path)
         if df.empty:
             logging.warning("Skipping %s for subset %r: selected 0/%d rows.", csv_path, subset, len(records))
             continue
@@ -151,6 +160,131 @@ def build_curves(
             )
     assert curves, f"Subset {subset!r} matched no rows in any records file."
     return curves
+
+
+def rate_at_distortion(curve: Curve, distortion_db: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Read a curve's cumulative rate at the given distortions by interpolating between its stage points."""
+    order = np.argsort(curve.distortion_db)
+    return np.interp(distortion_db, curve.distortion_db[order], curve.cumulative_prior_rates[order])
+
+
+def curve_rate_gap(curve: Curve, reference: Curve) -> tuple[float, float]:
+    """Mean extra rate a curve spends over a reference at matched distortion, in bits and in percent.
+
+    Each curve is its own piecewise-linear rate(distortion) function through its actual stage points,
+    and the horizontal gap between them is averaged over the distortion span both curves cover. No
+    fitted or stage-averaged slope is involved, and the trapezoid integral is exact rather than
+    approximate because every stage point of both curves is a breakpoint of the integration grid.
+    A positive result means the curve needs more rate than the reference for the same distortion.
+    """
+    low = max(float(curve.distortion_db.min()), float(reference.distortion_db.min()))
+    high = min(float(curve.distortion_db.max()), float(reference.distortion_db.max()))
+    if high <= low:
+        logging.warning(
+            "%r and %r (%s) share no distortion range, so their rate gap is undefined.",
+            curve.subset,
+            reference.subset,
+            curve.label,
+        )
+        return float("nan"), float("nan")
+
+    grid = np.unique(np.concatenate([curve.distortion_db, reference.distortion_db, [low, high]]))
+    grid = grid[(grid >= low) & (grid <= high)]
+    curve_rates, reference_rates = rate_at_distortion(curve, grid), rate_at_distortion(reference, grid)
+    gap = float(np.trapezoid(curve_rates - reference_rates, grid)) / (high - low)
+    return gap, 100.0 * gap / (float(np.trapezoid(reference_rates, grid)) / (high - low))
+
+
+def training_round_id(records: pd.DataFrame, csv_path: Path) -> int:
+    """Find the one round in which the model was trained; every later round reuses that frozen model.
+
+    "F" is the only frozen-round marker, so any other round_name_full prefix (O, T, OM, TM, ...) names
+    a trained variant. A run trains once and then replays, so the trained rows must all sit in a single
+    round, one row per participating worker; more than one such round means the file mixes runs.
+    """
+    prefixes = records["round_name_full"].str.split("|").str[0]
+    rounds = sorted(records.loc[prefixes.ne("F"), "round_id"].unique().tolist())
+    assert len(rounds) == 1, f"Expected exactly one training round in {csv_path}, found {rounds}."
+    return int(rounds[0])
+
+
+def tagged_records(records_by_path: dict[Path, pd.DataFrame]) -> pd.DataFrame:
+    """Stack every records file, tagged with the O/T side it ran plus the mode and base config it shares.
+
+    A protocol either replaces O with a variant name or is plain O. The variant's first letter is the
+    side and its suffix is the mode, so "TM" is the T side of mode "M" and pairs with "OM" on its own,
+    without any variant being named here.
+    """
+    frames = []
+    for csv_path, records in records_by_path.items():
+        tokens = records["protocol_name_full"].iloc[0].split("|")
+        variants = [match[1] for match in map(VARIANT_TOKEN.fullmatch, tokens) if match]
+        assert len(variants) <= 1, f"{csv_path} names more than one variant: {variants}."
+        variant = variants[0] if variants else "O"
+        assert variant[0] in "OT", f"{csv_path} runs variant {variant!r}, which is neither an O nor a T side."
+        frames.append(
+            records.assign(
+                side=variant[0],
+                mode=variant[1:],
+                base_config="|".join(token for token in tokens if not VARIANT_TOKEN.fullmatch(token)),
+                source=csv_path,
+            )
+        )
+    return pd.concat(frames, ignore_index=True)
+
+
+def variant_gap_table(records_by_path: dict[Path, pd.DataFrame]) -> pd.DataFrame:
+    """Rate gap of the T side against the O side of every mode that was run both ways, per round and per worker.
+
+    Rows with a null round_id hold the all-rounds gap, which pools every round into one curve per
+    side; rows with a null client_id are worker-averaged.
+    """
+
+    def gap_row(config: str, round_id: int | None, client_id: int | None, pair: pd.DataFrame) -> dict[str, object]:
+        curves = {
+            side: Curve(side, config, *averaged_curve(rows, rows["source"].iloc[0]))
+            for side, rows in pair.groupby("side")
+        }
+        gap_bits, gap_percent = curve_rate_gap(curves["T"], curves["O"])
+        return {
+            "config": config,
+            "round_id": round_id,
+            "client_id": client_id,
+            "rate_gap_bits": gap_bits,
+            "rate_gap_percent": gap_percent,
+        }
+
+    rows: list[dict[str, object]] = []
+    for (base, mode), pair in tagged_records(records_by_path).groupby(["base_config", "mode"]):
+        config = f"{base} · T{mode} vs O{mode}"
+        if set(pair["side"]) != {"O", "T"}:
+            logging.warning("%s: only the %s side was run, so it has nothing to compare against.", config, set(pair["side"]))
+            continue
+        assert pair.groupby("side")["source"].nunique().eq(1).all(), (
+            f"{config}: a side has more than one run: {sorted({str(path) for path in pair['source']})}."
+        )
+        # Only a round and worker that both sides recorded can be compared; the log below counts the drops.
+        shared = pair.groupby(["round_id", "client_id"]).filter(lambda group: group["side"].nunique() == 2)
+        assert not shared.empty, f"{config}: the two sides share no round and worker."
+        logging.info(
+            "%s: comparing rounds %s over %d workers (%d of %d rows paired).",
+            config,
+            sorted(set(shared["round_id"])),
+            shared["client_id"].nunique(),
+            len(shared),
+            len(pair),
+        )
+
+        rows.append(gap_row(config, None, None, shared))
+        for round_id, in_round in shared.groupby("round_id"):
+            rows.append(gap_row(config, int(round_id), None, in_round))
+            rows += [
+                gap_row(config, int(round_id), int(client_id), of_client)
+                for client_id, of_client in in_round.groupby("client_id")
+            ]
+
+    assert rows, "No mode was run both as O and as T, so no T-vs-O gap can be measured."
+    return pd.DataFrame(rows).astype({"round_id": "Int64", "client_id": "Int64"})
 
 
 def shade(color: str | tuple[float, float, float], amount: float) -> tuple[float, float, float]:
@@ -328,6 +462,81 @@ def plot_comparison(
     save_plot(fig, output_path, dpi=220)
 
 
+GAP_PLOT_TITLE = (
+    "The T side against the O side of every mode, over rounds\n"
+    "positive = T pays more rate than O for the same distortion; dotted = that pair's all-rounds gap"
+)
+
+
+def plot_variant_gaps(gaps: pd.DataFrame, output_path: Path) -> None:
+    """Plot every variant pair's gap over rounds, worker-averaged beside per worker, one row per metric."""
+    per_round = gaps.dropna(subset=["round_id"])
+    worker_averaged, per_client = per_round[per_round["client_id"].isna()], per_round.dropna(subset=["client_id"])
+    all_rounds = gaps[gaps["round_id"].isna() & gaps["client_id"].isna()].set_index("config")
+    assert not worker_averaged.empty, "No worker-averaged gaps to plot."
+    styles = protocol_styles(sorted(gaps["config"].unique().tolist()))
+    clients = client_styles(sorted(per_client["client_id"].astype(int).unique().tolist()))
+    fig, axes = plt.subplots(
+        len(GAP_METRICS),
+        2,
+        figsize=(15, 5 * len(GAP_METRICS)),
+        sharex=True,
+        sharey="row",
+        squeeze=False,
+        constrained_layout=True,
+    )
+
+    for (mean_ax, client_ax), (metric, ylabel) in zip(axes, GAP_METRICS.items(), strict=True):
+        for config, group in worker_averaged.groupby("config"):
+            color, linestyle = styles[config]
+            mean_ax.plot(
+                group["round_id"],
+                group[metric],
+                marker="o",
+                linewidth=2.0,
+                color=color,
+                linestyle=linestyle,
+                label=config,
+            )
+            mean_ax.axhline(all_rounds.loc[config, metric], color=color, linestyle=":", linewidth=1.5, alpha=0.8)
+        for (config, client_id), group in per_client.groupby(["config", "client_id"]):
+            color, linestyle = styles[config]
+            marker, shading = clients[int(client_id)]
+            client_ax.plot(
+                group["round_id"],
+                group[metric],
+                marker=marker,
+                markersize=5,
+                linewidth=1.2,
+                color=shade(color, shading),
+                linestyle=linestyle,
+            )
+        for ax in (mean_ax, client_ax):
+            ax.axhline(0.0, color="0.4", linewidth=1.0)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+
+    axes[0][0].set_title("worker-averaged")
+    axes[0][1].set_title("per worker")
+
+    axes[0][0].legend(fontsize="x-small")
+    axes[0][1].legend(
+        handles=[
+            Line2D([], [], color=shade("0.35", shading), marker=marker, linestyle="", label=f"client {client_id}")
+            for client_id, (marker, shading) in clients.items()
+        ],
+        fontsize="x-small",
+        title="worker (color/style = pair)",
+        title_fontsize="x-small",
+        ncol=2,
+    )
+    for ax in axes[-1]:
+        ax.set_xlabel("Round")
+    fig.suptitle(GAP_PLOT_TITLE)
+
+    save_plot(fig, output_path, dpi=200)
+
+
 def main() -> None:
     """Generate read-only stage-wise rate-distortion summaries from protocol-test records."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -339,17 +548,17 @@ def main() -> None:
         logging.info("Creating plot directory: %s", PLOTS_DIR)
     PLOTS_DIR.mkdir(exist_ok=True)
 
-    selectors: dict[str, tuple[str, Path, Callable[[pd.DataFrame], pd.DataFrame]]] = {
-        "all": ("Average over all rows", PLOTS_DIR / "rate_distortion_all_rows.png", lambda df: df),
-        "round14_first5": (
-            "Average over first five round-14 rows",
-            PLOTS_DIR / "rate_distortion_round14_first5.png",
-            lambda df: df.loc[round_14_first_5_indices(df)],
+    selectors: dict[str, tuple[str, Path, Callable[[pd.DataFrame, Path], pd.DataFrame]]] = {
+        "all": ("Average over all rows", PLOTS_DIR / "rate_distortion_all_rows.png", lambda df, _path: df),
+        "training_round": (
+            "Average over the training round",
+            PLOTS_DIR / "rate_distortion_training_round.png",
+            lambda df, path: df[df["round_id"].eq(training_round_id(df, path))],
         ),
-        "except_round14_first5": (
-            "Average over rows excluding first five round-14 rows",
-            PLOTS_DIR / "rate_distortion_except_round14_first5.png",
-            lambda df: df.drop(index=round_14_first_5_indices(df)),
+        "frozen_rounds": (
+            "Average over the frozen rounds",
+            PLOTS_DIR / "rate_distortion_frozen_rounds.png",
+            lambda df, path: df[df["round_id"].ne(training_round_id(df, path))],
         ),
     }
     curves_by_subset = {
@@ -369,7 +578,11 @@ def main() -> None:
         PLOTS_DIR / "rate_distortion_comparison_triple.png",
     )
 
-    logging.info("Completed %d plots in %s.", len(selectors) + 1, PLOTS_DIR)
+    gaps = variant_gap_table(records_by_path)
+    gaps.to_csv(PLOTS_DIR / "variant_gap_over_rounds.csv", index=False)
+    plot_variant_gaps(gaps, PLOTS_DIR / "variant_gap_over_rounds.png")
+
+    logging.info("Completed %d plots in %s.", len(selectors) + 2, PLOTS_DIR)
 
 
 if __name__ == "__main__":

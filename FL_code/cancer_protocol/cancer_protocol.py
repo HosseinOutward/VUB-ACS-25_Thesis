@@ -76,13 +76,16 @@ class _WZRoundCodec(BaseRoundCodec):
         sd_slices: Sequence[slice] | None,
         cache_dir: Path | None = None,
         cache_overwrite: bool = False,
+        **quant_overrides: Any,
     ) -> None:
+        """Build the round's quantizer config; extra name tokens override WZcfgQuant fields."""
         self.c_cfg = WZcfgQuant(
             bins_per_plane=bins_per_plane,
             num_planes=num_planes,
             norm_slices=sd_slices,
             cache_dir=cache_dir,
             cache_overwrite=cache_overwrite,
+            **quant_overrides,
         )
 
     @staticmethod
@@ -92,11 +95,14 @@ class _WZRoundCodec(BaseRoundCodec):
         sd_slices: Sequence[slice] | None = None,
         cache_dir: Path | None = None,
         cache_overwrite: bool = False,
+        **quant_overrides: Any,
     ) -> None:
         assert isinstance(bins_per_plane, int) and bins_per_plane > 0
         assert isinstance(num_planes, int) and num_planes > 0
         assert cache_dir is None or isinstance(cache_dir, Path)
         assert isinstance(cache_overwrite, bool)
+        # WZcfgQuant forbids extra fields, so a misspelled override token fails here.
+        WZcfgQuant(bins_per_plane=bins_per_plane, num_planes=num_planes, **quant_overrides)
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -431,6 +437,8 @@ class T_RoundCodec(_WZRoundCodec):
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
     si: list[torch.Tensor]
+    # Further (target, side information) problems mixed into training only; see _OffsetTrainedRoundCodec.
+    extra_training_pairs: Sequence[tuple[torch.Tensor, list[torch.Tensor]]] = ()
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -448,13 +456,13 @@ class T_RoundCodec(_WZRoundCodec):
 
     def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
         # The worker trains here, so encode timing includes quantizer training by design.
-        self.quantizer.train_model(delta_vec, self.si)
+        self.quantizer.train_model(delta_vec, self.si, self.extra_training_pairs)
         gc.collect()
         torch.cuda.empty_cache()
         payload = super().get_encod_payload(delta_vec, record)
         payload['quantizer_state'] = self.quantizer.coding_model.decoder_state_dict()
         return payload
-    
+
 class Oracle_RoundCodec(T_RoundCodec):
     """it has magical access to the current raw delta as target while still having access to the server reconstructions as side information. for study purposes only."""
     round_name: ClassVar[str] = "O"
@@ -468,6 +476,67 @@ class Oracle_RoundCodec(T_RoundCodec):
         return None, train_si
 
 
+class _OffsetTrainedRoundCodec(T_RoundCodec):
+    """Train one round on several time-shifted repetitions of its own training problem.
+
+    For offset n the problem is rebuilt as if the round ran n rounds earlier: the target is the
+    round rid-n history entry of this client, and the side information is the history_window
+    slots preceding it, in the per-client slot order the round uses at rid. Offset 0 stays the
+    real problem (current delta against the current window), so the coded vector, the payload,
+    and the quantizer frozen for later F rounds are unchanged; the lagged offsets only widen the
+    training set. The protocol supplies the deeper history these offsets read.
+    """
+
+    train_offsets: int
+    history_window: int
+
+    def __init__(
+        self,
+        cfg_options: Mapping[str, Any] | None,
+        round_name_full: str,
+        train_offsets: int,
+        history_window: int,
+    ) -> None:
+        super().__init__(cfg_options, round_name_full)
+        assert train_offsets > 0 and history_window > 0
+        self.train_offsets = train_offsets
+        self.history_window = history_window
+
+    def get_training_data(
+        self, given_history: ReconstructionHistory, client_id: int
+    ) -> tuple[None, list[torch.Tensor]]:
+        """Return the current side information and store the lagged training problems."""
+        history = given_history.view(self.can_decode_where, client_id)
+        window = self.history_window
+        assert all(len(ledger) == window + self.train_offsets for ledger in history.values()), (
+            f"{self.round_name_full} needs {window + self.train_offsets} history entries per client; "
+            f"got {[len(ledger) for ledger in history.values()]}.")
+
+        def window_ending_at(stop: int | None) -> list[torch.Tensor]:
+            start = -window if stop is None else stop - window
+            return [entry.tensor for ledger in history.values() for entry in ledger[start:stop]]
+
+        # ledger[-offset] is the round rid-offset entry, and float16 history would otherwise
+        # normalize a whole training target in half precision.
+        self.extra_training_pairs = [
+            (history[client_id][-offset].tensor.float(), window_ending_at(-offset))
+            for offset in range(1, self.train_offsets + 1)
+        ]
+        return None, window_ending_at(None)
+
+
+class OM_RoundCodec(_OffsetTrainedRoundCodec):
+    """O round trained on its own lagged repetitions as well as the current problem."""
+    round_name: ClassVar[str] = "OM"
+    can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
+
+
+class TM_RoundCodec(_OffsetTrainedRoundCodec):
+    """T round trained on its own lagged repetitions as well as the current problem."""
+    round_name: ClassVar[str] = "TM"
+    can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
+
+
 class _WZProtocol(BaseProtocol):
     max_per_client_recons_history = 5
 
@@ -478,6 +547,9 @@ class _WZProtocol(BaseProtocol):
     last_frozen_state: dict[int, dict[str, Any]]
     refresh_frozen_si: bool = True
     retrained_prior_uses_server_si: bool = True
+    train_offsets: int = 3
+    # Deeper ledger read only by offset-trained rounds; None unless one is scheduled.
+    _offset_history: ReconstructionHistory | None
 
     def __init__(
         self,
@@ -495,6 +567,20 @@ class _WZProtocol(BaseProtocol):
             cache_overwrite,
         )
         self.last_frozen_state = {}
+        # Same entries as _recons_history, kept train_offsets rounds longer so a round can
+        # rebuild its own problem as it stood in earlier rounds. Only the tensor pointers repeat.
+        self._offset_history = None
+        if any(issubclass(rc, _OffsetTrainedRoundCodec) for rc in self._round_codec_classes.values()):
+            self._offset_history = ReconstructionHistory(
+                max_per_client=self.max_per_client_recons_history + self.train_offsets,
+                routine_accesses=self.routine_accesses(),
+            )
+
+    def histories(self) -> tuple[ReconstructionHistory, ...]:
+        """Return the decoder-visible ledger and, when offset rounds are scheduled, the deeper one."""
+        if self._offset_history is None:
+            return super().histories()
+        return (*super().histories(), self._offset_history)
 
     def _shifted_side_informations(
         self,
@@ -537,6 +623,15 @@ class _WZProtocol(BaseProtocol):
             return codec
 
         assert isinstance(parsed.options, dict)
+        training_history = self._recons_history
+        protocol_inputs: dict[str, Any] = {}
+        if issubclass(rc_class, _OffsetTrainedRoundCodec):
+            assert self._offset_history is not None
+            training_history = self._offset_history
+            protocol_inputs = {
+                "train_offsets": self.train_offsets,
+                "history_window": self.max_per_client_recons_history,
+            }
         codec = rc_class(
             parsed.options | {
                 "sd_slices": self.sd_slices,
@@ -544,10 +639,11 @@ class _WZProtocol(BaseProtocol):
                 "cache_overwrite": self.cache_overwrite,
             },
             round_name_full,
+            **protocol_inputs,
         )
         assert isinstance(codec, _WZRoundCodec)
 
-        t_x, t_si = codec.get_training_data(self._recons_history, client_id)
+        t_x, t_si = codec.get_training_data(training_history, client_id)
         if self.retrained_prior_uses_server_si:
             codec.set_retrained_prior_si(self._recons_history, client_id)
         quantizer = codec.build_quantizer(t_x, t_si)
@@ -576,6 +672,9 @@ class _WZProtocol(BaseProtocol):
         )
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
         snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
+        if self._offset_history is not None:
+            snapshot["train_offsets"] = self.train_offsets
+            snapshot["max_per_client_offset_history"] = self._offset_history.max_per_client
         return snapshot
 
 
@@ -602,13 +701,20 @@ class WZCancerProtocol(_WZProtocol):
         replace_O_with: str | None = None,
         refresh_frozen_si: bool = True,
         retrained_prior_uses_server_si: bool = True,
+        train_at_round: int | None = None,
+        train_offsets: int | None = None,
     ) -> None:
-        """Configure prior SI overrides and optionally replace every scheduled Oracle round."""
+        """Configure prior SI overrides, optionally replace every scheduled Oracle round, and
+        optionally collapse the schedule to one training round followed by frozen rounds only."""
         assert isinstance(refresh_frozen_si, bool), "refresh_frozen_si must be boolean."
         assert isinstance(retrained_prior_uses_server_si, bool), (
             "retrained_prior_uses_server_si must be boolean.")
         self.refresh_frozen_si = refresh_frozen_si
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
+        if train_offsets is not None:
+            assert isinstance(train_offsets, int) and train_offsets > 0, (
+                "train_offsets must be a positive integer count of lagged training problems.")
+            self.train_offsets = train_offsets
         if replace_O_with is not None:
             self.warmup_round_codecs = tuple(
                 rc.replace("O|", f"{replace_O_with}|")
@@ -616,3 +722,15 @@ class WZCancerProtocol(_WZProtocol):
             self.routine_round_codecs = tuple(
                 rc.replace("O|", f"{replace_O_with}|")
                 if rc.startswith("O|") else rc for rc in self.routine_round_codecs)
+        if train_at_round is not None:
+            offset_round_names = {rc.round_name for rc in _OffsetTrainedRoundCodec.__subclasses__()}
+            needed_history = self.max_per_client_recons_history + (
+                self.train_offsets
+                if self.routine_round_codecs[0].partition("|")[0] in offset_round_names else 0)
+            assert train_at_round >= needed_history, (
+                f"train_at_round={train_at_round} leaves fewer than "
+                f"{needed_history} preceding rounds to seed history.")
+            # Warmup is indexed by round id, so padding it puts the single training round exactly on
+            # train_at_round; the padding slots only fill index space and are never replayed.
+            self.warmup_round_codecs = ("I",) * train_at_round + (self.routine_round_codecs[0],)
+            self.routine_round_codecs = ("F",)

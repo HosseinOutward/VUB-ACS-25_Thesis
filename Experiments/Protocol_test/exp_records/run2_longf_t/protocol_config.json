@@ -1,20 +1,26 @@
 {
   "implementation": "FL_code.cancer_protocol.cancer_protocol.WZCancerProtocol",
-  "protocol_name_full": "wz_cancer|replace_O_with='T'",
+  "protocol_name_full": "wz_cancer|train_at_round=12|replace_O_with='T'",
   "options": {
+    "train_at_round": 12,
     "replace_O_with": "T"
   },
   "warmup_round_codecs": [
     "I",
     "I",
-    "T|bins_per_plane=8|num_planes=3",
-    "T|bins_per_plane=4|num_planes=3"
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "T|bins_per_plane=3|num_planes=3"
   ],
   "routine_round_codecs": [
-    "T|bins_per_plane=3|num_planes=3",
-    "F",
-    "F",
-    "F",
     "F"
   ],
   "max_per_client_recons_history": 5,
@@ -31,20 +37,6 @@
       "implementation": "FL_code.cancer_protocol.cancer_protocol.T_RoundCodec",
       "options": {
         "bins_per_plane": 3,
-        "num_planes": 3
-      }
-    },
-    "T|bins_per_plane=4|num_planes=3": {
-      "implementation": "FL_code.cancer_protocol.cancer_protocol.T_RoundCodec",
-      "options": {
-        "bins_per_plane": 4,
-        "num_planes": 3
-      }
-    },
-    "T|bins_per_plane=8|num_planes=3": {
-      "implementation": "FL_code.cancer_protocol.cancer_protocol.T_RoundCodec",
-      "options": {
-        "bins_per_plane": 8,
         "num_planes": 3
       }
     }

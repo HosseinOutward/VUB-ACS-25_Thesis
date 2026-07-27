@@ -1,18 +1,26 @@
 {
   "implementation": "FL_code.cancer_protocol.cancer_protocol.WZCancerProtocol",
-  "protocol_name_full": "wz_cancer",
-  "options": null,
+  "protocol_name_full": "wz_cancer|replace_O_with='TM'|train_at_round=12",
+  "options": {
+    "replace_O_with": "TM",
+    "train_at_round": 12
+  },
   "warmup_round_codecs": [
     "I",
     "I",
-    "O|bins_per_plane=8|num_planes=3",
-    "O|bins_per_plane=4|num_planes=3"
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "TM|bins_per_plane=3|num_planes=3"
   ],
   "routine_round_codecs": [
-    "O|bins_per_plane=3|num_planes=3",
-    "F",
-    "F",
-    "F",
     "F"
   ],
   "max_per_client_recons_history": 5,
@@ -25,24 +33,10 @@
       "implementation": "FL_code.FL_core.codec.IdentityRoundCodec",
       "options": null
     },
-    "O|bins_per_plane=3|num_planes=3": {
-      "implementation": "FL_code.cancer_protocol.cancer_protocol.Oracle_RoundCodec",
+    "TM|bins_per_plane=3|num_planes=3": {
+      "implementation": "FL_code.cancer_protocol.cancer_protocol.TM_RoundCodec",
       "options": {
         "bins_per_plane": 3,
-        "num_planes": 3
-      }
-    },
-    "O|bins_per_plane=4|num_planes=3": {
-      "implementation": "FL_code.cancer_protocol.cancer_protocol.Oracle_RoundCodec",
-      "options": {
-        "bins_per_plane": 4,
-        "num_planes": 3
-      }
-    },
-    "O|bins_per_plane=8|num_planes=3": {
-      "implementation": "FL_code.cancer_protocol.cancer_protocol.Oracle_RoundCodec",
-      "options": {
-        "bins_per_plane": 8,
         "num_planes": 3
       }
     }
@@ -76,5 +70,7 @@
     "layers": 6
   },
   "refresh_frozen_si": true,
-  "retrained_prior_uses_server_si": true
+  "retrained_prior_uses_server_si": true,
+  "train_offsets": 3,
+  "max_per_client_offset_history": 8
 }

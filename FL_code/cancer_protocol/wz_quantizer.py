@@ -288,13 +288,13 @@ class WZcfgQuant(BaseModel):
     max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
-    train_epochs: int = 120
-    reconst_ld: float = 36.73683767756248
-    train_sample_size: int = 750_000
-    train_batch_size: int = 12_500
-    lr: float = 0.004530430161538338
-    lr_step: int = 37
-    tau: float = 2.3406302935091077
+    train_epochs: int = 140
+    reconst_ld: float = 72.31601255189986
+    train_sample_size: int = 550_000
+    train_batch_size: int = 6_250
+    lr: float = 0.0056728196862653865
+    lr_step: int = 43
+    tau: float = 5.5
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
 
@@ -435,11 +435,16 @@ class WZQuantizerCancer:
     def train_model(
         self,
         x_raw: torch.Tensor,
-        si_raw_list: Sequence[torch.Tensor] | None
+        si_raw_list: Sequence[torch.Tensor] | None,
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
     ) -> None:
-        """Train repeated quantizer attempts and keep the finite attempt with the lowest loss."""
+        """Train repeated quantizer attempts and keep the finite attempt with the lowest loss.
+
+        ``extra_pairs`` adds further (target, side information) problems to the training rows only;
+        the coded vector, its side information, and every diagnostic stay those of ``x_raw``.
+        """
         if self.cache_dir is None:
-            self._train_model_uncached(x_raw, si_raw_list)
+            self._train_model_uncached(x_raw, si_raw_list, extra_pairs)
             return
 
         state_dict, training_prior_stage_rates = cache_call(
@@ -453,6 +458,10 @@ class WZQuantizerCancer:
             c_cfg=self.c_cfg,
             x_raw=x_raw,
             side_information=tuple(si_raw_list or ()),
+            # Passed only when used, so single-problem training keeps the cache keys it
+            # was written with; the hash covers every keyword it receives.
+            **({"extra_training_pairs": tuple(
+                (extra_x, tuple(extra_si)) for extra_x, extra_si in extra_pairs)} if extra_pairs else {}),
         )
         # Cache only portable training results; bind the current decoder-available
         # side information to this fresh quantizer instance.
@@ -497,6 +506,7 @@ class WZQuantizerCancer:
         self,
         x_raw: torch.Tensor,
         si_raw_list: Sequence[torch.Tensor] | None,
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
     ) -> None:
         assert self.side_info_list_used is None
         if self.no_side_info:
@@ -505,19 +515,51 @@ class WZQuantizerCancer:
         else:
             assert si_raw_list
             self.set_side_information(si_raw_list)
-            
+
         x_prep, metadata = self.preprocess_x(x_raw)
+        x_prep, side_info = self._stack_training_pairs(
+            x_prep, self.side_info_tensor(metadata), extra_pairs)
         wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
-        side_info = self.side_info_tensor(metadata)
 
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
-        bins, _ = self._encode_preprocessed(x_prep, INFERENCE_BATCH)
+        # Diagnostics describe the problem this quantizer will code, which is the leading block.
+        bins, _ = self._encode_preprocessed(x_prep[:self.vector_size], INFERENCE_BATCH)
         temp = self.prior_calculator.compute_prior_from_network(
-                self.coding_model, bins, side_info).to(torch.float16)
+                self.coding_model, bins, side_info[:self.vector_size]).to(torch.float16)
         self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             temp, bins, self.c_cfg.num_planes)
         self.training_prior_rate = sum(self.training_prior_stage_rates)
+
+    def _stack_training_pairs(
+        self,
+        x_prep: torch.Tensor,
+        side_info: torch.Tensor,
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Append further training problems below the coded one, each normalized by its own target."""
+        if not extra_pairs:
+            return x_prep, side_info
+
+        rows = x_prep.shape[0]
+        # Filled block by block rather than concatenated, because holding the parts and the
+        # concatenation at once doubles peak memory at full vector size.
+        stacked_x = torch.empty(
+            (rows * (1 + len(extra_pairs)), 1), device=x_prep.device, dtype=x_prep.dtype)
+        stacked_si = torch.empty(
+            (stacked_x.shape[0], side_info.shape[1]), device=side_info.device, dtype=side_info.dtype)
+        stacked_x[:rows], stacked_si[:rows] = x_prep, side_info
+        del x_prep, side_info
+
+        for index, (extra_x, extra_si) in enumerate(extra_pairs, start=1):
+            assert len(extra_si) == self.side_info_size, (
+                f"Extra training pair {index} has {len(extra_si)} side-information vectors; "
+                f"the quantizer is built for {self.side_info_size}.")
+            block = slice(index * rows, (index + 1) * rows)
+            extra_prep, extra_metadata = self.preprocess_x(extra_x)
+            stacked_x[block] = extra_prep
+            stacked_si[block] = self.format_side_info_tensor(extra_metadata, extra_si)
+        return stacked_x, stacked_si
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_prep: torch.Tensor,
@@ -550,9 +592,11 @@ class WZQuantizerCancer:
             if np.isfinite(loss):
                 # Check through this quantizer's own encode/decode so the pass benefits from
                 # row deduplication; the caller overwrites coding_model with the winner below.
+                # Only the leading block is checked: it is the vector this quantizer will code.
                 self.coding_model = model
-                bins, _ = self._encode_preprocessed(x_prep, INFERENCE_BATCH)
-                reconstruction = self._decode_preprocessed(bins, side_info, INFERENCE_BATCH)
+                bins, _ = self._encode_preprocessed(x_prep[:self.vector_size], INFERENCE_BATCH)
+                reconstruction = self._decode_preprocessed(
+                    bins, side_info[:self.vector_size], INFERENCE_BATCH)
                 if torch.isfinite(reconstruction).all():
                     attempt = (model, loss)
                     made_quants_and_stat.append(attempt)
@@ -735,9 +779,10 @@ def _train_quantizer_parameters(
     c_cfg: WZcfgQuant,
     x_raw: torch.Tensor,
     side_information: tuple[torch.Tensor, ...],
+    extra_training_pairs: tuple[tuple[torch.Tensor, tuple[torch.Tensor, ...]], ...] = (),
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
     quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
-    quantizer._train_model_uncached(x_raw, side_information)
+    quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs)
     assert quantizer.training_prior_stage_rates is not None
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
 

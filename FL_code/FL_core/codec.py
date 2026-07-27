@@ -376,12 +376,7 @@ class BaseProtocol:
         self._round_codec_classes = self._validate_round_codecs()
         self._recons_history = ReconstructionHistory(
             max_per_client=self.max_per_client_recons_history,
-            # Frozen rounds declare can_decode_where per instance; they inherit an
-            # earlier round's access, so they never extend the retention plan.
-            routine_accesses=[
-                access for h in self._round_codec_classes.values()
-                if isinstance(access := getattr(h, "can_decode_where", None), Access)
-            ]
+            routine_accesses=self.routine_accesses(),
         )
         self.sd_slices = sd_slices
         self.cache_dir = cache_dir
@@ -389,6 +384,27 @@ class BaseProtocol:
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
+
+    def routine_accesses(self) -> list[Access]:
+        """Return the access levels the scheduled round codecs decode with.
+
+        Frozen rounds declare can_decode_where per instance; they inherit an earlier
+        round's access, so they never extend the retention plan.
+        """
+        return [
+            access for round_codec in self._round_codec_classes.values()
+            if isinstance(access := getattr(round_codec, "can_decode_where", None), Access)
+        ]
+
+    def histories(self) -> tuple[ReconstructionHistory, ...]:
+        """Return every reconstruction ledger this protocol maintains and commits to."""
+        return (self._recons_history,)
+
+    def commit_history(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
+        """Commit one decoded reconstruction to every ledger still accepting entries."""
+        for history in self.histories():
+            if not history.frozen:
+                history.commit(reconst, record, access)
 
     def _get_curr_round_codec_name(self, round_id: int) -> tuple[type[BaseRoundCodec], ParsedConfigurableName, str]:
         if round_id < len(self.warmup_round_codecs):
@@ -538,12 +554,11 @@ def simulate_compression(
         torch.cuda.synchronize()
     decode_seconds = time.perf_counter() - start_time
     assert reconstructed.numel() == model_size
-    if not protocol._recons_history.frozen:
-        protocol._recons_history.commit(
-            reconstructed.detach().to(device="cpu", dtype=torch.float16),
-            record,
-            round_codec.can_decode_where,
-        )
+    protocol.commit_history(
+        reconstructed.detach().to(device="cpu", dtype=torch.float16),
+        record,
+        round_codec.can_decode_where,
+    )
 
     final_bytes = _get_obj_storage_size(payload)
     recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
