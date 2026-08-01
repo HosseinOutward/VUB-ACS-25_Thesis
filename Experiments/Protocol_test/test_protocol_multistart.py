@@ -37,7 +37,7 @@ F_ROUNDS = 2  # the schedule under test is one training round followed by two fr
 DEFAULT_DELTAS = PROJECT_ROOT / "_/data/federated_learning/raw_client_deltas"
 DEFAULT_RECORDS_ROOT = Path(__file__).parent / "exp_records"
 DEFAULT_RAW_ROOT = Path(__file__).parent / "exp_records_multistart"
-DEFAULT_FL_CONFIG = DEFAULT_RECORDS_ROOT / "run3_real_raw_o_nf4" / "fl_config.json"
+DEFAULT_FL_CONFIG = Path(__file__).parent / "replay_fl_config.json"
 DEFAULT_PROTOCOL_CACHE_ROOT = PROJECT_ROOT / "_/data/protocol_cache/multistart"
 
 # Both sets are pinned rather than leaning on WZcfgQuant defaults: which set the defaults

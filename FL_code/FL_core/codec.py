@@ -210,6 +210,9 @@ class CompressionRecord:
             assert value is not None, f"CompressionRecord.{field_name} replacement must not be None."
             setattr(self, field_name, value)
 
+    def save_artifacts(self, save_dir: Path) -> None:
+        """Write non-CSV artifacts attached by a concrete record; no-op by default."""
+
     def append_record_to_csv(self, save_dir: Path) -> None:
         """Append record to CSV file, expanding the header when new metrics appear."""
         save_dir.mkdir(exist_ok=True, parents=True)
@@ -479,9 +482,11 @@ def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:
             for subclass in (direct_subclass, *all_subclasses(direct_subclass))
         ]
 
+    # Underscore-prefixed intermediates are abstract and inherit their parent's name; the same
+    # convention __init_subclass__ uses to skip them has to hold when resolving a name.
     matches = [
         subclass for subclass in all_subclasses(base_class)
-        if getattr(subclass, name_attr, None) == name]
+        if getattr(subclass, name_attr, None) == name and not subclass.__name__.startswith("_")]
     assert len(matches) == 1, (
         f"Expected one {base_class.__name__} subclass with {name_attr}={name!r}; got {len(matches)}.")
     return matches[0]
@@ -580,6 +585,7 @@ def simulate_compression(
     )
 
     record.append_record_to_csv(save_dir)
+    record.save_artifacts(save_dir)
 
     return reconstructed
 

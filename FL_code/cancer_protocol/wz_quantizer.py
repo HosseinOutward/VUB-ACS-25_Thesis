@@ -280,12 +280,35 @@ class WZcfgQuant(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
+    _TRAINING_CACHE_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "bins_per_plane",
+        "num_planes",
+        "norm_slices",
+        "outlier_threshold",
+        "marginal_loss",
+        "train_epochs",
+        "reconst_ld",
+        "train_sample_size",
+        "train_batch_size",
+        "lr",
+        "lr_step",
+        "tau",
+        "prior_train_repeats",
+        "fused_optimizer",
+        "mixed_precision",
+        "source_perturbation",
+        "shared_heads",
+        "prior_context",
+        "prior_probabilities",
+        "hidden_dim",
+        "layers",
+    })
+
     bins_per_plane: int
     num_planes: int
     norm_slices: Sequence[slice] | None = None
     outlier_threshold: float | None = None
     marginal_loss: bool = False
-    max_side_info_count: int = 5
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
     train_epochs: int = 140
@@ -313,6 +336,20 @@ class WZcfgQuant(BaseModel):
     layers: int = 6
     cache_dir: Path | None = None
     cache_overwrite: bool = False
+
+    def training_cache_payload(self) -> dict[str, Any]:
+        """Return the model-semantic options used to identify cached training results."""
+        payload = self.model_dump(include=self._TRAINING_CACHE_FIELDS) | {
+            # These pinned historical values preserve the established baseline cache namespace.
+            "max_side_info_count": 5,
+            "pretrain_pth_dir": Path("FL_code/data/pre_trained_pth"),
+            "training_progress_bar": False,
+            "training_log_every_epochs": None,
+            "tf32": False,
+        }
+        if self.quantizer_train_repeats != 2:
+            payload["quantizer_train_repeats"] = self.quantizer_train_repeats
+        return payload
 
 
 class WZQuantizerCancer:
@@ -350,7 +387,7 @@ class WZQuantizerCancer:
             "si_size=0 requires marginal_loss=True; no-SI quantizers must be explicit.")
         
         self.side_info_size: int = max(si_size, 1)
-        
+
         self.coding_model: EncoderDecoderLayeredRNN = new_rnn_model(
             num_planes=self.num_planes,
             bins_per_plane=self.bins_per_plane,
@@ -477,31 +514,6 @@ class WZQuantizerCancer:
         self.training_prior_stage_rates = training_prior_stage_rates
         self.training_prior_rate = sum(training_prior_stage_rates)
 
-    def retrain_model(
-        self,
-        x_prep: torch.Tensor,
-        side_info: torch.Tensor,
-        c_cfg: WZcfgQuant,
-        wmspe_denom: float,
-    ) -> float:
-        """Retrain from the current model and restore the cached final model when available."""
-        state_dict, loss = cache_call(
-            _retrain_quantizer_parameters,
-            None if self.cache_dir is None else self.cache_dir / "quantizers",
-            model_training_hash,
-            self.cache_overwrite,
-            quantizer_class=WZQuantizerCancer,
-            c_cfg=c_cfg,
-            initial_state=self.coding_model.state_dict(),
-            x_prep=x_prep,
-            side_info=side_info,
-            wmspe_denom=wmspe_denom,
-        )
-        # The cache boundary is the completed retraining process, not its
-        # optimizer steps or failed attempts.
-        self.coding_model.load_state_dict(state_dict)
-        return loss
-
     def _train_model_uncached(
         self,
         x_raw: torch.Tensor,
@@ -518,13 +530,17 @@ class WZQuantizerCancer:
 
         x_prep, metadata = self.preprocess_x(x_raw)
         x_prep, side_info = self._stack_training_pairs(
-            x_prep, self.side_info_tensor(metadata), extra_pairs)
-        wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
+            x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []), extra_pairs)
+        self._fit_prepared(x_prep, side_info)
 
+    def _fit_prepared(self, x_prep: torch.Tensor, side_info: torch.Tensor) -> None:
+        """Fit the coding model to normalized rows and record its own training rate estimate."""
+        assert self.vector_size is not None
+        wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
         # Diagnostics describe the problem this quantizer will code, which is the leading block.
-        bins, _ = self._encode_preprocessed(x_prep[:self.vector_size], INFERENCE_BATCH)
+        bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
         temp = self.prior_calculator.compute_prior_from_network(
                 self.coding_model, bins, side_info[:self.vector_size]).to(torch.float16)
         self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
@@ -558,7 +574,7 @@ class WZQuantizerCancer:
             block = slice(index * rows, (index + 1) * rows)
             extra_prep, extra_metadata = self.preprocess_x(extra_x)
             stacked_x[block] = extra_prep
-            stacked_si[block] = self.format_side_info_tensor(extra_metadata, extra_si)
+            stacked_si[block] = self.normalize_side_info_tensor(extra_metadata, extra_si)
         return stacked_x, stacked_si
 
     def _train_finite_candidate_and_retrieve_best(
@@ -594,8 +610,8 @@ class WZQuantizerCancer:
                 # row deduplication; the caller overwrites coding_model with the winner below.
                 # Only the leading block is checked: it is the vector this quantizer will code.
                 self.coding_model = model
-                bins, _ = self._encode_preprocessed(x_prep[:self.vector_size], INFERENCE_BATCH)
-                reconstruction = self._decode_preprocessed(
+                bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
+                reconstruction = self.decode_prepared(
                     bins, side_info[:self.vector_size], INFERENCE_BATCH)
                 if torch.isfinite(reconstruction).all():
                     attempt = (model, loss)
@@ -612,10 +628,10 @@ class WZQuantizerCancer:
         Estimator subclasses that bypass the neural encoder return ``None`` soft codes.
         """
         x_prep, metadata = self.preprocess_x(x_raw)
-        bins, soft_codes = self._encode_preprocessed(x_prep, batch_size)
+        bins, soft_codes = self.encode_prepared(x_prep, batch_size)
         return bins, soft_codes, metadata
 
-    def _encode_preprocessed(self, x_prep: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode_prepared(self, x_prep: torch.Tensor, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode normalized model inputs into per-plane bin indices and soft code posteriors."""
         soft_code_batches: list[torch.Tensor] = []
 
@@ -638,7 +654,7 @@ class WZQuantizerCancer:
         assert bins.shape == (self.num_planes, self.vector_size)
         assert bins.max().item() < self.bins_per_plane
         side_info = self.side_info_tensor(metadata)
-        recons = self._decode_preprocessed(bins, side_info, batch_size)
+        recons = self.decode_prepared(bins, side_info, batch_size)
         return self.postprocess(recons, metadata)
 
     def decoding_stages_process(
@@ -651,10 +667,10 @@ class WZQuantizerCancer:
         assert self.vector_size is not None
         assert bins.shape == (self.num_planes, self.vector_size)
         side_info = self.side_info_tensor(metadata)
-        normalized = self._decode_stages_preprocessed(bins, side_info, batch_size)
+        normalized = self.decode_stages_prepared(bins, side_info, batch_size)
         return torch.stack([self.postprocess(stage, metadata) for stage in normalized])
 
-    def _decode_stages_preprocessed(
+    def decode_stages_prepared(
         self,
         bins: torch.Tensor,
         side_info: torch.Tensor,
@@ -672,14 +688,14 @@ class WZQuantizerCancer:
             decode_batch, self.coding_model, bins.shape[1], batch_size, cat_dim=1
         ).squeeze(-1)
 
-    def _decode_preprocessed(
+    def decode_prepared(
         self,
         bins: torch.Tensor,
         side_info: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
         """Decode the final normalized reconstruction stage."""
-        return self._decode_stages_preprocessed(bins, side_info, batch_size)[-1]
+        return self.decode_stages_prepared(bins, side_info, batch_size)[-1]
 
     def preprocess_x(
         self,
@@ -736,14 +752,14 @@ class WZQuantizerCancer:
     def side_info_tensor(self, source_metadata: PreprocessMetadata) -> torch.Tensor:
         """Normalize and stack the quantizer's stored side information."""
         assert self.side_info_list_used is not None, "Side information must be set before formatting."
-        return self.format_side_info_tensor(source_metadata, self.side_info_list_used)
+        return self.normalize_side_info_tensor(source_metadata, self.side_info_list_used)
 
-    def format_side_info_tensor(
+    def normalize_side_info_tensor(
         self,
         source_metadata: PreprocessMetadata,
         side_information: Sequence[torch.Tensor],
     ) -> torch.Tensor:
-        """Normalize and stack a supplied SI list without reading or changing stored SI."""
+        """Normalize and stack decoder side information."""
         assert self.vector_size is not None, "Vector size must be known before side information is formatted."
         assert all(value.numel() == self.vector_size for value in side_information), (
             f"Each side-information vector must contain {self.vector_size} values.")
@@ -787,34 +803,6 @@ def _train_quantizer_parameters(
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
 
 
-def _retrain_quantizer_parameters(
-    quantizer_class: type[WZQuantizerCancer],
-    c_cfg: WZcfgQuant,
-    initial_state: dict[str, torch.Tensor],
-    x_prep: torch.Tensor,
-    side_info: torch.Tensor,
-    wmspe_denom: float,
-) -> tuple[dict[str, torch.Tensor], float]:
-    """Run sampled retraining and return only its final portable result."""
-    quantizer = quantizer_class(c_cfg=c_cfg, si_size=side_info.shape[1])
-    quantizer.coding_model.load_state_dict(initial_state)
-    perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
-    loss = wz_model_training_loop(
-        quantizer.compute_loss,
-        quantizer.coding_model,
-        quantizer.coding_model.parameters(),
-        (x_prep,),
-        side_info,
-        c_cfg,
-        batch_size=c_cfg.train_batch_size,
-        label="Sample retraining",
-        metrics_fn=quantizer.training_metrics,
-        wmspe_denom=wmspe_denom,
-        perturb_generator=perturb_generator,
-    )
-    return quantizer.coding_model.state_dict(), loss
-
-
 def unique_row_groups(
     blocks: Sequence[torch.Tensor],
     match_bits: int,
@@ -849,8 +837,10 @@ def unique_row_groups(
         key += column.double() * weight
 
     unique_keys, inverse = torch.unique(key, return_inverse=True)
-    representatives = torch.empty(unique_keys.numel(), dtype=torch.long, device=device)
-    representatives[inverse] = torch.arange(size, device=device)
+    # amin, not a plain scatter: rows agreeing only on their prefix decode to slightly different
+    # values, so an arbitrary duplicate-index winner would make repeated decodes disagree.
+    representatives = torch.full((unique_keys.numel(),), size, dtype=torch.long, device=device)
+    representatives.scatter_reduce_(0, inverse, torch.arange(size, device=device), "amin")
 
     reference = representatives[inverse]
     mismatched = torch.zeros(size, dtype=torch.bool, device=device)
@@ -877,19 +867,19 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
     last_encoding_stats: DeduplicationStats | None = None
     last_decoding_stats: DeduplicationStats | None = None
 
-    def _encode_preprocessed(
+    def encode_prepared(
         self,
         x_prep: torch.Tensor,
         batch_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode one representative per normalized float-prefix group."""
         representatives, inverse, collisions = unique_row_groups((x_prep,), self.match_bits)
-        bins, soft_codes = super()._encode_preprocessed(x_prep[representatives], batch_size)
+        bins, soft_codes = super().encode_prepared(x_prep[representatives], batch_size)
         inverse_cpu = inverse.cpu()
         bins = bins[:, inverse_cpu]
         soft_codes = soft_codes[:, inverse_cpu]
         if collisions.numel():
-            collision_bins, collision_codes = super()._encode_preprocessed(
+            collision_bins, collision_codes = super().encode_prepared(
                 x_prep[collisions], batch_size
             )
             collisions_cpu = collisions.cpu()
@@ -903,7 +893,7 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
         )
         return bins, soft_codes
 
-    def _decode_stages_preprocessed(
+    def decode_stages_prepared(
         self,
         bins: torch.Tensor,
         side_info: torch.Tensor,
@@ -914,11 +904,11 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
         representatives, inverse, collisions = unique_row_groups(
             (side_info, bins_device.T), self.match_bits
         )
-        recons = super()._decode_stages_preprocessed(
+        recons = super().decode_stages_prepared(
             bins_device[:, representatives], side_info[representatives], batch_size
         ).to(self.device)[:, inverse]
         if collisions.numel():
-            recons[:, collisions] = super()._decode_stages_preprocessed(
+            recons[:, collisions] = super().decode_stages_prepared(
                 bins_device[:, collisions], side_info[collisions], batch_size
             ).to(self.device)
 

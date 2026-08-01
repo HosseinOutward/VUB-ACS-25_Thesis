@@ -24,16 +24,22 @@ class PriorCalculator:
     """Prior utilities used by NewQuant to estimate conditional symbol rates."""
 
     @staticmethod
-    def compute_plane_rates(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> tuple[float, ...]:
-        """Compute each plane's mean code length from prior probabilities and realized bins."""
+    def compute_code_lengths(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> torch.Tensor:
+        """Return every symbol's code length in bits, as a (num_planes, positions) tensor."""
         prior = prior.float()
         sample_idx = torch.arange(bins.shape[1], device=prior.device)
-        return tuple(
+        return torch.stack([
             -torch.log2(
                 prior[plane, sample_idx, bins[plane].to(prior.device, torch.long)].clamp(min=1e-8)
-            ).mean().item()
+            )
             for plane in range(num_planes)
-        )
+        ])
+
+    @staticmethod
+    def compute_plane_rates(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> tuple[float, ...]:
+        """Compute each plane's mean code length from prior probabilities and realized bins."""
+        return tuple(
+            PriorCalculator.compute_code_lengths(prior, bins, num_planes).mean(dim=1).tolist())
 
     @staticmethod
     def compute_rate_from_prior_tensor(prior: torch.Tensor, bins: torch.Tensor, num_planes: int) -> float:

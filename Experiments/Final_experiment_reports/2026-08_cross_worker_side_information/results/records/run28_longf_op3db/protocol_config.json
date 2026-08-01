@@ -1,0 +1,91 @@
+{
+  "implementation": "FL_code.cancer_protocol.cancer_protocol.WZCancerProtocol",
+  "protocol_name_full": "wz_cancer|replace_O_with='OP'|extra_train_tokens=(\"split_mask='Experiments/Protocol_test/wz_benefit_split/three_way_db.npy'\",)|train_at_round=12",
+  "options": {
+    "replace_O_with": "OP",
+    "extra_train_tokens": [
+      "split_mask='Experiments/Protocol_test/wz_benefit_split/three_way_db.npy'"
+    ],
+    "train_at_round": 12
+  },
+  "warmup_round_codecs": [
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "I",
+    "OP|split_mask='Experiments/Protocol_test/wz_benefit_split/three_way_db.npy'|bins_per_plane=3|num_planes=3"
+  ],
+  "routine_round_codecs": [
+    "F"
+  ],
+  "max_per_client_recons_history": 5,
+  "round_codecs": {
+    "F": {
+      "implementation": "FL_code.cancer_protocol.cancer_protocol.F_RoundCodec",
+      "options": null
+    },
+    "I": {
+      "implementation": "FL_code.FL_core.codec.IdentityRoundCodec",
+      "options": null
+    },
+    "OP|split_mask='Experiments/Protocol_test/wz_benefit_split/three_way_db.npy'|bins_per_plane=3|num_planes=3": {
+      "implementation": "FL_code.cancer_protocol.cancer_protocol.OP_RoundCodec",
+      "options": {
+        "split_mask": "Experiments/Protocol_test/wz_benefit_split/three_way_db.npy",
+        "bins_per_plane": 3,
+        "num_planes": 3
+      }
+    }
+  },
+  "quantizer_defaults": {
+    "outlier_threshold": null,
+    "marginal_loss": false,
+    "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+    "train_epochs": 140,
+    "reconst_ld": 72.31601255189986,
+    "train_sample_size": 550000,
+    "train_batch_size": 6250,
+    "lr": 0.0056728196862653865,
+    "lr_step": 43,
+    "tau": 5.5,
+    "quantizer_train_repeats": 2,
+    "prior_train_repeats": 2,
+    "sample_fraction": 0.05,
+    "sample_extra_planes": 0,
+    "fresh_sample_quantizer": false,
+    "retrain_on_sample": false,
+    "own_si_dropout": 0.0,
+    "own_si_span": [
+      0,
+      0
+    ],
+    "si_flag_dim": 4,
+    "own_si_flag_only": 0.0,
+    "own_si_scramble": 0.0,
+    "si_flag_at_inference": true,
+    "dump_element_metrics": false,
+    "training_progress_bar": false,
+    "training_log_every_epochs": null,
+    "tf32": false,
+    "fused_optimizer": true,
+    "mixed_precision": false,
+    "deduplicate_training": true,
+    "training_match_bits": 26,
+    "source_perturbation": "none",
+    "shared_heads": true,
+    "prior_context": "hard",
+    "prior_probabilities": "categorical",
+    "hidden_dim": 74,
+    "layers": 6
+  },
+  "refresh_frozen_si": true,
+  "retrained_prior_uses_server_si": true
+}

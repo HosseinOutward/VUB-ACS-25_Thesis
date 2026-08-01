@@ -5,7 +5,7 @@ from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 import struct
-from typing import Any, Callable, TypeVar, cast
+from typing import Any, Callable, Protocol, TypeVar, cast, runtime_checkable
 
 from cachier import cachier
 from pydantic import BaseModel
@@ -14,37 +14,13 @@ import torch
 
 T = TypeVar("T")
 
-# This explicit contract prevents new logging or execution fields from silently
-# invalidating every learned-model entry. Add a field only when changing it must
-# select a separately trained model.
-# deduplicate_training and training_match_bits are deliberately absent: collapsing duplicate
-# rows preserves the batch loss exactly, so both settings train statistically equivalent
-# models and may share cache entries. They are not bit-reproducible across the flag, though,
-# because duplicates share one Gumbel draw instead of one each; a run that must compare the
-# two settings has to pass cache_overwrite rather than rely on the key.
-MODEL_TRAINING_CONFIG_FIELDS: frozenset[str] = frozenset({
-    "bins_per_plane",
-    "num_planes",
-    "norm_slices",
-    "outlier_threshold",
-    "marginal_loss",
-    "train_epochs",
-    "reconst_ld",
-    "train_sample_size",
-    "train_batch_size",
-    "lr",
-    "lr_step",
-    "tau",
-    "prior_train_repeats",
-    "fused_optimizer",
-    "mixed_precision",
-    "source_perturbation",
-    "shared_heads",
-    "prior_context",
-    "prior_probabilities",
-    "hidden_dim",
-    "layers",
-})
+
+@runtime_checkable
+class ModelTrainingCacheConfig(Protocol):
+    """Configuration contract consumed by the generic learned-model cache."""
+
+    def training_cache_payload(self) -> Mapping[str, Any]:
+        """Return only configuration values that determine trained model parameters."""
 
 
 def cache_call(
@@ -120,21 +96,12 @@ def model_training_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     """Hash inputs that determine the learned model, excluding execution-only settings."""
     assert not args
     c_cfg = kwargs["c_cfg"]
-    assert isinstance(c_cfg, BaseModel)
-    assert MODEL_TRAINING_CONFIG_FIELDS <= type(c_cfg).model_fields.keys()
-    # Target, side-information, bins, and soft codes remain content-hashed.
-    # Configuration is opt-in so unrelated future fields reuse existing work.
-    hashed_kwargs = kwargs | {
-        "c_cfg": c_cfg.model_dump(include=MODEL_TRAINING_CONFIG_FIELDS) | {
-            # Preserve keys written before the allowlist without letting these
-            # non-semantic historical fields vary the cache identity.
-            "max_side_info_count": 5,
-            "pretrain_pth_dir": Path("FL_code/data/pre_trained_pth"),
-            "training_progress_bar": False,
-            "training_log_every_epochs": None,
-            "tf32": False,
-        }
-    }
+    assert isinstance(c_cfg, ModelTrainingCacheConfig), (
+        f"{type(c_cfg).__name__} must implement training_cache_payload() before it can use "
+        "model_training_hash.")
+    # Tensor inputs and model-specific options remain content-hashed; the config owns the decision
+    # about which of its fields are semantic to training.
+    hashed_kwargs = kwargs | {"c_cfg": c_cfg.training_cache_payload()}
     return content_hash((), {"cache_version": 1, **hashed_kwargs})
 
 

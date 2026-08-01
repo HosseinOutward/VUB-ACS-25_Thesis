@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 import torch
@@ -9,14 +9,19 @@ import torch.nn.functional as F
 
 
 class CustomRNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, layers, output_activation=False):
-
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        layers: int,
+        output_activation: bool = False,
+    ) -> None:
         super().__init__()
 
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.layers = layers
-        self.output_activation = output_activation
+        self.input_dim: int = input_dim
+        self.hidden_dim: int = hidden_dim
+        self.layers: int = layers
+        self.output_activation: bool = output_activation
 
         input_layers = [nn.Linear(input_dim, hidden_dim)]
         input_layers.extend([
@@ -60,20 +65,31 @@ class CustomRNN(nn.Module):
 
 
 class EncoderDecoderLayeredRNN(nn.Module):
-    def __init__(self, input_dim, side_info_size, bins_per_plane, num_planes, layers, hidden_dim,
-                 shared_encoder=False, shared_decoder=False, shared_priors=False, marginal=False,
-                 output_activation=None):
+    def __init__(
+        self,
+        input_dim: int,
+        side_info_size: int,
+        bins_per_plane: int,
+        num_planes: int,
+        layers: int,
+        hidden_dim: int,
+        shared_encoder: bool = False,
+        shared_decoder: bool = False,
+        shared_priors: bool = False,
+        marginal: bool = False,
+        output_activation: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
         super().__init__()
 
         assert bins_per_plane > 1, 'need at least single bit (2 bins) per plane'
 
-        self.bins_per_plane:int = bins_per_plane
-        self.num_planes:int = num_planes
-        self.shared_decoder = shared_decoder
-        self.shared_encoder = shared_encoder
-        self.shared_priors = shared_priors
-        self.marginal = marginal
-        self.output_activation = output_activation
+        self.bins_per_plane: int = bins_per_plane
+        self.num_planes: int = num_planes
+        self.shared_decoder: bool = shared_decoder
+        self.shared_encoder: bool = shared_encoder
+        self.shared_priors: bool = shared_priors
+        self.marginal: bool = marginal
+        self.output_activation: Callable[[torch.Tensor], torch.Tensor] | None = output_activation
 
         cond_input_dim = bins_per_plane if marginal else bins_per_plane + side_info_size
         self.encoder = CustomRNN(input_dim, hidden_dim, layers, output_activation=True)
@@ -96,7 +112,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             self.conditionalPrior = nn.Linear(hidden_dim, bins_per_plane)
 
     @property
-    def bin_count(self):
+    def bin_count(self) -> int:
         return self.bins_per_plane**self.num_planes
 
     @staticmethod
@@ -119,9 +135,16 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
     def decoder_state_dict(self) -> dict[str, torch.Tensor]:
         """Decoder-side parameters: decoder RNN, reconstructor heads, and the conditional prior network."""
-        return self._transmission_state_dict(self.state_dict(), ('decoder.', 'reconstructor', 'conditional'))
+        return self._transmission_state_dict(
+            self.state_dict(), ('decoder.', 'reconstructor', 'conditional'))
 
-    def encode(self, x, tau=1., force_softmax=False):
+    def encode(
+        self,
+        x: torch.Tensor,
+        tau: float = 1.0,
+        force_softmax: bool = False,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+        """Map scalar inputs to one symbol and code vector per refinement stage."""
         if self.training:
             softmax = partial(F.gumbel_softmax, tau=tau, hard=False)
         else:
@@ -143,7 +166,18 @@ class EncoderDecoderLayeredRNN(nn.Module):
             codes = [F.one_hot(bin, num_classes=self.bins_per_plane).float() for bin in bins]
         return bins, codes
 
-    def forward(self, x, y, tau=1.):
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor | None,
+        tau: float = 1.0,
+    ) -> tuple[
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+        list[torch.Tensor],
+    ]:
+        """Run the encoder, decoder, and in-model symbol prior for training."""
         # Encoder
         bins, codes = self.encode(x=x, tau=tau)
 
@@ -155,7 +189,13 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
         return reconstructed, bins, codes, priors
 
-    def decode(self, codes, y):
+    def decode(
+        self,
+        codes: Sequence[torch.Tensor],
+        y: torch.Tensor | None,
+    ) -> list[torch.Tensor]:
+        """Reconstruct every refinement stage from code vectors and model side information."""
+        assert y is not None, "The decoder requires its formatted side-information tensor."
         rnn_d_inputs = torch.stack([torch.cat([c, y], dim=-1) for c in codes], dim=1)
         rnn_d_out = self.decoder(rnn_d_inputs)
         if self.shared_decoder is False:
@@ -185,6 +225,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         if len(codes)!=1:
             rnn_inputs_prior = torch.cat([rnn_inputs_prior, torch.stack(codes[:-1], dim=1)], dim=1)
         if not self.marginal:
+            assert y is not None, "A conditional prior requires decoder side information."
             temp = y.unsqueeze(1).repeat(1, self.num_planes, 1)
             rnn_inputs_prior = torch.cat([temp, rnn_inputs_prior], dim=-1)
 

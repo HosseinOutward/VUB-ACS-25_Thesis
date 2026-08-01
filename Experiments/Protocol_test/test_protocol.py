@@ -30,6 +30,9 @@ DEFAULT_PROTOCOL = "wz_cancer"
 DEFAULT_RECONSTRUCTIONS = PROJECT_ROOT / "_/data/federated_learning/T_RD_reconst"
 DEFAULT_DELTAS = PROJECT_ROOT / "_/data/federated_learning/client_deltas"
 DEFAULT_RECORDS_ROOT = Path(__file__).parent / "exp_records"
+# The delta dump carries its own fl_config.json, but it was written by the pre-protocol API and no
+# longer validates; this one is the FL setup that produced those deltas, minus the replay-only fields.
+DEFAULT_FL_CONFIG = Path(__file__).parent / "replay_fl_config.json"
 
 
 class HistorySource(StrEnum):
@@ -56,6 +59,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reconstructions", type=Path, default=DEFAULT_RECONSTRUCTIONS)
     parser.add_argument("--deltas", type=Path, default=DEFAULT_DELTAS)
+    parser.add_argument("--fl-config", type=Path, default=DEFAULT_FL_CONFIG)
     parser.add_argument("--records-root", type=Path, default=DEFAULT_RECORDS_ROOT)
     parser.add_argument(
         "--replace-commits-with-raw",
@@ -193,7 +197,7 @@ def main() -> None:
 
     set_global_seed(args.seed)
     cfg = _load_replay_config(
-        args.reconstructions / "fl_config.json",
+        args.fl_config,
         args.protocol,
         args.name,
         args.records_root,
