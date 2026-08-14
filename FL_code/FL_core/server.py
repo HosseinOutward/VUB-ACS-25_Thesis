@@ -6,6 +6,7 @@ import torch.distributed as dist
 from FL_code.run_fl import FLConfig
 from .utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
 from .codec import simulate_compression, create_protocol
+from .tensor_storage import save_tensor
 
 
 def run_federated_server(
@@ -35,6 +36,11 @@ def run_federated_server(
 
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using protocol: {protocol.__class__.__name__}")
+
+    # FedAvgM as a plain torch optimizer over the aggregated delta (see _aggregate_and_update).
+    server_opt = torch.optim.SGD(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=cfg.server_lr, momentum=cfg.server_momentum, nesterov=cfg.server_nesterov)
 
     for rnd_i in range(cfg.rounds + 1):
         # ---- Recalibrate then evaluate global model ----
@@ -93,18 +99,28 @@ def run_federated_server(
             if cfg.debug_save_recons is not None:
                 recon_data_path = cfg.debug_data_folder / cfg.debug_save_recons
                 recon_data_path.mkdir(parents=True, exist_ok=True)
-                torch.save(recon_delta_vec.cpu(), recon_data_path / f'round_{rnd_i}_client_{rcvd_client_id}.pt')
+                save_tensor(
+                    recon_delta_vec.cpu(),
+                    recon_data_path / f'round_{rnd_i}_client_{rcvd_client_id}.pt',
+                    "zstd",
+                )
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))
 
-        _aggregate_and_update(model, grads_list, sample_counts, sd_manager)
+        _aggregate_and_update(model, grads_list, sample_counts, sd_manager, server_opt)
 
     # Signal clients to terminate
     dist.broadcast(torch.tensor([-1], dtype=torch.long), src=0)
 
 
-def _aggregate_and_update(model, grads_list, sample_counts, sd_manager: StateDictManager) -> None:
-    """FedAvg aggregation weighted by sample counts."""
+def _aggregate_and_update(
+    model: torch.nn.Module,
+    grads_list: list[dict[str, torch.Tensor]],
+    sample_counts: list[int],
+    sd_manager: StateDictManager,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    """FedAvg aggregation weighted by sample counts, applied through the server optimizer."""
     total_samples = sum(sample_counts)
     weights = [n / total_samples for n in sample_counts]
 
@@ -115,4 +131,10 @@ def _aggregate_and_update(model, grads_list, sample_counts, sd_manager: StateDic
         for grad_dict, weight in zip(grads_list[1:], weights[1:]):
             aggregated_delta[key].add_(grad_dict[key], alpha=weight)
 
-    sd_manager.apply_delta_inplace(model, aggregated_delta)
+    # Optimizers descend, and the aggregated delta is the direction to move toward, so it enters
+    # negated. Assigning replaces last round's grad outright, which is why there is no zero_grad.
+    parameters = dict(model.named_parameters())
+    for key in sd_manager.keys:
+        target = parameters[key]
+        target.grad = aggregated_delta[key].to(device=target.device, dtype=target.dtype).neg()
+    optimizer.step()

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+import copy
 from typing import Any, ClassVar
 
 import torch
 
-from FL_code.FL_core.codec import Access, BaseProtocol, BaseRoundCodec, ReconstructionHistory
+from FL_code.FL_core.codec import Access, BaseProtocol, BaseRoundCodec, CompressionRecord
 
 from .round_codecs import (
     CancerRecord,
@@ -20,19 +22,125 @@ from .round_codecs import (
 from .wz_quantizer import WZcfgQuant
 
 
-class _WZProtocol(BaseProtocol):
-    """Schedule WZ round policies and own the decoder-visible reconstruction ledgers."""
+@dataclass(frozen=True, slots=True)
+class HistoryEntry:
+    """One reconstructed delta committed by the WZ protocol after a successful decode."""
+    tensor: torch.Tensor
+    round_id: int
+    client_id: int
+    access: Access
+    round_name: str | None
 
-    max_per_client_recons_history = 5
-    warmup_round_codecs: ClassVar[tuple[str, ...]]
-    routine_round_codecs: ClassVar[tuple[str, ...]]
+
+class ReconstructionHistory:
+    """Bounded ledger of reconstructed deltas that enforces decoder-side visibility.
+
+    Owned by the WZ protocol, not by the FL loop: only a schedule whose codecs condition on earlier
+    reconstructions needs one. Both ledgers hold the same entry objects, so a reconstruction is
+    stored once no matter how many processes may read it.
+    """
+
+    def __init__(
+        self, max_per_client: int | None,
+        # Reconstructions are retained exactly as the decoder produced them. Kept as an asserted
+        # field rather than a bare assumption because half precision cannot hold these values:
+        # mean |delta| is around 1e-5, already inside float16's subnormals.
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        assert max_per_client != 0, 'to disable reconstruction history, set max_per_client to None'
+        self.max_per_client: int = max_per_client or 0
+        self.dtype: torch.dtype = dtype
+        self._server: dict[int, list[HistoryEntry]] = {}
+        self._temporal: dict[int, list[HistoryEntry]] = {}
+        self.frozen: bool = self.max_per_client == 0
+
+    def freeze(self) -> None:
+        """Prevent further commits to the reconstruction history."""
+        self.frozen = True
+
+    def copy(self) -> ReconstructionHistory:
+        """Return a state copy that reuses the same immutable history entries.
+
+        Shallow-copied and then given its own ledger lists, rather than rebuilt field by field: a
+        field added to `__init__` would otherwise be silently missing from every copy.
+        """
+        copied = copy.copy(self)
+        copied._server = {
+            client_id: entries.copy() for client_id, entries in self._server.items()
+        }
+        copied._temporal = {
+            client_id: entries.copy() for client_id, entries in self._temporal.items()
+        }
+        return copied
+
+    def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
+        """Commit a reconstructed tensor to every ledger allowed to retain it."""
+        assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
+        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
+        if access is Access.NONE:
+            return
+
+        entry = HistoryEntry(
+            tensor=reconst,
+            round_id=record.round_id,
+            client_id=record.client_id,
+            access=access,
+            round_name=record.round_name_full,
+        )
+        self._add_entry(self._server, entry)
+        if access is Access.TEMPORAL_TOO:
+            self._add_entry(self._temporal, entry)
+
+    def view(self, access: Access, client_id: int) -> dict[int, tuple[HistoryEntry, ...]]:
+        """Return the history entries visible to the requested process.
+
+        `client_id` selects the worker asking. A worker sees only its own temporal ledger, while
+        the server sees every client's, so under SERVER_ONLY the caller's id narrows nothing and
+        the whole ledger set comes back keyed by client.
+        """
+        if access is Access.NONE:
+            return dict()
+
+        if access is Access.TEMPORAL_TOO:
+            assert client_id in self._temporal, (
+                f"No temporal reconstruction history exists for client {client_id}.")
+            return {client_id: tuple(self._temporal[client_id])}
+
+        assert access is Access.SERVER_ONLY, f"Unknown access policy: {access!r}."
+        return {
+            visible_client: tuple(ledger)
+            for visible_client, ledger in self._server.items()
+        }
+
+    def _add_entry(self, history: dict[int, list[HistoryEntry]], entry: HistoryEntry) -> None:
+        ledger = history.setdefault(entry.client_id, [])
+        ledger.append(entry)
+        if len(ledger) > self.max_per_client:
+            ledger.pop(0)
+
+
+class _WZProtocol(BaseProtocol):
+    """Schedule WZ round policies and own the decoder-visible reconstruction ledger.
+
+    The ledgers are the protocol's own state, not the FL loop's: the loop only hands each decoded
+    reconstruction back through `after_decode`. One training problem per round: each scheduled codec
+    is trained from the ledger the decoder can see, and frozen rounds replay the model the last
+    training round produced. Training on more than the current round is an experiment-side extension
+    of `allocate_training_histories`, `codec_protocol_inputs` and `training_problem`; nothing here
+    assumes it exists.
+    """
+
+    max_per_client_recons_history: ClassVar[int | None] = 5
+    _recons_history: ReconstructionHistory
+    # Every ledger this protocol commits decoded reconstructions to, and that a replay seeds.
+    histories: tuple[ReconstructionHistory, ...]
+    warmup_round_codecs: tuple[str, ...]
+    routine_round_codecs: tuple[str, ...]
     protocol_name: ClassVar[str]
 
     refresh_frozen_si: bool = True
     retrained_prior_uses_server_si: bool = True
-    train_offsets: tuple[int, ...] = (1, 2, 3)
     last_trained_codec: dict[int, _WZRoundCodec]
-    _lagged_history: ReconstructionHistory | None
     _train_at_round: int | None = None
 
     def __init__(
@@ -51,32 +159,36 @@ class _WZProtocol(BaseProtocol):
             cache_overwrite,
         )
         self.last_trained_codec = {}
-        lagged_depth = max(
-            (
-                round_codec.history_depth(self.train_offsets)
-                for round_codec in self._round_codec_classes.values()
-                if issubclass(round_codec, _WZRoundCodec)
-            ),
-            default=0,
-        )
-        self._lagged_history = (
-            ReconstructionHistory(
-                max_per_client=self.max_per_client_recons_history + lagged_depth,
-                routine_accesses=self.routine_accesses(),
-            )
-            if lagged_depth
-            else None
-        )
+        self._recons_history = ReconstructionHistory(self.max_per_client_recons_history)
+        self.histories = (self._recons_history,)
+        self.allocate_training_histories()
         if self._train_at_round is not None:
-            assert self._train_at_round >= self.max_per_client_recons_history + lagged_depth, (
-                f"train_at_round={self._train_at_round} leaves fewer than "
-                f"{self.max_per_client_recons_history + lagged_depth} preceding history rounds.")
+            required = max(history.max_per_client for history in self.histories)
+            assert self._train_at_round >= required, (
+                f"train_at_round={self._train_at_round} leaves fewer than {required} preceding "
+                "history rounds.")
 
-    def histories(self) -> tuple[ReconstructionHistory, ...]:
-        """Return the ordinary decoder ledger and any deeper lagged-training ledger."""
-        if self._lagged_history is None:
-            return super().histories()
-        return (*super().histories(), self._lagged_history)
+    def allocate_training_histories(self) -> None:
+        """Append ledgers beyond the decoder-visible one; a single-round schedule needs none."""
+
+    def after_decode(
+        self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
+    ) -> None:
+        """Commit the round's reconstruction under the access level that codec decodes with."""
+        for history in self.histories:
+            history.commit(reconst, record, round_codec.can_decode_where)
+
+    def codec_protocol_inputs(
+        self, round_codec_class: type[_WZRoundCodec], previous: _WZRoundCodec | None
+    ) -> dict[str, Any]:
+        """Return constructor inputs the protocol supplies; ordinary WZ rounds need none."""
+        return {}
+
+    def training_problem(
+        self, codec: _WZRoundCodec, round_id: int, client_id: int
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
+        """Return the (target, SI) this codec trains on, read from the decoder-visible ledger."""
+        return codec.get_training_data(self._recons_history, client_id)
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the scheduled codec with only the history and model state its policy requests."""
@@ -85,31 +197,11 @@ class _WZProtocol(BaseProtocol):
             return round_codec_class(parsed.options, round_name_full)
 
         previous = self.last_trained_codec.get(client_id)
-        if round_codec_class is F_RoundCodec:
-            assert previous is not None, f"No frozen quantizer exists for client {client_id}."
-            side_information = None
-            if self.refresh_frozen_si:
-                side_information = [
-                    entry.tensor
-                    for client_history in self._recons_history.view(
-                        previous.can_decode_where, client_id
-                    ).values()
-                    for entry in client_history
-                ]
-                assert len(side_information) == previous.quantizer.side_info_size, (
-                    "Refreshed side information no longer matches the frozen quantizer.")
-            frozen = previous.frozen_round_codec(round_name_full, side_information)
-            assert isinstance(frozen, _WZRoundCodec)
-            if self.retrained_prior_uses_server_si:
-                frozen.set_retrained_prior_si(self._recons_history, client_id)
-            return frozen
+        if issubclass(round_codec_class, F_RoundCodec):
+            return self._create_frozen_codec(
+                round_codec_class, round_name_full, previous, client_id)
 
         assert isinstance(parsed.options, dict)
-        history_depth = round_codec_class.history_depth(self.train_offsets)
-        training_history = self._recons_history
-        if history_depth:
-            assert self._lagged_history is not None
-            training_history = self._lagged_history
         codec = round_codec_class(
             parsed.options | {
                 "sd_slices": self.sd_slices,
@@ -117,20 +209,44 @@ class _WZProtocol(BaseProtocol):
                 "cache_overwrite": self.cache_overwrite,
             },
             round_name_full,
-            **round_codec_class.protocol_inputs(
-                self.max_per_client_recons_history,
-                self.train_offsets,
-                previous,
-            ),
+            **self.codec_protocol_inputs(round_codec_class, previous),
         )
         assert isinstance(codec, _WZRoundCodec)
 
-        target, side_information = codec.get_training_data(training_history, client_id)
+        target, side_information = self.training_problem(codec, round_id, client_id)
         if self.retrained_prior_uses_server_si:
             codec.set_retrained_prior_si(self._recons_history, client_id)
         codec.build_quantizer(target, side_information)
         self.last_trained_codec[client_id] = codec
         return codec
+
+    def _create_frozen_codec(
+        self,
+        frozen_class: type[F_RoundCodec],
+        round_name_full: str,
+        previous: _WZRoundCodec | None,
+        client_id: int,
+    ) -> BaseRoundCodec:
+        """Replay the last trained model for this client, advancing its SI window if configured."""
+        assert previous is not None, f"No frozen quantizer exists for client {client_id}."
+        side_information = None
+        # A marginal quantizer codes without side information, so there is no SI window to
+        # advance; refreshing is silently inapplicable rather than a configuration error.
+        if self.refresh_frozen_si and not previous.quantizer.no_side_info:
+            side_information = [
+                entry.tensor
+                for client_history in self._recons_history.view(
+                    previous.can_decode_where, client_id
+                ).values()
+                for entry in client_history
+            ]
+            assert len(side_information) == previous.quantizer.side_info_size, (
+                "Refreshed side information no longer matches the frozen quantizer.")
+        frozen = previous.frozen_round_codec(frozen_class, round_name_full, side_information)
+        assert isinstance(frozen, _WZRoundCodec)
+        if self.retrained_prior_uses_server_si:
+            frozen.set_retrained_prior_si(self._recons_history, client_id)
+        return frozen
 
     def config_snapshot(self) -> dict[str, Any]:
         """Return the WZ schedule, quantizer defaults, and SI/history policies."""
@@ -148,11 +264,9 @@ class _WZProtocol(BaseProtocol):
                 "cache_overwrite",
             },
         )
+        snapshot["max_per_client_recons_history"] = self.max_per_client_recons_history
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
         snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
-        if self._lagged_history is not None:
-            snapshot["train_offsets"] = self.train_offsets
-            snapshot["max_per_client_offset_history"] = self._lagged_history.max_per_client
         return snapshot
 
 
@@ -181,24 +295,12 @@ class WZCancerProtocol(_WZProtocol):
         refresh_frozen_si: bool = True,
         retrained_prior_uses_server_si: bool = True,
         train_at_round: int | None = None,
-        train_offsets: int | Sequence[int] | None = None,
     ) -> None:
         """Configure SI policies and optionally replace/collapse the scheduled training rounds."""
         assert isinstance(refresh_frozen_si, bool)
         assert isinstance(retrained_prior_uses_server_si, bool)
         self.refresh_frozen_si = refresh_frozen_si
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
-        if train_offsets is not None:
-            offsets = (
-                tuple(range(1, train_offsets + 1))
-                if isinstance(train_offsets, int)
-                else tuple(train_offsets)
-            )
-            assert offsets and all(isinstance(offset, int) and offset > 0 for offset in offsets), (
-                "train_offsets must be a positive count or a sequence of positive offsets.")
-            assert len(set(offsets)) == len(offsets), (
-                f"train_offsets repeats an offset: {offsets}.")
-            self.train_offsets = tuple(sorted(offsets))
 
         assert not extra_train_tokens or replace_O_with is not None, (
             "extra_train_tokens configures the replacement round, so replace_O_with is required.")

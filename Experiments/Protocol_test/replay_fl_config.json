@@ -10,7 +10,6 @@
   "local_epochs": 5,
   "batch_size": 500,
   "lr": 0.001,
-  "weight_decay": 0.0001,
   "recalibrate_bn": true,
   "bn_recalib_batches": 100,
   "client_eval_every_n_rounds": 1,

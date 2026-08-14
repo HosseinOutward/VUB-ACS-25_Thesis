@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 import csv
@@ -14,7 +13,7 @@ import numpy as np
 
 from FL_code.FL_core.utils import (
     ParsedConfigurableName,
-    _get_obj_storage_size,
+    payload_size_mib,
     compress_data_list,
     decompress_data_list,
     parse_configurable_name,
@@ -27,119 +26,11 @@ if TYPE_CHECKING:
 DEFAULT_PROTOCOL_CACHE_DIR = Path("_/data/protocol_cache")
 
 
-# --- History management --- #
 class Access(Enum):
-    """Which reconstructed-gradient history entries a process may inspect."""
+    """Where a round codec's reconstruction may be decoded, and so who may retain it."""
     NONE = "none"
     SERVER_ONLY = "server_only"
     TEMPORAL_TOO = "temporal_too"
-
-
-@dataclass(frozen=True, slots=True)
-class HistoryEntry:
-    """One reconstructed delta committed by the codec after a successful decode."""
-    tensor: torch.Tensor
-    round_id: int
-    client_id: int
-    access: Access
-    round_name: str | None
-
-
-class ReconstructionHistory:
-    """Owns reconstructed-gradient history and enforces decoder-side visibility."""
-
-    def __init__(
-        self, max_per_client: int | None, routine_accesses: Sequence[Access],
-        dtype: torch.dtype = torch.float16,
-    ) -> None:
-        assert max_per_client != 0, 'to disable reconstruction history, set max_per_client to None'
-        self.max_per_client: int = max_per_client if max_per_client else 0
-        self.dtype: torch.dtype = dtype
-        self._server: dict[int, list[HistoryEntry]] = {}
-        self._temporal: dict[int, list[HistoryEntry]] = {}
-
-        self._keep_server: bool = False
-        self._keep_temporal: bool = False
-        self.set_future_commit_access(tuple(routine_accesses))
-
-        self.frozen: bool = self.max_per_client == 0
-
-    def freeze(self) -> None:
-        """Prevent further commits to the reconstruction history."""
-        self.frozen = True
-
-    def set_future_commit_access(self, routine_accesses: Sequence[Access]) -> None:
-        """Discard ledgers that the repeating routine phase will never read."""
-        routine_plan = tuple(routine_accesses)
-        assert all(isinstance(access, Access) for access in routine_plan), (
-            "Routine history access plan must contain Access values.")
-        assert all(access is not Access.NONE for access in routine_plan), (
-            "Routine history access plan must not contain Access.NONE.")
-
-        self._keep_server = any(access in (Access.SERVER_ONLY, Access.TEMPORAL_TOO) for access in routine_plan)
-        self._server = {} if not self._keep_server else self._server
-        self._keep_temporal = any(access is Access.TEMPORAL_TOO for access in routine_plan)
-        self._temporal = {} if not self._keep_temporal else self._temporal
-
-    def copy(self) -> ReconstructionHistory:
-        """Return a state copy that reuses the same immutable history entries."""
-        copied = type(self).__new__(type(self))
-        copied.max_per_client = self.max_per_client
-        copied.dtype = self.dtype
-        copied._server = {
-            client_id: entries.copy()
-            for client_id, entries in self._server.items()
-        }
-        copied._temporal = {
-            client_id: entries.copy()
-            for client_id, entries in self._temporal.items()
-        }
-        copied._keep_server = self._keep_server
-        copied._keep_temporal = self._keep_temporal
-        copied.frozen = self.frozen
-        return copied
-
-    def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
-        """Commit a reconstructed tensor to every ledger allowed to retain it."""
-        assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
-        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
-        if access is Access.NONE:
-            return
-
-        entry = HistoryEntry(
-            tensor=reconst,
-            round_id=record.round_id,
-            client_id=record.client_id,
-            access=access,
-            round_name=record.round_name_full,
-        )
-        if self._keep_server:
-            self._add_entry(self._server, entry)
-        if access is Access.TEMPORAL_TOO and self._keep_temporal:
-            self._add_entry(self._temporal, entry)
-
-    def view(self, access: Access, client_id: int) -> dict[int, tuple[HistoryEntry, ...]]:
-        """Return the history entries visible to the requested process."""
-        if access is Access.NONE:
-            return dict()
-
-        if access is Access.TEMPORAL_TOO:
-            assert client_id in self._temporal, (
-                f"No temporal reconstruction history exists for client {client_id}.")
-            return {client_id: tuple(self._temporal[client_id])}
-
-        assert access is Access.SERVER_ONLY, f"Unknown access policy: {access!r}."
-        entries: dict[int, tuple[HistoryEntry, ...]] = {
-            client_id: tuple(ledger)
-            for client_id, ledger in self._server.items()
-        }
-        return entries
-
-    def _add_entry(self, history: dict[int, list[HistoryEntry]], entry: HistoryEntry) -> None:
-        ledger = history.setdefault(entry.client_id, [])
-        ledger.append(entry)
-        if len(ledger) > self.max_per_client:
-            ledger.pop(0)
 
 
 # --- Record Row Data --- #
@@ -157,6 +48,8 @@ class CompressionRecord:
     encode_seconds: float | None = None
     decode_seconds: float | None = None
     total_seconds: float | None = None
+    # MiB, despite the name, like encoder_size/decoder_size/meta_data_size. The name is kept
+    # because it is a column in every recorded run; `payload_size_mib` is what produces it.
     final_bytes: float | None = None
     global_eval_metrics: dict[str, float] | None = None
     worker_eval_metrics: dict[str, dict[str, float]] | None = None
@@ -345,8 +238,6 @@ class BaseProtocol:
     protocol_name: ClassVar[str]
     protocol_name_full: str
     _round_codec_classes: dict[str, type[BaseRoundCodec]]
-    max_per_client_recons_history: ClassVar[int | None]
-    _recons_history: ReconstructionHistory
     sd_slices: Sequence[slice] | None
     cache_dir: Path | None
     cache_overwrite: bool
@@ -363,7 +254,6 @@ class BaseProtocol:
         assert isinstance(cls.routine_round_codecs, tuple)
         assert cls.routine_round_codecs
         assert cls.protocol_name
-        assert cls.max_per_client_recons_history != 0
 
     def __init__(
         self,
@@ -377,10 +267,6 @@ class BaseProtocol:
         if options:
             self.options_to_config(**options)
         self._round_codec_classes = self._validate_round_codecs()
-        self._recons_history = ReconstructionHistory(
-            max_per_client=self.max_per_client_recons_history,
-            routine_accesses=self.routine_accesses(),
-        )
         self.sd_slices = sd_slices
         self.cache_dir = cache_dir
         self.cache_overwrite = cache_overwrite
@@ -388,26 +274,10 @@ class BaseProtocol:
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
 
-    def routine_accesses(self) -> list[Access]:
-        """Return the access levels the scheduled round codecs decode with.
-
-        Frozen rounds declare can_decode_where per instance; they inherit an earlier
-        round's access, so they never extend the retention plan.
-        """
-        return [
-            access for round_codec in self._round_codec_classes.values()
-            if isinstance(access := getattr(round_codec, "can_decode_where", None), Access)
-        ]
-
-    def histories(self) -> tuple[ReconstructionHistory, ...]:
-        """Return every reconstruction ledger this protocol maintains and commits to."""
-        return (self._recons_history,)
-
-    def commit_history(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
-        """Commit one decoded reconstruction to every ledger still accepting entries."""
-        for history in self.histories():
-            if not history.frozen:
-                history.commit(reconst, record, access)
+    def after_decode(
+        self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
+    ) -> None:
+        """Hand one decoded reconstruction back to the protocol; stateless schedules ignore it."""
 
     def _get_curr_round_codec_name(self, round_id: int) -> tuple[type[BaseRoundCodec], ParsedConfigurableName, str]:
         if round_id < len(self.warmup_round_codecs):
@@ -432,7 +302,6 @@ class BaseProtocol:
             "options": parsed_protocol.options,
             "warmup_round_codecs": self.warmup_round_codecs,
             "routine_round_codecs": self.routine_round_codecs,
-            "max_per_client_recons_history": self.max_per_client_recons_history,
             "round_codecs": {
                 round_name: {
                     "implementation": (
@@ -475,12 +344,14 @@ def create_protocol(
 
 
 def _single_named_subclass(base_class: type, name_attr: str, name: str) -> type:
-    def all_subclasses(parent: type) -> list[type]:
-        return [
+    # A set, not a list: a class mixing two descendants of `base_class` is reachable by more than
+    # one inheritance path, and counting paths would reject legitimate mixin composition.
+    def all_subclasses(parent: type) -> set[type]:
+        return {
             subclass
             for direct_subclass in parent.__subclasses__()
             for subclass in (direct_subclass, *all_subclasses(direct_subclass))
-        ]
+        }
 
     # Underscore-prefixed intermediates are abstract and inherit their parent's name; the same
     # convention __init_subclass__ uses to skip them has to hold when resolving a name.
@@ -496,6 +367,19 @@ def parse_and_validate_protocol(protocol_name: str) -> str:
     """Validate a configured protocol name and return it unchanged."""
     create_protocol(protocol_name)
     return protocol_name
+
+
+class IdentityProtocol(BaseProtocol):
+    """Lossless protocol used to generate reusable uncompressed federated-learning traces."""
+
+    warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
+    routine_round_codecs: ClassVar[tuple[str, ...]] = ("I",)
+    protocol_name: ClassVar[str] = "identity"
+
+    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
+        """Create the identity codec selected for the given client-round."""
+        round_codec_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
+        return round_codec_class(parsed.options, round_name_full)
 
 
 def record_reconstruction_metrics(
@@ -559,13 +443,9 @@ def simulate_compression(
         torch.cuda.synchronize()
     decode_seconds = time.perf_counter() - start_time
     assert reconstructed.numel() == model_size
-    protocol.commit_history(
-        reconstructed.detach().to(device="cpu", dtype=torch.float16),
-        record,
-        round_codec.can_decode_where,
-    )
+    protocol.after_decode(reconstructed.detach().cpu(), record, round_codec)
 
-    final_bytes = _get_obj_storage_size(payload)
+    final_bytes = payload_size_mib(payload)
     recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
     total_seconds = time.perf_counter() - total_start
     record.update_record_fields(
@@ -602,16 +482,6 @@ class RCDemo(BaseRoundCodec):
     record_class = RecordDemo
     round_name = "DemoRC"
     can_decode_where = Access.TEMPORAL_TOO
-    frozen_history: ReconstructionHistory
-
-    def __init__(
-        self,
-        options: Mapping[str, Any] | None,
-        round_name_full: str,
-        frozen_history: ReconstructionHistory,
-    ) -> None:
-        super().__init__(options, round_name_full)
-        self.frozen_history = frozen_history
 
     def create_r_record(self, round_id: int, client_id: int) -> RCDemo.RecordDemo:
         """Create a demo metrics record with a random demo-only field."""
@@ -629,9 +499,9 @@ class RCDemo(BaseRoundCodec):
         assert isinstance(compReport, bool), "DemoRC compReport option must be a boolean."
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
-        """Encode one raw float32 delta into f16, pickle then gzip."""
+        """Encode one raw float32 delta with pickle then gzip."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
-        payload = compress_data_list(delta_vec.to(torch.float16))
+        payload = compress_data_list(delta_vec)
         if self.round_cfg:
             record.update_record_fields(comp_report=1)
         return payload
@@ -647,10 +517,7 @@ class DemoProtocol(BaseProtocol):
     warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
     routine_round_codecs: ClassVar[tuple[str, ...]] = ("DemoRC|compReport",)
     protocol_name: ClassVar[str] = "demo"
-    max_per_client_recons_history: ClassVar[int | None] = 10
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
-        frozen_history = self._recons_history.copy()
-        frozen_history.freeze()
-        return rc_class(parsed.options, round_name_full, frozen_history=frozen_history)
+        return rc_class(parsed.options, round_name_full)

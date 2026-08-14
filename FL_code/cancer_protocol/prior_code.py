@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,7 +54,7 @@ class PriorCalculator:
             torch.bincount(plane_bins.long(), minlength=bins_per_plane).float() / bins_vec.shape[1]
             for plane_bins in bins_vec
         ])
-        return probs[:, None, :].expand(num_planes, bins_vec.shape[1], bins_per_plane).to(torch.float16)
+        return probs[:, None, :].expand(num_planes, bins_vec.shape[1], bins_per_plane)
 
     @staticmethod
     def compute_prior_from_network(
@@ -112,6 +113,8 @@ class PriorCalculator:
         side_info: torch.Tensor,
         c_cfg: WZcfgQuant,
         batch_size: int = 50_000,
+        *,
+        model_factory: Callable[[int], EncoderDecoderLayeredRNN] | None = None,
     ) -> EncoderDecoderLayeredRNN:
         """Train a new conditional prior model from fixed quantizer bins and soft codes."""
         assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
@@ -119,7 +122,10 @@ class PriorCalculator:
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
         if c_cfg.cache_dir is None:
-            return _train_prior_model(bins_vec, soft_codes, side_info, c_cfg, batch_size)
+            return _train_prior_model(bins_vec, soft_codes, side_info, 
+                        c_cfg, batch_size, model_factory=model_factory,)
+
+        assert model_factory is None, "Custom prior-model factories cannot use the persistent prior cache."
 
         from .wz_quantizer import new_rnn_model
 
@@ -155,6 +161,8 @@ def _train_prior_model(
     side_info: torch.Tensor,
     c_cfg: WZcfgQuant,
     batch_size: int,
+    *,
+    model_factory: Callable[[int], EncoderDecoderLayeredRNN] | None = None,
 ) -> EncoderDecoderLayeredRNN:
     from .wz_quantizer import new_rnn_model, wz_model_training_loop
 
@@ -167,14 +175,11 @@ def _train_prior_model(
     for attempt_index in range(c_cfg.prior_train_repeats + 2):
         if len(attempts) == c_cfg.prior_train_repeats:
             break
-        candidate = new_rnn_model(
-            c_cfg.num_planes,
-            c_cfg.bins_per_plane,
-            side_info.shape[1],
-            c_cfg.marginal_loss,
-            c_cfg.hidden_dim,
-            c_cfg.layers,
-            c_cfg.shared_heads,
+        candidate = (
+            model_factory(side_info.shape[1])
+            if model_factory is not None
+            else new_rnn_model(c_cfg.num_planes, c_cfg.bins_per_plane, side_info.shape[1],
+                    c_cfg.marginal_loss, c_cfg.hidden_dim, c_cfg.layers, c_cfg.shared_heads, )
         )
         prior_heads = (
             candidate.conditionalPriors

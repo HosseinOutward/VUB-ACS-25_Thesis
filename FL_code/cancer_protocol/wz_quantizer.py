@@ -37,9 +37,9 @@ class PreprocessMetadata(NamedTuple):
 def normalization_params(values: torch.Tensor) -> tuple[float, float]:
     """Estimate a robust center and scale from a seeded quantile-trimmed sample.
 
-    Seeded so encoder and decoder derive bitwise-identical factors from the same values.
-    Factors are rounded to float16 because that is the precision the decoder receives
-    them in; the encoder must normalize with the exact same values.
+    Seeded so encoder and decoder derive bitwise-identical factors from the same values. The
+    factors are kept at the precision they are computed in and transmitted at that precision, so
+    the encoder normalizes with exactly what the decoder will use.
     """
     sample_size = min(200_000, values.numel())
     generator = torch.Generator(device=values.device).manual_seed(0)
@@ -53,14 +53,14 @@ def normalization_params(values: torch.Tensor) -> tuple[float, float]:
         sample = random_sample()
         q02, q98 = torch.quantile(sample, torch.tensor([0.02, 0.98], device=sample.device))
         centers.append(sample[(sample >= q02) & (sample <= q98)].mean().item())
-    center = float(np.float16(np.mean(centers)))
+    center = float(np.mean(centers))
 
     scales: list[float] = []
     for _ in range(5):
         centered = random_sample() - center
         q01, q99 = torch.quantile(centered, torch.tensor([0.01, 0.99], device=values.device))
         scales.append(centered.clamp(q01, q99).square().mean().sqrt().item())
-    scale = float(np.float16(np.mean(scales)))
+    scale = float(np.mean(scales))
     assert scale != 0
     return scale, center
 
@@ -73,8 +73,7 @@ def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tens
 
     outliers = values[positions]
     tail = outliers.abs() - threshold
-    # Rounded to float16 first because the decoder rescales with the float16 metadata value.
-    scale = float(np.float16(torch.quantile(tail.float(), 0.99).item() / threshold))
+    scale = torch.quantile(tail.float(), 0.99).item() / threshold
     assert scale != 0
     values = values.clone()
     values[positions] = tail * outliers.sign() / scale
@@ -84,7 +83,7 @@ def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tens
             (positions_np[(positions_np >= start) & (positions_np < start + OUTLIER_CHUNK)] - start).astype(np.uint8)
             for start in range(0, values.numel(), OUTLIER_CHUNK)
         ),
-        np.array(scale, dtype=np.float16),
+        np.array(scale, dtype=np.float32),
         (outliers > 0).cpu().numpy().astype(np.bool_),
     )
 
@@ -155,9 +154,13 @@ def wz_model_training_loop(
     batch_size: int = 50_000,
     label: str = "Training",
     metrics_fn: Callable[[EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], torch.Tensor], str] | None = None,
+    index_sampler: Callable[[int], torch.Tensor] | None = None,
     **loss_fn_options,
 ) -> float:
-    """Train one model, adaptively collapsing duplicate rows and preserving their loss mass."""
+    """Train one model, adaptively collapsing duplicate rows and preserving their loss mass.
+
+    ``index_sampler`` draws each epoch's row indices; the default samples every row uniformly.
+    """
     model.to('cuda').train()
     training_inputs = tuple(value.to('cuda') for value in training_inputs)
     assert training_inputs
@@ -210,7 +213,11 @@ def wz_model_training_loop(
 
     for epoch in range(c_cfg.train_epochs):
         epoch_started = perf_counter()
-        indices = torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
+        indices = (
+            torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
+            if index_sampler is None
+            else index_sampler(total_samples)
+        )
         epoch_loss = 0.0
         epoch_model_samples = 0
         for start in range(0, total_samples, batch_size):
@@ -272,7 +279,23 @@ def wz_model_training_loop(
     model.cpu()
     torch.cuda.empty_cache()
     return epoch_loss
-    
+
+
+def _stacked_problem_sampler(
+    weights: tuple[float, ...], block_size: int, device: torch.device
+) -> Callable[[int], torch.Tensor]:
+    """Draw rows from equally sized stacked problems in proportion to `weights`, refreshed per call."""
+    assert len(weights) > 1 and all(weight > 0 for weight in weights), (
+        f"Every stacked problem needs a positive weight; got {weights}.")
+    distribution = torch.tensor(weights, device=device, dtype=torch.float32)
+    distribution /= distribution.sum()
+
+    def sample(count: int) -> torch.Tensor:
+        return torch.multinomial(distribution, count, replacement=True) * block_size + torch.randint(
+            block_size, (count,), device=device)
+
+    return sample
+
 
 class WZcfgQuant(BaseModel):
     """Quantizer and training configuration consumed by WZQuantizerCancer."""
@@ -356,6 +379,7 @@ class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
 
     prior_calculator: ClassVar[type[PriorCalculator]] = PriorCalculator
+    candidate_failure_tolerance: ClassVar[int] = 2
 
     @property
     def device(self) -> torch.device:
@@ -376,6 +400,22 @@ class WZQuantizerCancer:
             f"{name!r} is a WZcfgQuant field; update c_cfg instead of shadowing it on the quantizer.")
         super().__setattr__(name, value)
 
+    def _new_coding_model(self, side_info_size: int) -> EncoderDecoderLayeredRNN:
+        """Create the coding model used for initial and retry training attempts."""
+        return new_rnn_model(
+            num_planes=self.num_planes,
+            bins_per_plane=self.bins_per_plane,
+            side_info_size=side_info_size,
+            marginal=self.marginal_loss,
+            shared_heads=self.shared_heads,
+            hidden_dim=self.hidden_dim,
+            layers=self.layers,
+        )
+
+    def _cached_training_quantizer_class(self) -> type[WZQuantizerCancer]:
+        """Return the quantizer implementation whose parameters are cached."""
+        return WZQuantizerCancer
+
     def __init__(
         self,
         c_cfg: WZcfgQuant,
@@ -385,23 +425,17 @@ class WZQuantizerCancer:
         self.no_side_info: bool = si_size == 0
         assert self.marginal_loss or not self.no_side_info, (
             "si_size=0 requires marginal_loss=True; no-SI quantizers must be explicit.")
-        
+
         self.side_info_size: int = max(si_size, 1)
 
-        self.coding_model: EncoderDecoderLayeredRNN = new_rnn_model(
-            num_planes=self.num_planes,
-            bins_per_plane=self.bins_per_plane,
-            side_info_size=self.side_info_size,
-            marginal=self.marginal_loss,
-            shared_heads=self.shared_heads,
-            hidden_dim=self.hidden_dim,
-            layers=self.layers,
-        )
+        self.coding_model: EncoderDecoderLayeredRNN = self._new_coding_model(self.side_info_size)
 
         self.side_info_list_used: list[torch.Tensor] | None = None
         self.vector_size: int | None = None
         self.training_prior_stage_rates: tuple[float, ...] | None = None
         self.training_prior_rate: float | None = None
+        # Set while stacking, whenever the caller weights the stacked problems unevenly.
+        self.training_index_sampler: Callable[[int], torch.Tensor] | None = None
 
     @staticmethod
     def training_metrics(
@@ -474,14 +508,16 @@ class WZQuantizerCancer:
         x_raw: torch.Tensor,
         si_raw_list: Sequence[torch.Tensor] | None,
         extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
+        problem_weights: tuple[float, ...] | None = None,
     ) -> None:
         """Train repeated quantizer attempts and keep the finite attempt with the lowest loss.
 
         ``extra_pairs`` adds further (target, side information) problems to the training rows only;
         the coded vector, its side information, and every diagnostic stay those of ``x_raw``.
+        ``problem_weights`` gives one sampling weight per stacked problem, the coded one first.
         """
         if self.cache_dir is None:
-            self._train_model_uncached(x_raw, si_raw_list, extra_pairs)
+            self._train_model_uncached(x_raw, si_raw_list, extra_pairs, problem_weights)
             return
 
         state_dict, training_prior_stage_rates = cache_call(
@@ -491,7 +527,7 @@ class WZQuantizerCancer:
             self.cache_overwrite,
             # Inference-only subclasses share this training implementation and
             # restore the resulting state into their own instance below.
-            quantizer_class=WZQuantizerCancer,
+            quantizer_class=self._cached_training_quantizer_class(),
             c_cfg=self.c_cfg,
             x_raw=x_raw,
             side_information=tuple(si_raw_list or ()),
@@ -499,6 +535,7 @@ class WZQuantizerCancer:
             # was written with; the hash covers every keyword it receives.
             **({"extra_training_pairs": tuple(
                 (extra_x, tuple(extra_si)) for extra_x, extra_si in extra_pairs)} if extra_pairs else {}),
+            **({"problem_weights": problem_weights} if problem_weights is not None else {}),
         )
         # Cache only portable training results; bind the current decoder-available
         # side information to this fresh quantizer instance.
@@ -519,6 +556,7 @@ class WZQuantizerCancer:
         x_raw: torch.Tensor,
         si_raw_list: Sequence[torch.Tensor] | None,
         extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
+        problem_weights: tuple[float, ...] | None = None,
     ) -> None:
         assert self.side_info_list_used is None
         if self.no_side_info:
@@ -530,7 +568,8 @@ class WZQuantizerCancer:
 
         x_prep, metadata = self.preprocess_x(x_raw)
         x_prep, side_info = self._stack_training_pairs(
-            x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []), extra_pairs)
+            x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []),
+            extra_pairs, problem_weights)
         self._fit_prepared(x_prep, side_info)
 
     def _fit_prepared(self, x_prep: torch.Tensor, side_info: torch.Tensor) -> None:
@@ -541,10 +580,10 @@ class WZQuantizerCancer:
 
         # Diagnostics describe the problem this quantizer will code, which is the leading block.
         bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
-        temp = self.prior_calculator.compute_prior_from_network(
-                self.coding_model, bins, side_info[:self.vector_size]).to(torch.float16)
+        prior = self.prior_calculator.compute_prior_from_network(
+            self.coding_model, bins, side_info[:self.vector_size])
         self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
-            temp, bins, self.c_cfg.num_planes)
+            prior, bins, self.c_cfg.num_planes)
         self.training_prior_rate = sum(self.training_prior_stage_rates)
 
     def _stack_training_pairs(
@@ -552,8 +591,14 @@ class WZQuantizerCancer:
         x_prep: torch.Tensor,
         side_info: torch.Tensor,
         extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]],
+        problem_weights: tuple[float, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Append further training problems below the coded one, each normalized by its own target."""
+        # `> 1` as well, so weights handed in without anything to weigh fail here rather than being
+        # dropped while still counting toward the training cache key.
+        assert problem_weights is None or len(problem_weights) == 1 + len(extra_pairs) > 1, (
+            f"problem_weights has {len(problem_weights or ())} entries for the coded problem and "
+            f"{len(extra_pairs)} extra ones.")
         if not extra_pairs:
             return x_prep, side_info
 
@@ -575,26 +620,26 @@ class WZQuantizerCancer:
             extra_prep, extra_metadata = self.preprocess_x(extra_x)
             stacked_x[block] = extra_prep
             stacked_si[block] = self.normalize_side_info_tensor(extra_metadata, extra_si)
+        if problem_weights is not None:
+            self.training_index_sampler = _stacked_problem_sampler(
+                problem_weights, rows, stacked_x.device)
         return stacked_x, stacked_si
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_prep: torch.Tensor,
-        side_info: torch.Tensor, wmspe_denom: float, 
-        failure_tolerance: int = 2
+        side_info: torch.Tensor, wmspe_denom: float,
     ) -> EncoderDecoderLayeredRNN:
+        failure_tolerance = self.candidate_failure_tolerance
         made_quants_and_stat: list[tuple[EncoderDecoderLayeredRNN, float]] = []
+        rejected: list[str] = []
         for attempt_index in range(self.quantizer_train_repeats + failure_tolerance):
             if len(made_quants_and_stat) == self.quantizer_train_repeats:
                 break
 
-            model = self.coding_model if attempt_index == 0 else new_rnn_model(
-                num_planes=self.num_planes,
-                bins_per_plane=self.bins_per_plane,
-                side_info_size=side_info.shape[1],
-                marginal=self.marginal_loss,
-                hidden_dim=self.hidden_dim,
-                layers=self.layers,
-                shared_heads=self.shared_heads,
+            model = (
+                self.coding_model
+                if attempt_index == 0
+                else self._new_coding_model(self.side_info_size)
             )
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
@@ -602,23 +647,45 @@ class WZQuantizerCancer:
                 (x_prep,), side_info, self.c_cfg, batch_size=self.train_batch_size,
                 label=f"Quantizer attempt {attempt_index + 1}",
                 metrics_fn=self.training_metrics,
+                index_sampler=self.training_index_sampler,
                 wmspe_denom=wmspe_denom,
                 perturb_generator=perturb_generator)
 
-            if np.isfinite(loss):
-                # Check through this quantizer's own encode/decode so the pass benefits from
-                # row deduplication; the caller overwrites coding_model with the winner below.
-                # Only the leading block is checked: it is the vector this quantizer will code.
-                self.coding_model = model
-                bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
-                reconstruction = self.decode_prepared(
-                    bins, side_info[:self.vector_size], INFERENCE_BATCH)
-                if torch.isfinite(reconstruction).all():
-                    attempt = (model, loss)
-                    made_quants_and_stat.append(attempt)
-        assert len(made_quants_and_stat) == self.quantizer_train_repeats, "Too many failed training attempts."
+            if not np.isfinite(loss):
+                rejected.append(f"attempt {attempt_index + 1}: non-finite loss")
+                continue
+
+            # Check through this quantizer's own encode/decode so the pass benefits from
+            # row deduplication; the caller overwrites coding_model with the winner below.
+            # Only the leading block is checked: it is the vector this quantizer will code.
+            self.coding_model = model
+            bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
+            reconstruction = self.decode_prepared(
+                bins, side_info[:self.vector_size], INFERENCE_BATCH)
+            if not torch.isfinite(reconstruction).all():
+                rejected.append(f"attempt {attempt_index + 1}: non-finite reconstruction")
+            elif not self._candidate_is_usable(bins, reconstruction):
+                symbol_counts = tuple(plane.unique().numel() for plane in bins)
+                rejected.append(
+                    f"attempt {attempt_index + 1}: unusable symbols per plane {symbol_counts}"
+                )
+            else:
+                made_quants_and_stat.append((model, loss))
+        assert len(made_quants_and_stat) == self.quantizer_train_repeats, (
+            f"Created {len(made_quants_and_stat)}/{self.quantizer_train_repeats} required "
+            f"quantizer candidates after {self.quantizer_train_repeats + failure_tolerance} "
+            f"attempts; rejected: {rejected}."
+        )
 
         return min(made_quants_and_stat, key=lambda attempt: attempt[1])[0]
+
+    def _candidate_is_usable(
+        self,
+        bins: torch.Tensor,
+        reconstruction: torch.Tensor,
+    ) -> bool:
+        """Return whether a finite trained candidate satisfies codec-specific structure."""
+        return True
 
     def encoding_process(
         self, x_raw: torch.Tensor, batch_size: int = INFERENCE_BATCH,
@@ -724,7 +791,7 @@ class WZQuantizerCancer:
         if self.outlier_threshold is not None and not skip_outliers:
             x_prep, outliers = outlier_metadata(x_prep, self.outlier_threshold)
 
-        metadata = PreprocessMetadata(torch.tensor(norm_factors, dtype=torch.float16), outliers)
+        metadata = PreprocessMetadata(torch.tensor(norm_factors, dtype=torch.float32), outliers)
         return x_prep.to(self.device).unsqueeze(1).to(torch.float32).contiguous(), metadata
 
     def postprocess(self, recons_raw: torch.Tensor, metadata: PreprocessMetadata) -> torch.Tensor:
@@ -796,9 +863,10 @@ def _train_quantizer_parameters(
     x_raw: torch.Tensor,
     side_information: tuple[torch.Tensor, ...],
     extra_training_pairs: tuple[tuple[torch.Tensor, tuple[torch.Tensor, ...]], ...] = (),
+    problem_weights: tuple[float, ...] | None = None,
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
     quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
-    quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs)
+    quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
     assert quantizer.training_prior_stage_rates is not None
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
 

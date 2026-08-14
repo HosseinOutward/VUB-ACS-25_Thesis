@@ -60,9 +60,9 @@ class NSplitCodec(BaseRoundCodec):
         sums = torch.zeros(self.split_points, dtype=torch.float32)
         sums.scatter_add_(0, flat_bins, x.reshape(-1).to(torch.float32))
 
-        levels = torch.zeros(self.split_points, dtype=torch.float16)
+        levels = torch.zeros(self.split_points, dtype=torch.float32)
         nonempty = counts > 0
-        levels[nonempty] = (sums[nonempty] / counts[nonempty]).to(torch.float16)
+        levels[nonempty] = sums[nonempty] / counts[nonempty]
         return bins, levels
 
     def _symbol_dtype(self) -> torch.dtype:
@@ -79,7 +79,6 @@ class NSplitProtocol(BaseProtocol):
     warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
     routine_round_codecs: ClassVar[tuple[str, ...]] = ("NS|points=3",)
     protocol_name: ClassVar[str] = "n_split"
-    max_per_client_recons_history: ClassVar[int | None] = None
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the configured n-split round codec for this client-round."""

@@ -78,6 +78,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         shared_priors: bool = False,
         marginal: bool = False,
         output_activation: Callable[[torch.Tensor], torch.Tensor] | None = None,
+        encoder_input_dim: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -92,7 +93,12 @@ class EncoderDecoderLayeredRNN(nn.Module):
         self.output_activation: Callable[[torch.Tensor], torch.Tensor] | None = output_activation
 
         cond_input_dim = bins_per_plane if marginal else bins_per_plane + side_info_size
-        self.encoder = CustomRNN(input_dim, hidden_dim, layers, output_activation=True)
+        self.encoder = CustomRNN(
+            input_dim if encoder_input_dim is None else encoder_input_dim,
+            hidden_dim,
+            layers,
+            output_activation=True,
+        )
         self.decoder = CustomRNN(bins_per_plane + side_info_size, hidden_dim, layers, output_activation=True)
         self.conditionalRNN = CustomRNN(cond_input_dim, hidden_dim, layers, output_activation=False)
 
@@ -120,11 +126,9 @@ class EncoderDecoderLayeredRNN(nn.Module):
         state_dict: dict[str, torch.Tensor],
         prefixes: tuple[str, ...],
     ) -> dict[str, torch.Tensor]:
-        """Return the quantizer parameters in the dtype used on the wire."""
+        """Return the quantizer parameters that go on the wire, at their trained precision."""
         return {
-            key: tensor.detach().cpu().to(
-                torch.float16 if tensor.is_floating_point() else tensor.dtype
-            ).clone()
+            key: tensor.detach().cpu().clone()
             for key, tensor in state_dict.items()
             if key.startswith(prefixes)
         }
@@ -224,14 +228,16 @@ class EncoderDecoderLayeredRNN(nn.Module):
         rnn_inputs_prior = torch.zeros_like(codes[0]).unsqueeze(1)
         if len(codes)!=1:
             rnn_inputs_prior = torch.cat([rnn_inputs_prior, torch.stack(codes[:-1], dim=1)], dim=1)
+        if self.training:
+            # The prior must not train the encoder through earlier-stage symbols, but
+            # conditional side information may itself come from trainable features.
+            rnn_inputs_prior = rnn_inputs_prior.detach()
         if not self.marginal:
             assert y is not None, "A conditional prior requires decoder side information."
             temp = y.unsqueeze(1).repeat(1, self.num_planes, 1)
             rnn_inputs_prior = torch.cat([temp, rnn_inputs_prior], dim=-1)
 
-        if self.training:
-            rnn_inputs_prior = rnn_inputs_prior.detach()
-        else:
+        if not self.training:
             rnn_inputs_prior = rnn_inputs_prior.float()
         prior_logits = self.conditionalRNN(rnn_inputs_prior)
         if self.shared_priors is False:

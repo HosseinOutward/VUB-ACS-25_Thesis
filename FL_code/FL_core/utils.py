@@ -161,9 +161,14 @@ def format_metrics(metrics: dict[str, float], prefix: str = "") -> str:
 @torch.no_grad()
 def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batches: int = 50) -> None:
     """Recalibrate BatchNorm running statistics (critical for FL)."""
-    for m in model.modules():
-        if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-            m.reset_running_stats()
+    batch_norms = [
+        module for module in model.modules()
+        if isinstance(module, nn.BatchNorm1d | nn.BatchNorm2d | nn.BatchNorm3d)
+    ]
+    if not batch_norms:
+        return
+    for module in batch_norms:
+        module.reset_running_stats()
 
     model.train()
     for i, (x, _) in enumerate(loader):
@@ -178,8 +183,38 @@ def recalibrate_batchnorm(model: FLModelTemplate, loader: DataLoader, max_batche
     torch.cuda.empty_cache()  # Clear cache to free memory after recalibration
 
 
+def _evaluate_sequence(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
+    """Loss and next-token accuracy for a language model, streamed rather than accumulated.
+
+    The classification path concatenates one softmax row per prediction, which for WikiText-2 is
+    1.28M predictions over a 33k vocabulary - roughly 159 TB. Macro-F1 and one-vs-rest AUC over a
+    vocabulary are meaningless anyway, so they are reported as NaN rather than invented; loss is the
+    figure of merit here and exponentiates to perplexity.
+    """
+    loss_fn = nn.CrossEntropyLoss()
+    total_loss, correct, counted = 0.0, 0, 0
+    with torch.inference_mode():
+        for x, y in loader:
+            x = x.to(model.device, non_blocking=True)
+            y = y.to(model.device, non_blocking=True)
+            logits = model(x)
+            total_loss += loss_fn(logits, y).item() * y.numel()
+            correct += int((logits.argmax(dim=1) == y).sum())
+            counted += y.numel()
+    return {"loss": total_loss / counted, "acc": correct / counted,
+            "f1": float("nan"), "auc": float("nan")}
+
+
 def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
     model.eval()
+    # A sequence target has one label per position; everything else has one per sample. Read off
+    # the dataset rather than by drawing a batch: creating an iterator over a shuffled train loader
+    # consumes its generator, which would make the training data order depend on how often
+    # evaluation happens to run.
+    if loader.dataset[0][1].ndim > 0:
+        metrics = _evaluate_sequence(model, loader)
+        assert tuple(metrics) == EVAL_METRIC_KEYS, "sequence metrics diverged from EVAL_METRIC_KEYS"
+        return metrics
     loss_fn = nn.CrossEntropyLoss()
 
     all_preds = []
@@ -221,8 +256,12 @@ def evaluate(model: FLModelTemplate, loader: DataLoader) -> dict[str, float]:
     num_classes = y_probs.shape[1]
     f1 = f1_score(y_true, y_pred, average='macro' if num_classes > 2 else 'binary', zero_division=0)
 
-    # AUC calculation
-    if num_classes == 2:
+    # One-vs-rest AUC needs a positive and a negative sample for every column of y_probs, which a
+    # non-IID client's own split legitimately does not have. Report it as absent rather than
+    # failing the round.
+    if len(np.unique(y_true)) < num_classes:
+        auc = float("nan")
+    elif num_classes == 2:
         auc = roc_auc_score(y_true, y_probs[:, 1])
     else:
         auc = roc_auc_score(y_true, y_probs, multi_class='ovr', average='macro')
@@ -343,7 +382,7 @@ class StateDictManager:
                 target.add_(value.to(device=target.device, dtype=target.dtype))
 
 
-def _prepare_records_dir(cfg: FLConfig) -> None:
+def prepare_records_dir(cfg: FLConfig) -> None:
     """Create the numbered run directory and save configuration snapshots."""
     from .codec import create_protocol
 
@@ -372,9 +411,22 @@ def write_fl_config_snapshot(cfg: FLConfig, save_dir: Path) -> None:
         json.dump(cfg.model_dump(mode="json"), f, indent=2)
 
 
-def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Tensor, cfg: FLConfig) -> None:
-    """Assert every evaluated split has all classes required by AUC metrics."""
+def assert_class_coverage_before_spawn(
+    y_train: torch.Tensor, y_test: torch.Tensor, cfg: FLConfig
+) -> None:
+    """Assert every evaluated split has all classes required by AUC metrics.
+
+    Sequence targets are skipped: their "classes" are a vocabulary, and no split is expected to
+    contain every token. Non-IID client partitions are skipped too - holding an incomplete label
+    set is what the split is for, and `evaluate` reports AUC as NaN for those clients rather than
+    requiring coverage here. The test split, which the server always scores, is checked either way.
+    Only the IID branch is reached, so no group ids are needed to rebuild the partition.
+    """
+    from .dataset import client_partitions
+
     assert cfg.num_classes is not None, "cfg.num_classes must be set before class-coverage validation."
+    if y_test.ndim > 1:
+        return
     expected_classes = set(range(cfg.num_classes))
     test_classes = set(torch.unique(y_test).tolist())
     assert test_classes == expected_classes, (
@@ -382,17 +434,18 @@ def _assert_class_coverage_before_spawn(y_train: torch.Tensor, y_test: torch.Ten
         f"expected {sorted(expected_classes)}."
     )
 
-    perm = torch.randperm(len(y_train), generator=torch.Generator().manual_seed(cfg.seed))
-    for client_id in range(cfg.num_clients):
-        client_classes = set(torch.unique(y_train[perm[client_id::cfg.num_clients]]).tolist())
+    if cfg.non_iid_partition:
+        return
+    for client_id, indices in enumerate(client_partitions(y_train, None, cfg, cfg.num_clients)):
+        client_classes = set(torch.unique(y_train[indices]).tolist())
         assert client_classes == expected_classes, (
             f"Client {client_id} train split classes do not match model classes: "
             f"got {sorted(client_classes)}, expected {sorted(expected_classes)}."
         )
 
 
-def _get_obj_storage_size(obj: Any) -> float:
-    """Return the in-memory payload size for tensor-like compression objects in MB."""
+def payload_size_mib(obj: Any) -> float:
+    """Return the in-memory payload size for tensor-like compression objects, in MiB."""
     return _obj_storage_bytes(obj) / (1024 ** 2)
 
 

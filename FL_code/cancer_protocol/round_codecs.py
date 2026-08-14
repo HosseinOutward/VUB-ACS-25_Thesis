@@ -3,9 +3,9 @@ from __future__ import annotations
 import gc
 from collections.abc import Mapping, Sequence
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
@@ -14,7 +14,6 @@ from FL_code.FL_core.codec import (
     Access,
     BaseRoundCodec,
     CompressionRecord,
-    ReconstructionHistory,
     record_reconstruction_metrics,
 )
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
@@ -23,10 +22,18 @@ from .brent_wz_models import EncoderDecoderLayeredRNN
 from .prior_code import PriorCalculator
 from .wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, WZcfgQuant
 
+if TYPE_CHECKING:
+    from .cancer_protocol import ReconstructionHistory
+
 
 @dataclass
 class ElementMetrics:
-    """Per-coordinate diagnostics produced by a WZ round and persisted by its record."""
+    """Per-coordinate diagnostics produced by a WZ round and persisted by its record.
+
+    A codec needing further per-coordinate arrays subclasses this with its own tensor fields and
+    names the subclass in its record's `element_metrics_class`; every tensor field that is set is
+    saved, so the subclass needs no override.
+    """
 
     include_arrays: bool
     models: dict[str, Any] | None = None
@@ -34,8 +41,6 @@ class ElementMetrics:
     bits: torch.Tensor | None = None
     bins: torch.Tensor | None = None
     errors: torch.Tensor | None = None
-    cross_bits: torch.Tensor | None = None
-    cross_error: torch.Tensor | None = None
 
     def save(
         self,
@@ -55,9 +60,10 @@ class ElementMetrics:
         arrays = {
             "recon": self.reconstruction,
             **{
-                name: value
-                for name in ("bits", "bins", "errors", "cross_bits", "cross_error")
-                if (value := getattr(self, name)) is not None
+                field.name: value
+                for field in fields(self)
+                if field.name != "reconstruction"
+                and isinstance(value := getattr(self, field.name), torch.Tensor)
             },
         }
         np.savez(
@@ -70,6 +76,7 @@ class ElementMetrics:
 class CancerRecord(CompressionRecord):
     """Compression and optional element-level metrics for one WZ client-round."""
 
+    element_metrics_class: ClassVar[type[ElementMetrics]] = ElementMetrics
     _element_metrics: ElementMetrics | None = None
 
     bins_per_plane: int | None = None
@@ -95,7 +102,7 @@ class CancerRecord(CompressionRecord):
     def enable_element_metrics(self, include_arrays: bool) -> None:
         """Attach an empty element-level artifact for the round codec to populate."""
         assert self._element_metrics is None, "Element diagnostics were already enabled."
-        self._element_metrics = ElementMetrics(include_arrays)
+        self._element_metrics = self.element_metrics_class(include_arrays)
 
     def save_artifacts(self, save_dir: Path) -> None:
         """Persist element-level diagnostics after the CSV metrics have been finalized."""
@@ -120,11 +127,11 @@ class _WZRoundCodec(BaseRoundCodec):
     round_name: ClassVar[str]
     can_decode_where: ClassVar[Access]
     quantizer_class: type[DedupedWZQuantizerCancer] = DedupedWZQuantizerCancer
+    config_class: type[WZcfgQuant] = WZcfgQuant
 
     c_cfg: WZcfgQuant
     quantizer: DedupedWZQuantizerCancer
     dump_element_metrics: bool = False
-    _dump_arrays: bool = False
     _original_delta_vec: torch.Tensor | None = None
     _prior_side_information: list[torch.Tensor] | None = None
 
@@ -140,7 +147,7 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> None:
         """Separate round diagnostics from options that configure the learned quantizer."""
         self.dump_element_metrics = dump_element_metrics
-        self.c_cfg = WZcfgQuant(
+        self.c_cfg = self.config_class(
             bins_per_plane=bins_per_plane,
             num_planes=num_planes,
             norm_slices=sd_slices,
@@ -149,8 +156,9 @@ class _WZRoundCodec(BaseRoundCodec):
             **quant_overrides,
         )
 
-    @staticmethod
+    @classmethod
     def validate_cfg(
+        cls,
         bins_per_plane: int,
         num_planes: int,
         sd_slices: Sequence[slice] | None = None,
@@ -165,22 +173,11 @@ class _WZRoundCodec(BaseRoundCodec):
         assert cache_dir is None or isinstance(cache_dir, Path)
         assert isinstance(cache_overwrite, bool)
         assert isinstance(dump_element_metrics, bool)
-        WZcfgQuant(bins_per_plane=bins_per_plane, num_planes=num_planes, **quant_overrides)
-
-    @classmethod
-    def history_depth(cls, train_offsets: tuple[int, ...]) -> int:
-        """Return history entries required beyond the normal decoder-visible window."""
-        return 0
-
-    @classmethod
-    def protocol_inputs(
-        cls,
-        history_window: int,
-        train_offsets: tuple[int, ...],
-        previous_codec: _WZRoundCodec | None,
-    ) -> dict[str, Any]:
-        """Return constructor inputs supplied by the protocol; ordinary rounds need none."""
-        return {}
+        cls.config_class(
+            bins_per_plane=bins_per_plane,
+            num_planes=num_planes,
+            **quant_overrides,
+        )
 
     def create_r_record(self, round_id: int, client_id: int) -> CancerRecord:
         """Create the metrics row and optional per-element artifact for this round."""
@@ -191,8 +188,10 @@ class _WZRoundCodec(BaseRoundCodec):
             num_planes=self.c_cfg.num_planes,
         )
         if self.dump_element_metrics:
-            self._dump_arrays = round_id % 2 == 0
-            record.enable_element_metrics(self._dump_arrays)
+            # Model states are dumped every round, but the per-coordinate arrays are several
+            # hundred MB each, so only even rounds carry them. Analyses that read the arrays must
+            # therefore expect half the rounds to have none.
+            record.enable_element_metrics(include_arrays=round_id % 2 == 0)
         return record
 
     def get_training_data(
@@ -223,19 +222,24 @@ class _WZRoundCodec(BaseRoundCodec):
         return self.quantizer
 
     def frozen_round_codec(
-        self, round_name_full: str, side_information: list[torch.Tensor] | None
+        self,
+        frozen_class: type[F_RoundCodec],
+        round_name_full: str,
+        side_information: list[torch.Tensor] | None,
     ) -> BaseRoundCodec:
-        """Create a frozen replay of the model this training round produced."""
-        return F_RoundCodec(
-            None, round_name_full, self.quantizer, self.can_decode_where, side_information)
+        """Create a frozen replay of the model this training round produced.
 
-    def quantizer_for_next_round(self) -> DedupedWZQuantizerCancer:
-        """Return the complete trained quantizer available to a later training policy."""
-        return self.quantizer
-
-    def blend_stage_rates(self, stage_rates: Sequence[float], marginal: bool) -> list[float]:
-        """Return stage rates after any child-specific transport accounting."""
-        return list(stage_rates)
+        The scheduled frozen class is passed in rather than hardcoded, so a protocol that schedules
+        an F subclass gets that subclass instead of silently getting the base one.
+        """
+        return frozen_class(
+            None,
+            round_name_full,
+            self.quantizer,
+            self.can_decode_where,
+            side_information,
+            source_round_codec=self,
+        )
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
@@ -290,17 +294,13 @@ class _WZRoundCodec(BaseRoundCodec):
         side_info = self.quantizer.normalize_side_info_tensor(metadata, prior_si)
         code_lengths, prior_model = self.conditional_code_lengths(
             self.quantizer, bins, soft_codes, side_info, self.c_cfg)
-        prior_stage_rates = self.blend_stage_rates(
-            code_lengths.mean(dim=1).tolist(), marginal=False)
+        prior_stage_rates = code_lengths.mean(dim=1).tolist()
         self.collect_element_rates(code_lengths, bins, prior_model, record)
 
         marginal_prior = PriorCalculator.compute_marginal_prior(
             bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
-        marginal_stage_rates = self.blend_stage_rates(
-            PriorCalculator.compute_plane_rates(
-                marginal_prior, bins, self.c_cfg.num_planes),
-            marginal=True,
-        )
+        marginal_stage_rates = list(PriorCalculator.compute_plane_rates(
+            marginal_prior, bins, self.c_cfg.num_planes))
         record.update_record_fields(
             prior_stage_rates=prior_stage_rates,
             prior_rate=sum(prior_stage_rates),
@@ -325,9 +325,6 @@ class _WZRoundCodec(BaseRoundCodec):
         artifact = record.element_metrics
         if artifact is None:
             return
-        stage_rates = code_lengths.mean(dim=1).tolist()
-        assert self.blend_stage_rates(stage_rates, marginal=False) == stage_rates, (
-            f"{self.round_name_full} reprices stages, so element bits would not match its record.")
         artifact.models = {
             "round_name_full": self.round_name_full,
             "c_cfg": self.c_cfg.model_dump(mode="json", exclude={"norm_slices"}),
@@ -335,7 +332,7 @@ class _WZRoundCodec(BaseRoundCodec):
             "prior_model": prior_model.state_dict(),
         }
         if artifact.include_arrays:
-            artifact.bits = code_lengths.to(torch.float16).cpu()
+            artifact.bits = code_lengths.cpu()
             artifact.bins = bins.cpu()
 
     def add_stage_distortion_to_record(
@@ -355,12 +352,12 @@ class _WZRoundCodec(BaseRoundCodec):
         )
         artifact = record.element_metrics
         if artifact is not None:
-            artifact.reconstruction = stage_reconstructions[-1].to(torch.float16).cpu()
+            artifact.reconstruction = stage_reconstructions[-1].cpu()
             if artifact.include_arrays:
                 artifact.errors = (
                     (stage_reconstructions - self._original_delta_vec)
                     / stage_metrics[-1]["w_mean_of_vec"]
-                ).to(torch.float16).cpu()
+                ).cpu()
         self._original_delta_vec = None
 
     def encode(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
@@ -380,6 +377,7 @@ class F_RoundCodec(_WZRoundCodec):
 
     round_name: ClassVar[str] = "F"
     can_decode_where: Access
+    source_round_codec: _WZRoundCodec | None
 
     def __init__(
         self,
@@ -388,13 +386,27 @@ class F_RoundCodec(_WZRoundCodec):
         frozen_quantizer: DedupedWZQuantizerCancer,
         history_access: Access,
         side_information: list[torch.Tensor] | None = None,
+        source_round_codec: _WZRoundCodec | None = None,
     ) -> None:
+        # Checked before super(), which would otherwise validate and apply the options this round
+        # does not accept, leaving the assertion below with nothing left to catch.
+        assert not cfg_options, f"F round does not accept options: {tuple(cfg_options or ())}."
         self.can_decode_where = history_access
         super().__init__(cfg_options, round_name_full)
-        assert not cfg_options
         self.c_cfg = frozen_quantizer.c_cfg
         self.dump_element_metrics = False
         self.quantizer = frozen_quantizer
+        # `conditional_code_lengths` delegates to this codec, so the call binds to *its* attributes,
+        # not to the frozen round's. The base implementation takes everything as an argument and so
+        # is unaffected; an override reading `self` would silently price the training round's
+        # problem. Anchor the state both rounds must agree on: the quantizer configuration, minus
+        # the norm slicing, which the conditional coder never reads.
+        assert source_round_codec is None or (
+            source_round_codec.c_cfg.model_dump(exclude={"norm_slices"})
+            == frozen_quantizer.c_cfg.model_dump(exclude={"norm_slices"})
+        ), (f"{round_name_full} replays a quantizer configured differently from the round that "
+            "produced it; its conditional coder would be priced against the wrong configuration.")
+        self.source_round_codec = source_round_codec
         if side_information is None:
             return
         assert not frozen_quantizer.no_side_info, (
@@ -405,6 +417,21 @@ class F_RoundCodec(_WZRoundCodec):
             value.numel() == frozen_quantizer.vector_size for value in side_information)
         self.quantizer = copy(frozen_quantizer)
         self.quantizer.side_info_list_used = list(side_information)
+
+    def conditional_code_lengths(
+        self,
+        quantizer: DedupedWZQuantizerCancer,
+        bins: torch.Tensor,
+        soft_codes: torch.Tensor,
+        side_info: torch.Tensor,
+        c_cfg: WZcfgQuant,
+    ) -> tuple[torch.Tensor, EncoderDecoderLayeredRNN]:
+        """Preserve the producing training codec's conditional-coder behavior."""
+        if self.source_round_codec is None:
+            return super().conditional_code_lengths(
+                quantizer, bins, soft_codes, side_info, c_cfg)
+        return self.source_round_codec.conditional_code_lengths(
+            quantizer, bins, soft_codes, side_info, c_cfg)
 
     def build_quantizer(
         self, x: torch.Tensor | None, si: list[torch.Tensor] | None
@@ -419,6 +446,12 @@ class P_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "P"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
 
+    def get_training_data(
+        self, given_history: ReconstructionHistory, client_id: int
+    ) -> tuple[None, None]:
+        """Return no training data: this round loads a pretrained model instead of fitting one."""
+        return None, None
+
     def build_quantizer(
         self, x: torch.Tensor | None, si: list[torch.Tensor] | None
     ) -> DedupedWZQuantizerCancer:
@@ -428,8 +461,20 @@ class P_RoundCodec(_WZRoundCodec):
         self.quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=0)
         weight_path = self.c_cfg.pretrain_pth_dir / (
             f"bpp{self.c_cfg.bins_per_plane}_np{self.c_cfg.num_planes}_pretrained_wzq_rnn.pth")
-        self.quantizer.coding_model.load_state_dict(
-            torch.load(weight_path, map_location="cpu", weights_only=True))
+        assert weight_path.is_file(), (
+            f"{self.round_name_full} needs a pretrained marginal quantizer at {weight_path}; "
+            "one file is required per (bins_per_plane, num_planes) pair.")
+        # The checkpoint carries no record of the architecture it was trained with, so a config
+        # change since it was written surfaces here as an unreadable wall of shape mismatches.
+        try:
+            self.quantizer.coding_model.load_state_dict(
+                torch.load(weight_path, map_location="cpu", weights_only=True))
+        except RuntimeError as error:
+            raise RuntimeError(
+                f"{weight_path} was trained with a different architecture than the current "
+                f"hidden_dim={self.c_cfg.hidden_dim}, layers={self.c_cfg.layers}, "
+                f"shared_heads={self.c_cfg.shared_heads}; retrain it or pin those fields."
+            ) from error
         self.quantizer.side_info_list_used = []
         return self.quantizer
 
@@ -462,7 +507,20 @@ class T_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
     si: list[torch.Tensor]
-    extra_training_pairs: Sequence[tuple[torch.Tensor, list[torch.Tensor]]] = ()
+
+    def extra_training_problems(
+        self,
+    ) -> Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]]:
+        """Return further (target, SI) problems to train on; one problem per round by default.
+
+        The pair of hooks an experiment overrides to widen the training set without changing what
+        the decoder receives; the shipped rounds never do.
+        """
+        return ()
+
+    def training_problem_weights(self) -> tuple[float, ...] | None:
+        """Return one sampling weight per training problem, or None to sample every row alike."""
+        return None
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -486,7 +544,8 @@ class T_RoundCodec(_WZRoundCodec):
         self, delta_vec: torch.Tensor, record: CancerRecord
     ) -> dict[str, Any]:
         """Train when the raw delta reaches the worker, then transmit decoder parameters."""
-        self.quantizer.train_model(delta_vec, self.si, self.extra_training_pairs)
+        self.quantizer.train_model(
+            delta_vec, self.si, self.extra_training_problems(), self.training_problem_weights())
         gc.collect()
         torch.cuda.empty_cache()
         payload = super().get_encod_payload(delta_vec, record)
