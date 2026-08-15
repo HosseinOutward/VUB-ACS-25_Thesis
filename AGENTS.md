@@ -44,6 +44,7 @@ These standards apply to every module unless a more specific local instruction s
 - **Avoid needless abstraction.** Do not add tiny one-use functions or renaming-only helpers. Add abstractions only when they remove real duplication or make a complex concept easier to reason about.
 - **Keep control flow shallow.** Avoid unnecessary nested loops and conditionals. Prefer direct, readable logic.
 - **Avoid meaningless intermediate variables.** Create new names only when they clarify a non-trivial transformation or prevent repeated complex expressions.
+- **Format by logical structure, not a rigid line length.** Keep short imports, calls, signatures, and type annotations on one line; when wrapping is genuinely helpful, group related arguments or expressions instead of scattering every small item onto its own line.
 
 
 ---

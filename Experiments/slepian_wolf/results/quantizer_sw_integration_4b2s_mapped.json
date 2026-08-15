@@ -1,0 +1,57 @@
+{
+  "bins_per_stage": 4,
+  "stages": 2,
+  "positions": 48000,
+  "training_epochs": 60,
+  "block_length": 2400,
+  "row_search_step": 10,
+  "search_rate_resolution": 0.016666666666666666,
+  "value_ordered_mapping": true,
+  "original_to_label": [
+    [
+      3,
+      2,
+      0,
+      1
+    ],
+    [
+      0,
+      3,
+      1,
+      2
+    ]
+  ],
+  "source_index_rate": 4,
+  "inference_prior_rate": 1.4343640804290771,
+  "inference_prior_stage_rates": [
+    0.5476143956184387,
+    0.8867496848106384
+  ],
+  "syndrome_rate": 1.6724999999999999,
+  "syndrome_stage_rates": [
+    0.6595833333333333,
+    1.0129166666666667
+  ],
+  "syndrome_excess_over_prior": 0.23813591957092273,
+  "direct_core_wire_rate": 1.6751666666666667,
+  "plan_description_rate": 0.0535,
+  "mapping_description_rate": 0.007166666666666667,
+  "baseline_wire_rate": 5.504833333333333,
+  "sw_wire_rate": 1.872,
+  "integration_wire_delta": 0.19683333333333342,
+  "sw_wire_saving": 0.6599352084531775,
+  "bit_errors": 1117,
+  "bit_error_rate": 0.005817708333333334,
+  "bit_error_upper_95": 0.006110241379616441,
+  "original_label_bit_error_rate": 0.011635416666666667,
+  "direct_core_bit_errors": 1014,
+  "direct_core_bit_error_rate": 0.00528125,
+  "direct_core_decode_disagreements": 589,
+  "symbol_errors": 1117,
+  "symbol_error_rate": 0.011635416666666667,
+  "baseline_mse": 0.0030240316409617662,
+  "sw_mse": 0.0035569737665355206,
+  "sw_mse_increase": 0.1762356313852116,
+  "direct_core_payload_equal": true,
+  "direct_core_decode_equal": false
+}
