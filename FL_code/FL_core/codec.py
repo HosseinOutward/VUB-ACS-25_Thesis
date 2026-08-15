@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 DEFAULT_PROTOCOL_CACHE_DIR = Path("_/data/protocol_cache")
 
 
+def _synchronized_time() -> float:
+    """Return the current timer value after pending CUDA work completes."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    return time.perf_counter()
+
+
 class Access(Enum):
     """Where a round codec's reconstruction may be decoded, and so who may retain it."""
     NONE = "none"
@@ -45,6 +52,7 @@ class CompressionRecord:
 
     model_size: int | None = None
     setup_seconds: float | None = None
+    pre_encode_training_seconds: float | None = None
     encode_seconds: float | None = None
     decode_seconds: float | None = None
     total_seconds: float | None = None
@@ -157,7 +165,7 @@ class BaseRoundCodec:
 
         Underscore-prefixed subclasses are abstract intermediates and skip validation.
         can_decode_where may instead be declared as an instance annotation when the
-        access level is only known per instance (e.g. frozen rounds).
+        access level is only known per instance.
         """
         super().__init_subclass__()
         if cls.__name__.startswith("_"):
@@ -197,6 +205,9 @@ class BaseRoundCodec:
 
     def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> Any:
         raise NotImplementedError
+
+    def pre_encode_training_steps(self, delta_vec: torch.Tensor) -> None:
+        """Perform training that requires the current raw vector before encoding it."""
 
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         raise NotImplementedError
@@ -279,7 +290,9 @@ class BaseProtocol:
     ) -> None:
         """Hand one decoded reconstruction back to the protocol; stateless schedules ignore it."""
 
-    def _get_curr_round_codec_name(self, round_id: int) -> tuple[type[BaseRoundCodec], ParsedConfigurableName, str]:
+    def _get_curr_round_codec_name(
+        self, round_id: int
+    ) -> tuple[type[BaseRoundCodec], ParsedConfigurableName, str]:
         if round_id < len(self.warmup_round_codecs):
             round_name_full = self.warmup_round_codecs[round_id]
         else:
@@ -416,38 +429,30 @@ def simulate_compression(
     expected_len = num_metrics * 2
     assert len(worker_eval_metrics) == expected_len
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    total_start = time.perf_counter()
-    start_time = time.perf_counter()
+    total_start = _synchronized_time()
+    start_time = _synchronized_time()
     round_codec = protocol.create_round_codec(round_id, client_id)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    setup_seconds = time.perf_counter() - start_time
+    setup_seconds = _synchronized_time() - start_time
 
     record = round_codec.create_r_record(round_id, client_id)
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    start_time = time.perf_counter()
-    payload = round_codec.encode(delta_vec, record)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    encode_seconds = time.perf_counter() - start_time
+    start_time = _synchronized_time()
+    round_codec.pre_encode_training_steps(delta_vec)
+    pre_encode_training_seconds = _synchronized_time() - start_time
 
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    start_time = time.perf_counter()
+    start_time = _synchronized_time()
+    payload = round_codec.encode(delta_vec, record)
+    encode_seconds = _synchronized_time() - start_time
+
+    start_time = _synchronized_time()
     reconstructed = round_codec.decode(payload, record)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    decode_seconds = time.perf_counter() - start_time
+    decode_seconds = _synchronized_time() - start_time
     assert reconstructed.numel() == model_size
     protocol.after_decode(reconstructed.detach().cpu(), record, round_codec)
 
     final_bytes = payload_size_mib(payload)
     recons_error_and_metric = record_reconstruction_metrics(delta_vec, reconstructed)
-    total_seconds = time.perf_counter() - total_start
+    total_seconds = _synchronized_time() - total_start
     record.update_record_fields(
         protocol_name_full=protocol.protocol_name_full,
         model_size=model_size,
@@ -458,6 +463,7 @@ def simulate_compression(
         },
         final_bytes=final_bytes,
         setup_seconds=setup_seconds,
+        pre_encode_training_seconds=pre_encode_training_seconds,
         encode_seconds=encode_seconds,
         decode_seconds=decode_seconds,
         total_seconds=total_seconds,

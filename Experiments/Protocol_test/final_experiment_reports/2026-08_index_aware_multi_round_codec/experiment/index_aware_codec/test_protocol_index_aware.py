@@ -10,7 +10,6 @@ import torch
 
 from FL_code.FL_core.codec import Access
 from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.round_codecs import F_RoundCodec
 
 from .index_quantizer import IndexAwareDedupedWZQuantizer, IndexAwareWZcfgQuant
 from .rd_compare import compare_baseline, compare_experiment
@@ -59,7 +58,7 @@ def test_protocol_discovers_index_rounds_and_freezes_after_training(
     assert round_class is codec_class
     assert round_class.can_decode_where is access
     assert isinstance(parsed.options, dict)
-    assert protocol._get_curr_round_codec_name(13)[2] == "F"
+    assert protocol.routine_round_codecs == ("F",)
 
 
 def test_index_round_config_selects_experimental_config() -> None:
@@ -121,9 +120,8 @@ def test_prior_factory_reuses_conditioner_with_wider_server_si(
 
     monkeypatch.setattr(PriorCalculator, "make_trained_prior_model", fake_train)
     codec.quantizer = quantizer
-    frozen = codec.frozen_round_codec(F_RoundCodec, "F", None)
-    assert frozen.source_round_codec is codec
-    code_lengths, _ = frozen.conditional_code_lengths(
+    codec.round_name_full = "F"
+    code_lengths, _ = codec.conditional_code_lengths(
         quantizer, bins, soft_codes, side_info, cfg
     )
     prior_model = captured["model"]

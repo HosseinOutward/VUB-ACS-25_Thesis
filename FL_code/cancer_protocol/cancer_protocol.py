@@ -193,14 +193,14 @@ class _WZProtocol(BaseProtocol):
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the scheduled codec with only the history and model state its policy requests."""
         round_codec_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
+        if round_codec_class is F_RoundCodec:
+            return self._reuse_trained_codec(
+                round_name_full, self.last_trained_codec.get(client_id), client_id)
+
         if not issubclass(round_codec_class, _WZRoundCodec):
             return round_codec_class(parsed.options, round_name_full)
 
         previous = self.last_trained_codec.get(client_id)
-        if issubclass(round_codec_class, F_RoundCodec):
-            return self._create_frozen_codec(
-                round_codec_class, round_name_full, previous, client_id)
-
         assert isinstance(parsed.options, dict)
         codec = round_codec_class(
             parsed.options | {
@@ -220,15 +220,17 @@ class _WZProtocol(BaseProtocol):
         self.last_trained_codec[client_id] = codec
         return codec
 
-    def _create_frozen_codec(
-        self,
-        frozen_class: type[F_RoundCodec],
-        round_name_full: str,
-        previous: _WZRoundCodec | None,
-        client_id: int,
-    ) -> BaseRoundCodec:
-        """Replay the last trained model for this client, advancing its SI window if configured."""
+    def _reuse_trained_codec(
+        self, round_name_full: str, previous: _WZRoundCodec | None, client_id: int
+    ) -> _WZRoundCodec:
+        """Reuse the client's trained codec, advancing its SI window if configured."""
         assert previous is not None, f"No frozen quantizer exists for client {client_id}."
+        assert previous.quantizer.vector_size is not None, (
+            f"Client {client_id}'s previous codec has not completed pre-encode training and encoding.")
+        assert previous.quantizer.side_info_list_used is not None
+        assert previous.quantizer.training_prior_stage_rates is not None
+        assert not getattr(previous, "_send_quantizer_state", False), (
+            f"Client {client_id}'s trained decoder state has not been transmitted yet.")
         side_information = None
         # A marginal quantizer codes without side information, so there is no SI window to
         # advance; refreshing is silently inapplicable rather than a configuration error.
@@ -242,11 +244,14 @@ class _WZProtocol(BaseProtocol):
             ]
             assert len(side_information) == previous.quantizer.side_info_size, (
                 "Refreshed side information no longer matches the frozen quantizer.")
-        frozen = previous.frozen_round_codec(frozen_class, round_name_full, side_information)
-        assert isinstance(frozen, _WZRoundCodec)
+        previous.round_name_full = round_name_full
+        previous.dump_element_metrics = False
+        previous._original_delta_vec = None
+        if side_information is not None:
+            previous.refresh_side_information(side_information)
         if self.retrained_prior_uses_server_si:
-            frozen.set_retrained_prior_si(self._recons_history, client_id)
-        return frozen
+            previous.set_retrained_prior_si(self._recons_history, client_id)
+        return previous
 
     def config_snapshot(self) -> dict[str, Any]:
         """Return the WZ schedule, quantizer defaults, and SI/history policies."""

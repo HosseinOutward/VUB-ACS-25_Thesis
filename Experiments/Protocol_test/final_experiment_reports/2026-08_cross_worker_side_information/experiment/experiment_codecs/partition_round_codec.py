@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Mapping, Sequence
-from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -10,13 +9,12 @@ from typing import Any, ClassVar
 import numpy as np
 import torch
 
-from FL_code.FL_core.codec import BaseRoundCodec, ReconstructionHistory
+from FL_code.cancer_protocol.cancer_protocol import ReconstructionHistory
 from FL_code.FL_core.utils import decompress_data_list
 from FL_code.cancer_protocol.prior_code import INFERENCE_BATCH, PriorCalculator
 from FL_code.cancer_protocol.round_codecs import (
     CancerRecord,
     ElementMetrics,
-    F_RoundCodec,
     Oracle_RoundCodec,
     _WZRoundCodec,
     compressed_size,
@@ -47,8 +45,8 @@ class OP_RoundCodec(Oracle_RoundCodec):
     record_class = CrossPartCancerRecord
     quantizer_class: type[PreparedWZQuantizerCancer] = PreparedWZQuantizerCancer
 
-    _frozen: bool = False
     cross_evaluate: bool = False
+    _send_quantizer_state: bool
     _client_id: int | None = None
     split_mask_path: Path
     split_mask: torch.Tensor
@@ -144,16 +142,52 @@ class OP_RoundCodec(Oracle_RoundCodec):
             for part in self.part_rows
         }
         self.quantizer = self.part_quantizers[min(self.part_quantizers)]
+        self._send_quantizer_state = False
         return self.quantizer
+
+    def pre_encode_training_steps(self, delta_vec: torch.Tensor) -> None:
+        """Train every coordinate-part quantizer before encoding the full vector."""
+        if self.round_name_full == "F":
+            assert all(
+                quantizer.side_info_list_used is not None
+                and quantizer.vector_size is not None
+                and quantizer.training_prior_stage_rates is not None
+                for quantizer in self.part_quantizers.values()
+            )
+            assert not self._send_quantizer_state
+            return
+        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        assert not self._send_quantizer_state
+        assert all(
+            quantizer.side_info_list_used is None
+            for quantizer in self.part_quantizers.values()
+        )
+        for quantizer in self.part_quantizers.values():
+            quantizer.set_side_information(self.si)
+        x_prep, metadata = self.quantizer.preprocess_x(delta_vec)
+        model_si = self.quantizer.side_info_tensor(metadata)
+        for part, rows in sorted(self.part_rows.items()):
+            self.part_quantizers[part].train_on_prepared(
+                x_prep[rows], model_si[rows], int(rows.sum()))
+            gc.collect()
+            torch.cuda.empty_cache()
+        for quantizer in self.part_quantizers.values():
+            quantizer.vector_size = delta_vec.numel()
+            assert quantizer.training_prior_stage_rates is not None
+        self._send_quantizer_state = True
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
     ) -> dict[str, Any]:
-        """Normalize once, then train and encode each coordinate part independently."""
+        """Encode each coordinate part and transmit newly trained decoder states once."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         self._original_delta_vec = delta_vec
-        for quantizer in self.part_quantizers.values():
-            quantizer.set_side_information(self.si)
+        assert all(
+            quantizer.side_info_list_used is not None
+            and quantizer.vector_size == delta_vec.numel()
+            and quantizer.training_prior_stage_rates is not None
+            for quantizer in self.part_quantizers.values()
+        ), f"{self.round_name_full} must run pre_encode_training_steps before encoding."
         whole = self.quantizer
         x_prep, metadata = whole.preprocess_x(delta_vec)
         model_si = whole.side_info_tensor(metadata)
@@ -167,15 +201,9 @@ class OP_RoundCodec(Oracle_RoundCodec):
             (self.c_cfg.num_planes, delta_vec.numel(), self.c_cfg.bins_per_plane))
         for part, rows in sorted(self.part_rows.items()):
             quantizer = self.part_quantizers[part]
-            if not self._frozen:
-                quantizer.train_on_prepared(x_prep[rows], model_si[rows], int(rows.sum()))
-                gc.collect()
-                torch.cuda.empty_cache()
             part_bins, part_soft = quantizer.encode_prepared(
                 x_prep[rows], INFERENCE_BATCH)
             bins[:, rows], soft[:, rows] = part_bins, part_soft
-        for quantizer in self.part_quantizers.values():
-            quantizer.vector_size = delta_vec.numel()
 
         artifact = record.element_metrics
         if self.cross_evaluate and artifact is not None and artifact.include_arrays:
@@ -192,13 +220,14 @@ class OP_RoundCodec(Oracle_RoundCodec):
             meta_data_size=compressed_size(metadata),
         )
         self.add_prior_to_record(bins, soft, metadata, record)
-        return {
-            "payload_content": (bins, metadata),
-            "quantizer_state": {
+        payload: dict[str, Any] = {"payload_content": (bins, metadata)}
+        if self._send_quantizer_state:
+            payload["quantizer_state"] = {
                 part: quantizer.coding_model.decoder_state_dict()
                 for part, quantizer in sorted(self.part_quantizers.items())
-            },
-        }
+            }
+            self._send_quantizer_state = False
+        return payload
 
     def collect_cross_evaluation(
         self,
@@ -303,30 +332,18 @@ class OP_RoundCodec(Oracle_RoundCodec):
             training_prior_rate=sum(training_rates),
         )
 
-    def frozen_round_codec(
-        self,
-        frozen_class: type[F_RoundCodec],
-        round_name_full: str,
-        side_information: list[torch.Tensor] | None,
-    ) -> BaseRoundCodec:
-        """Copy every part model into a frozen round and optionally refresh their shared SI.
-
-        `frozen_class` is unused: this codec freezes by copying itself, because one F instance has
-        to carry every part quantizer rather than the single one F is built around.
-        """
-        frozen = copy(self)
-        frozen.round_name_full = round_name_full
-        frozen._frozen = True
-        frozen._original_delta_vec = None
-        frozen.part_quantizers = {
-            part: copy(quantizer) for part, quantizer in self.part_quantizers.items()
-        }
-        for quantizer in frozen.part_quantizers.values():
-            quantizer.side_info_list_used = None
-        frozen.quantizer = frozen.part_quantizers[min(frozen.part_quantizers)]
-        if side_information is not None:
-            frozen.si = list(side_information)
-        return frozen
+    def refresh_side_information(self, side_information: Sequence[torch.Tensor]) -> None:
+        """Refresh the decoder-visible SI shared by every trained part quantizer."""
+        assert all(
+            quantizer.side_info_list_used is not None
+            and quantizer.vector_size is not None
+            and len(side_information) == quantizer.side_info_size
+            and all(value.numel() == quantizer.vector_size for value in side_information)
+            for quantizer in self.part_quantizers.values()
+        )
+        self.si = list(side_information)
+        for quantizer in self.part_quantizers.values():
+            quantizer.side_info_list_used = list(side_information)
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
         """Decode each coordinate part with its own quantizer and reassemble every stage."""

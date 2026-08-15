@@ -19,10 +19,10 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from FL_code.FL_core.codec import Access, record_reconstruction_metrics
+from FL_code.FL_core.codec import record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
-from FL_code.cancer_protocol.cancer_protocol import F_RoundCodec
 from FL_code.cancer_protocol.prior_code import PriorCalculator
+from FL_code.cancer_protocol.round_codecs import Oracle_RoundCodec
 from FL_code.cancer_protocol.wz_quantizer import (
     DedupedWZQuantizerCancer,
     WZcfgQuant,
@@ -122,13 +122,18 @@ def run_single_experiment(
     training_quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
     training_quantizer.train_model(training_target, [training_side_information])
 
-    round_codec = F_RoundCodec(
-        None,
-        "F",
-        training_quantizer,
-        Access.SERVER_ONLY,
-        [inference_side_information],
+    round_codec = Oracle_RoundCodec(
+        {
+            "bins_per_plane": config.bins_per_plane,
+            "num_planes": config.num_planes,
+            "sd_slices": quantizer_config.norm_slices,
+        },
+        "O",
     )
+    round_codec.c_cfg = quantizer_config
+    round_codec.quantizer = training_quantizer
+    round_codec._send_quantizer_state = False
+    round_codec.refresh_side_information([inference_side_information])
     record = round_codec.create_r_record(trial_idx, 0)
     payload = round_codec.encode(inference_target, record)
     payload_content = decompress_data_list(payload)["payload_content"]

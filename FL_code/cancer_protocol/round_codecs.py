@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Mapping, Sequence
-from copy import copy
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -115,6 +114,19 @@ class CancerRecord(CompressionRecord):
         self._element_metrics = None
 
 
+class F_RoundCodec(BaseRoundCodec):
+    """Non-instantiated schedule marker for protocol-level frozen codec reuse."""
+
+    record_class = CancerRecord
+    round_name: ClassVar[str] = "F"
+    can_decode_where: ClassVar[Access] = Access.NONE
+
+    @staticmethod
+    def validate_cfg(**options: Any) -> None:
+        """Reject options because F only marks protocol-level codec reuse."""
+        assert not options, f"F protocol behavior does not accept options: {tuple(options)}."
+
+
 def compressed_size(obj: Any) -> float:
     """Return a compressed object's size in MiB."""
     return len(compress_data_list(obj)) / (1024**2)
@@ -210,6 +222,18 @@ class _WZRoundCodec(BaseRoundCodec):
             for entry in client_history
         ]
 
+    def refresh_side_information(self, side_information: Sequence[torch.Tensor]) -> None:
+        """Replace a trained quantizer's decoder-visible SI for protocol-level reuse."""
+        assert not self.quantizer.no_side_info, (
+            "A no-SI quantizer cannot refresh side information.")
+        assert self.quantizer.side_info_list_used is not None, (
+            "Side information cannot be refreshed before quantizer training.")
+        assert len(side_information) == self.quantizer.side_info_size
+        assert self.quantizer.vector_size is not None
+        assert all(
+            value.numel() == self.quantizer.vector_size for value in side_information)
+        self.quantizer.side_info_list_used = list(side_information)
+
     def build_quantizer(
         self, x: torch.Tensor | None, si: list[torch.Tensor] | None
     ) -> DedupedWZQuantizerCancer:
@@ -220,26 +244,6 @@ class _WZRoundCodec(BaseRoundCodec):
         gc.collect()
         torch.cuda.empty_cache()
         return self.quantizer
-
-    def frozen_round_codec(
-        self,
-        frozen_class: type[F_RoundCodec],
-        round_name_full: str,
-        side_information: list[torch.Tensor] | None,
-    ) -> BaseRoundCodec:
-        """Create a frozen replay of the model this training round produced.
-
-        The scheduled frozen class is passed in rather than hardcoded, so a protocol that schedules
-        an F subclass gets that subclass instead of silently getting the base one.
-        """
-        return frozen_class(
-            None,
-            round_name_full,
-            self.quantizer,
-            self.can_decode_where,
-            side_information,
-            source_round_codec=self,
-        )
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
@@ -372,74 +376,6 @@ class _WZRoundCodec(BaseRoundCodec):
         return stage_reconstructions[-1]
 
 
-class F_RoundCodec(_WZRoundCodec):
-    """Reuse a frozen quantizer, optionally advancing its decoder-side SI window."""
-
-    round_name: ClassVar[str] = "F"
-    can_decode_where: Access
-    source_round_codec: _WZRoundCodec | None
-
-    def __init__(
-        self,
-        cfg_options: Mapping[str, Any] | None,
-        round_name_full: str,
-        frozen_quantizer: DedupedWZQuantizerCancer,
-        history_access: Access,
-        side_information: list[torch.Tensor] | None = None,
-        source_round_codec: _WZRoundCodec | None = None,
-    ) -> None:
-        # Checked before super(), which would otherwise validate and apply the options this round
-        # does not accept, leaving the assertion below with nothing left to catch.
-        assert not cfg_options, f"F round does not accept options: {tuple(cfg_options or ())}."
-        self.can_decode_where = history_access
-        super().__init__(cfg_options, round_name_full)
-        self.c_cfg = frozen_quantizer.c_cfg
-        self.dump_element_metrics = False
-        self.quantizer = frozen_quantizer
-        # `conditional_code_lengths` delegates to this codec, so the call binds to *its* attributes,
-        # not to the frozen round's. The base implementation takes everything as an argument and so
-        # is unaffected; an override reading `self` would silently price the training round's
-        # problem. Anchor the state both rounds must agree on: the quantizer configuration, minus
-        # the norm slicing, which the conditional coder never reads.
-        assert source_round_codec is None or (
-            source_round_codec.c_cfg.model_dump(exclude={"norm_slices"})
-            == frozen_quantizer.c_cfg.model_dump(exclude={"norm_slices"})
-        ), (f"{round_name_full} replays a quantizer configured differently from the round that "
-            "produced it; its conditional coder would be priced against the wrong configuration.")
-        self.source_round_codec = source_round_codec
-        if side_information is None:
-            return
-        assert not frozen_quantizer.no_side_info, (
-            "A no-SI frozen quantizer cannot refresh side information.")
-        assert len(side_information) == frozen_quantizer.side_info_size
-        assert frozen_quantizer.vector_size is not None
-        assert all(
-            value.numel() == frozen_quantizer.vector_size for value in side_information)
-        self.quantizer = copy(frozen_quantizer)
-        self.quantizer.side_info_list_used = list(side_information)
-
-    def conditional_code_lengths(
-        self,
-        quantizer: DedupedWZQuantizerCancer,
-        bins: torch.Tensor,
-        soft_codes: torch.Tensor,
-        side_info: torch.Tensor,
-        c_cfg: WZcfgQuant,
-    ) -> tuple[torch.Tensor, EncoderDecoderLayeredRNN]:
-        """Preserve the producing training codec's conditional-coder behavior."""
-        if self.source_round_codec is None:
-            return super().conditional_code_lengths(
-                quantizer, bins, soft_codes, side_info, c_cfg)
-        return self.source_round_codec.conditional_code_lengths(
-            quantizer, bins, soft_codes, side_info, c_cfg)
-
-    def build_quantizer(
-        self, x: torch.Tensor | None, si: list[torch.Tensor] | None
-    ) -> DedupedWZQuantizerCancer:
-        """Reject training because this round exists only to replay a frozen model."""
-        raise NotImplementedError("F_RoundCodec cannot build a new quantizer.")
-
-
 class P_RoundCodec(_WZRoundCodec):
     """Load the pretrained marginal quantizer used before useful history exists."""
 
@@ -507,6 +443,7 @@ class T_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
     si: list[torch.Tensor]
+    _send_quantizer_state: bool
 
     def extra_training_problems(
         self,
@@ -525,7 +462,7 @@ class T_RoundCodec(_WZRoundCodec):
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[None, list[torch.Tensor]]:
-        """Return worker-local temporal history; the current raw target arrives during encode."""
+        """Return worker-local history; the raw target arrives during pre-encode training."""
         entries = given_history.view(self.can_decode_where, client_id)[client_id]
         assert entries[-1].client_id == client_id
         assert entries[-1].access == self.can_decode_where
@@ -538,18 +475,40 @@ class T_RoundCodec(_WZRoundCodec):
         assert x is None and si is not None
         self.si = si
         self.quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))
+        self._send_quantizer_state = False
         return self.quantizer
+
+    def pre_encode_training_steps(self, delta_vec: torch.Tensor) -> None:
+        """Train on the current raw target before its symbols are encoded."""
+        if self.round_name_full == "F":
+            assert self.quantizer.side_info_list_used is not None
+            assert self.quantizer.vector_size is not None
+            assert self.quantizer.training_prior_stage_rates is not None
+            assert not self._send_quantizer_state
+            return
+
+        assert self.quantizer.side_info_list_used is None
+        assert not self._send_quantizer_state
+        self.quantizer.train_model(
+            delta_vec, self.si, self.extra_training_problems(), self.training_problem_weights())
+        assert self.quantizer.vector_size is not None
+        assert self.quantizer.training_prior_stage_rates is not None
+        gc.collect()
+        torch.cuda.empty_cache()
+        self._send_quantizer_state = True
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
     ) -> dict[str, Any]:
-        """Train when the raw delta reaches the worker, then transmit decoder parameters."""
-        self.quantizer.train_model(
-            delta_vec, self.si, self.extra_training_problems(), self.training_problem_weights())
-        gc.collect()
-        torch.cuda.empty_cache()
+        """Encode with a trained quantizer and transmit newly trained decoder parameters once."""
+        assert self.quantizer.side_info_list_used is not None, (
+            f"{self.round_name_full} must run pre_encode_training_steps before encoding.")
+        assert self.quantizer.vector_size is not None
+        assert self.quantizer.training_prior_stage_rates is not None
         payload = super().get_encod_payload(delta_vec, record)
-        payload["quantizer_state"] = self.quantizer.coding_model.decoder_state_dict()
+        if self._send_quantizer_state:
+            payload["quantizer_state"] = self.quantizer.coding_model.decoder_state_dict()
+            self._send_quantizer_state = False
         return payload
 
 
@@ -562,7 +521,7 @@ class Oracle_RoundCodec(T_RoundCodec):
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[None, list[torch.Tensor]]:
-        """Return every server-visible history entry while leaving the oracle target for encode."""
+        """Return server-visible history while leaving the raw target for pre-encode training."""
         history = given_history.view(self.can_decode_where, client_id)
         return None, [
             entry.tensor for client_history in history.values() for entry in client_history]

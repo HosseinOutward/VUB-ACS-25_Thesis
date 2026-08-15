@@ -285,7 +285,9 @@ def run_oracle_client(
     codec.set_retrained_prior_si(history, client_id)
     codec.build_quantizer(training_target, training_si)
     record = codec.create_r_record(ROUND_ID, client_id)
-    payload = codec.encode(load_tensor(ROUND_ID, client_id), record)
+    delta = load_tensor(ROUND_ID, client_id)
+    codec.pre_encode_training_steps(delta)
+    payload = codec.encode(delta, record)
     codec.decode(payload, record)
     assert record.prior_stage_rates is not None
     assert record.stage_wmapes is not None
