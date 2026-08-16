@@ -52,12 +52,18 @@ class OracleSWRoundMixin:
     sw_confidence = 0.95
     sw_config: SWCoderConfig
     sw_search_step: int
+    sw_search_bisect: bool
 
     def __init__(self, *args: Any, sw_config: SWCoderConfig | None = None,
-                 sw_search_step: int = 1, **kwargs: Any) -> None:
+                 sw_search_step: int = 1, sw_search_bisect: bool = False, **kwargs: Any) -> None:
         assert sw_search_step >= 1
         self.sw_config = SWCoderConfig() if sw_config is None else sw_config
         self.sw_search_step = sw_search_step
+        self.sw_search_bisect = sw_search_bisect
+        # One codec for the search, the payload, and the decoder: its parity matrices are the
+        # expensive part, and the study runs both ends in this process anyway.  The margin is
+        # zeroed so the bootstrap decode reports the entropy-matched rates the search backs off from.
+        self.sw_codec = SlepianWolfCodec(self.sw_config.model_copy(update={"rate_margin": 0.0}))
         super().__init__(*args, **kwargs)
 
     def _sw_context(self, metadata: PreprocessMetadata) -> tuple[torch.Tensor, ConditionalPrior]:
@@ -93,11 +99,11 @@ class OracleSWRoundMixin:
         return sum(int(((differences >> bit) & 1).sum()) for bit in range(bit_width))
 
     def encode_staged_indices(self, bins: torch.Tensor, metadata: PreprocessMetadata) -> OracleSWPayload:
-        """Cheat by trial-decoding the source and return the first reliable common-backoff plan."""
+        """Cheat by trial-decoding the source and return the smallest reliable common-backoff plan."""
         alphabet, bit_width = self._validate_staged_indices(bins)
         side_info, prior_provider = self._sw_context(metadata)
-        cfg = self.sw_config.model_copy(update={"rate_margin": 0.0})
-        codec = SlepianWolfCodec(cfg)
+        codec = self.sw_codec
+        block_length = codec.cfg.block_length
 
         bootstrap = codec.initial_plan(bins.shape[0], alphabet)
         bootstrap_payload = codec.encode_syndromes(bins, bootstrap)
@@ -105,27 +111,51 @@ class OracleSWRoundMixin:
 
         source_bits = bins.numel() * bit_width
         largest_backoff = max(
-            cfg.block_length - rows for stage_rows in base_plan.syndrome_rows for rows in stage_rows
+            block_length - rows for stage_rows in base_plan.syndrome_rows for rows in stage_rows
         )
-        backoffs = range(0, largest_backoff + 1, self.sw_search_step)
-        for row_backoff in (*backoffs, largest_backoff):
+        grid = [*range(0, largest_backoff + 1, self.sw_search_step)]
+        if grid[-1] != largest_backoff:
+            grid.append(largest_backoff)
+
+        def trial(row_backoff: int) -> OracleSWPayload | None:
             plan = base_plan.model_copy(update={
                 "syndrome_rows": tuple(
-                    tuple(min(cfg.block_length, rows + row_backoff) for rows in stage_rows)
+                    tuple(min(block_length, rows + row_backoff) for rows in stage_rows)
                     for stage_rows in base_plan.syndrome_rows
                 )
             })
             syndrome = codec.encode_syndromes(bins, plan)
             decoded = codec.decode_syndromes(syndrome, plan, prior_provider, side_info).symbols
             errors = self._bit_errors(bins, decoded, bit_width)
-            if _wilson_upper(errors, source_bits, self.sw_confidence) < self.sw_target_ber:
-                return OracleSWPayload(plan=plan, syndrome=syndrome)
+            if _wilson_upper(errors, source_bits, self.sw_confidence) >= self.sw_target_ber:
+                return None
+            return OracleSWPayload(plan=plan, syndrome=syndrome)
 
-        raise AssertionError(
+        # The scan returns the smallest reliable grid point, at one trial per point.  Bisection
+        # costs log-many trials but is NOT equivalent: measured at step 1, the reliable backoffs
+        # do not form a suffix -- the threshold is a ragged band ~10-30 rows wide in which
+        # pass and fail alternate -- so bisection returns a point inside that band rather than
+        # its lower edge, overshooting the scan by 0-31 rows (0 to 0.039 bit/position here).
+        # That is a different, more conservative estimator, not a faster one; opt in knowingly.
+        selected: OracleSWPayload | None = None
+        if self.sw_search_bisect:
+            low, high = 0, len(grid) - 1
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = trial(grid[middle])
+                if candidate is None:
+                    low = middle + 1
+                else:
+                    selected, high = candidate, middle - 1
+        else:
+            selected = next((found for found in map(trial, grid) if found is not None), None)
+
+        assert selected is not None, (
             f"no common-backoff plan established BER < {self.sw_target_ber:.1%} at "
             f"{self.sw_confidence:.0%} confidence over {source_bits} source bits; "
             "the vector may be too short to certify even an error-free full-rate result."
         )
+        return selected
 
     def decode_staged_indices(self, payload: OracleSWPayload, metadata: PreprocessMetadata) -> torch.Tensor:
         """Recover successive staged indices using the payload's complete rate plan."""
@@ -136,7 +166,7 @@ class OracleSWRoundMixin:
         assert payload.plan.num_stages == self.quantizer.num_planes
         assert payload.plan.alphabet == self.quantizer.bins_per_plane
         side_info, prior_provider = self._sw_context(metadata)
-        return SlepianWolfCodec(self.sw_config).decode_syndromes(
+        return self.sw_codec.decode_syndromes(
             payload.syndrome, payload.plan, prior_provider, side_info
         ).symbols
 

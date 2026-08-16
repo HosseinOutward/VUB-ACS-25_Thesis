@@ -44,6 +44,7 @@ from FL_code.cancer_protocol.sw_coder import (
     ConditionalPrior,
     SWCoderConfig,
     SWRatePlan,
+    SlepianWolfCodec,
     evaluate_slepian_wolf,
 )
 
@@ -154,6 +155,7 @@ def _evaluate_tao_rates(
     """Evaluate independent 2400-bit fixed-rate matrices on one common stream."""
     entropy = _binary_entropy(crossover)
     cfg = SWCoderConfig(block_length=TAO_BLOCK_LENGTH, code_seed=seed)
+    codec = SlepianWolfCodec(cfg)
     prior = _bsc_prior(crossover)
     points: list[CrossPaperPoint] = []
     seen_rows: set[int] = set()
@@ -168,7 +170,7 @@ def _evaluate_tao_rates(
             plan,
             prior,
             side_info[:, None],
-            cfg,
+            codec,
         )
         points.append(
             CrossPaperPoint(

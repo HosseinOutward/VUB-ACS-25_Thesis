@@ -48,6 +48,7 @@ class QuantizerSWResult:
     training_epochs: int
     block_length: int
     row_search_step: int
+    bisect_search: bool
     search_rate_resolution: float
     target_ber: float
     value_ordered_mapping: bool
@@ -170,6 +171,7 @@ def run_quantizer_sw_comparison(
     training_epochs: int,
     block_length: int,
     row_search_step: int,
+    bisect_search: bool,
     value_ordered_mapping: bool,
     target_ber: float,
     seed: int,
@@ -234,6 +236,7 @@ def run_quantizer_sw_comparison(
     )
     assert isinstance(sw_codec, (_OracleSWCheckCodec, _MappedOracleSWCheckCodec))
     sw_codec.sw_search_step = row_search_step
+    sw_codec.sw_search_bisect = bisect_search
     sw_codec.sw_target_ber = target_ber
 
     source_bins, _, source_metadata = quantizer.encoding_process(inference_target)
@@ -319,6 +322,7 @@ def run_quantizer_sw_comparison(
         training_epochs=training_epochs,
         block_length=block_length,
         row_search_step=row_search_step,
+        bisect_search=bisect_search,
         search_rate_resolution=stages * bit_width * row_search_step / block_length,
         target_ber=target_ber,
         value_ordered_mapping=value_ordered_mapping,
@@ -401,6 +405,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--training-epochs", type=int, default=60)
     parser.add_argument("--block-length", type=int, default=2_400)
     parser.add_argument("--row-search-step", type=int, default=100)
+    parser.add_argument(
+        "--bisect-search",
+        action="store_true",
+        help="probe the backoff grid by bisection: log-many trials, but it returns a point "
+             "inside the ragged decoding threshold rather than its lower edge",
+    )
     parser.add_argument("--value-ordered-mapping", action="store_true")
     parser.add_argument("--target-ber", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=0)
@@ -428,6 +438,7 @@ def main() -> None:
         training_epochs=args.training_epochs,
         block_length=args.block_length,
         row_search_step=args.row_search_step,
+        bisect_search=args.bisect_search,
         value_ordered_mapping=args.value_ordered_mapping,
         target_ber=args.target_ber,
         seed=args.seed,

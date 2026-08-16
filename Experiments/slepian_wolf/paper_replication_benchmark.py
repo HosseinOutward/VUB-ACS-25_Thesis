@@ -281,7 +281,7 @@ def _evaluate_oracle_worker(
         plan,
         _prior_provider(reference),
         signs[: worker - 1].T,
-        cfg,
+        SlepianWolfCodec(cfg),
     )
 
 
@@ -414,7 +414,8 @@ def test_full_rate_and_deterministic_zero_rate_are_exact() -> None:
         return torch.full((side_info.shape[0], 2), 0.5)
 
     full_plan = _binary_plan(1.0, cfg, cfg.code_seed)
-    full = evaluate_slepian_wolf(bins, full_plan, uniform_prior, uniform_side_info, cfg)
+    codec = SlepianWolfCodec(cfg)
+    full = evaluate_slepian_wolf(bins, full_plan, uniform_prior, uniform_side_info, codec)
     assert full.bit_errors == 0
     assert full.syndrome_bits == 2 * cfg.block_length
     assert full.model_entropy_rate == pytest.approx(1.0)
@@ -437,7 +438,7 @@ def test_full_rate_and_deterministic_zero_rate_are_exact() -> None:
         zero_plan,
         deterministic_prior,
         deterministic_side_info,
-        cfg,
+        codec,
     )
     assert zero.bit_errors == 0
     assert zero.syndrome_bits == 0

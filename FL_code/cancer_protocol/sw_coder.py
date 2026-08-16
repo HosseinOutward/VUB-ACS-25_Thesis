@@ -15,9 +15,14 @@ belief-propagation errors are therefore measured rather than hidden.
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from hashlib import sha256
 from math import ceil, log2
+from multiprocessing import get_context
+import os
+from pathlib import Path
 import struct
 from time import perf_counter
 from typing import Literal, Protocol, Self
@@ -42,6 +47,16 @@ LIVERIS_2002_RATE_HALF_NODE_DISTRIBUTION: tuple[tuple[int, float], ...] = (
 DEFAULT_DEGREE_DISTRIBUTION = LIVERIS_2002_RATE_HALF_NODE_DISTRIBUTION
 MATRIX_BACKEND: Literal["balanced_4cycle_v1"] = "balanced_4cycle_v1"
 PAYLOAD_HEADER = struct.Struct(">Q8s")
+# Sentinel load for check rows this variable already uses; larger than any reachable degree sum.
+_MASKED_LOAD = np.iinfo(np.int64).max
+# Parity matrices are ~160 KB each and a rate search touches a new one per probe, so the
+# in-process cache is bounded and the (optional) on-disk cache carries reuse across runs.
+MATRIX_MEMORY_CACHE_SIZE = 256
+# Below this block length a matrix builds in milliseconds and forking costs more than it saves.
+PARALLEL_BUILD_MIN_BLOCK_LENGTH = 512
+
+# Identifies one parity matrix: everything the construction reads, in plan order.
+MatrixKey = tuple[str, int, int, tuple[tuple[int, float], ...], int, int, int, int, int]
 
 
 class ConditionalPrior(Protocol):
@@ -67,6 +82,7 @@ class SWCoderConfig(BaseModel):
     matrix_attempts: int = Field(default=8, ge=1)
     message_budget: int = Field(default=8_000_000, ge=1)
     matrix_backend: Literal["balanced_4cycle_v1"] = MATRIX_BACKEND
+    matrix_cache_dir: Path | None = None
 
     @model_validator(mode="after")
     def validate_degree_distribution(self) -> Self:
@@ -329,21 +345,22 @@ def _parity_structure(
 
     for variable in rng.permutation(block_length).tolist():
         degree = min(int(degrees[variable]), check_count)
-        chosen: set[int] = set()
+        # Rows already used by this variable are masked to an unreachable load rather than
+        # rescanned, which keeps the candidate array (and therefore rng consumption) identical.
+        masked_load = load.copy()
         neighbours: set[int] = set()
         for _ in range(degree):
-            available = np.asarray([row for row in range(check_count) if row not in chosen])
-            available = available[load[available] == load[available].min()]
+            available = np.flatnonzero(masked_load == masked_load.min())
             if available.size > girth_candidates:
                 available = rng.choice(available, girth_candidates, replace=False)
-            overlap = np.asarray([len(neighbours.intersection(check_variables[int(row)])) for row in available])
-            row = int(available[np.flatnonzero(overlap == overlap.min())[0]])
+            overlap = [len(neighbours.intersection(check_variables[int(row)])) for row in available]
+            row = int(available[overlap.index(min(overlap))])
             edge_variable.append(variable)
             edge_check.append(row)
-            chosen.add(row)
             neighbours.update(check_variables[row])
             check_variables[row].add(variable)
             load[row] += 1
+            masked_load[row] = _MASKED_LOAD
 
     return np.asarray(edge_variable, dtype=np.int64), np.asarray(edge_check, dtype=np.int64)
 
@@ -354,6 +371,50 @@ def _full_row_rank(edge_variable: np.ndarray, edge_check: np.ndarray, check_coun
         shape=(check_count, block_length),
     )
     return gf2_rank(matrix, method="dense") == check_count
+
+
+def _parity_matrix(
+    block_length: int,
+    rows: int,
+    code_seed: int,
+    stage: int,
+    bit: int,
+    distribution: tuple[tuple[int, float], ...],
+    girth_candidates: int,
+    attempts: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build one plane's full-row-rank Tanner graph; free-standing so worker processes can run it."""
+    for attempt in range(attempts):
+        rng = np.random.default_rng(np.random.SeedSequence([code_seed, stage, bit, rows, attempt]))
+        structure = _parity_structure(block_length, rows, rng, distribution, girth_candidates)
+        if _full_row_rank(*structure, rows, block_length):
+            return structure
+    raise AssertionError(
+        f"could not construct a full-row-rank {rows}x{block_length} "
+        f"parity matrix for stage {stage + 1}, bit {bit + 1}."
+    )
+
+
+def _matrix_cache_path(cache_dir: Path, key: MatrixKey) -> Path:
+    return cache_dir / f"{sha256(repr(key).encode()).hexdigest()[:32]}.npz"
+
+
+def _load_cached_matrix(cache_dir: Path, key: MatrixKey) -> tuple[np.ndarray, np.ndarray] | None:
+    path = _matrix_cache_path(cache_dir, key)
+    if not path.exists():
+        return None
+    with np.load(path) as stored:
+        return stored["variable"], stored["check"]
+
+
+def _store_cached_matrix(cache_dir: Path, key: MatrixKey, structure: tuple[np.ndarray, np.ndarray]) -> None:
+    """Publish a built matrix atomically so a killed run can never leave a half-written entry."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = _matrix_cache_path(cache_dir, key)
+    partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
+    with partial.open("wb") as handle:
+        np.savez(handle, variable=structure[0], check=structure[1])
+    partial.replace(path)
 
 
 def _bp_decode(
@@ -421,20 +482,25 @@ def _plane_llr(prior: torch.Tensor, prefix: torch.Tensor, bit: int, clip: float)
 
 
 class SlepianWolfCodec:
-    """Fixed-rate encoder and decoder with an instance-local parity-matrix cache."""
+    """Fixed-rate encoder and decoder owning the parity matrices its plans need.
+
+    Matrix construction, not belief propagation, dominates coding time, so one codec should be
+    shared by everything that touches the same plans: its caches are what make a rate search,
+    an encode/decode round trip, and a rerun cheap.
+    """
 
     def __init__(self, cfg: SWCoderConfig | None = None) -> None:
         self.cfg = cfg or SWCoderConfig()
-        self._matrices: dict[
-            tuple[str, int, int, tuple[tuple[int, float], ...], int, int, int, int, int], tuple[np.ndarray, np.ndarray]
-        ] = {}
+        self._matrices: OrderedDict[MatrixKey, tuple[np.ndarray, np.ndarray]] = OrderedDict()
+        self._edge_tensors: dict[MatrixKey, tuple[torch.Tensor, torch.Tensor]] = {}
 
     def initial_plan(self, num_stages: int, alphabet: int) -> SWRatePlan:
         """Return the rate-one plan used to bootstrap previous-round adaptation."""
         return SWRatePlan.initial(num_stages, alphabet, self.cfg)
 
-    def _matrix(self, plan: SWRatePlan, stage: int, bit: int, rows: int) -> tuple[np.ndarray, np.ndarray]:
-        key = (
+    @staticmethod
+    def _key(plan: SWRatePlan, stage: int, bit: int, rows: int) -> MatrixKey:
+        return (
             plan.matrix_backend,
             plan.block_length,
             plan.code_seed,
@@ -445,22 +511,74 @@ class SlepianWolfCodec:
             bit,
             rows,
         )
-        if key not in self._matrices:
-            assert plan.matrix_backend == MATRIX_BACKEND
-            for attempt in range(plan.matrix_attempts):
-                rng = np.random.default_rng(np.random.SeedSequence([plan.code_seed, stage, bit, rows, attempt]))
-                structure = _parity_structure(
-                    plan.block_length, rows, rng, plan.degree_distribution, plan.girth_candidates
-                )
-                if _full_row_rank(*structure, rows, plan.block_length):
-                    self._matrices[key] = structure
-                    break
-            else:
-                raise AssertionError(
-                    f"could not construct a full-row-rank {rows}x{plan.block_length} "
-                    f"parity matrix for stage {stage + 1}, bit {bit + 1}."
-                )
+
+    @classmethod
+    def _coded_planes(cls, plan: SWRatePlan) -> dict[MatrixKey, tuple[int, int, int]]:
+        """Return the plan's syndrome-coded planes, keyed by the matrix each one needs."""
+        return {
+            cls._key(plan, stage, bit, rows): (stage, bit, rows)
+            for stage, stage_rows in enumerate(plan.syndrome_rows)
+            for bit, rows in enumerate(stage_rows)
+            if 0 < rows < plan.block_length
+        }
+
+    def _prepare(self, plan: SWRatePlan, planes: dict[MatrixKey, tuple[int, int, int]] | None = None) -> None:
+        """Make every matrix the plan needs resident, building the missing ones in parallel."""
+        if planes is None:
+            planes = self._coded_planes(plan)
+            self._edge_tensors = {key: value for key, value in self._edge_tensors.items() if key in planes}
+        missing = {key: spec for key, spec in planes.items() if key not in self._matrices}
+        if self.cfg.matrix_cache_dir is not None:
+            for key in list(missing):
+                stored = _load_cached_matrix(self.cfg.matrix_cache_dir, key)
+                if stored is not None:
+                    self._remember(key, stored)
+                    del missing[key]
+        if not missing:
+            return
+        assert plan.matrix_backend == MATRIX_BACKEND, f"unsupported matrix backend {plan.matrix_backend}."
+        arguments = [
+            (plan.block_length, rows, plan.code_seed, stage, bit,
+             plan.degree_distribution, plan.girth_candidates, plan.matrix_attempts)
+            for stage, bit, rows in missing.values()
+        ]
+        if len(arguments) == 1 or plan.block_length < PARALLEL_BUILD_MIN_BLOCK_LENGTH:
+            built = [_parity_matrix(*argument) for argument in arguments]
+        else:
+            # Construction is single-threaded Python; the builds are independent and deterministic.
+            # Fork is safe here because the workers only touch numpy.
+            with ProcessPoolExecutor(
+                min(len(arguments), os.cpu_count() or 1), mp_context=get_context("fork")
+            ) as pool:
+                built = list(pool.map(_parity_matrix, *zip(*arguments, strict=True)))
+        for key, structure in zip(missing, built, strict=True):
+            self._remember(key, structure)
+            if self.cfg.matrix_cache_dir is not None:
+                _store_cached_matrix(self.cfg.matrix_cache_dir, key, structure)
+
+    def _remember(self, key: MatrixKey, structure: tuple[np.ndarray, np.ndarray]) -> None:
+        self._matrices[key] = structure
+        self._matrices.move_to_end(key)
+        while len(self._matrices) > MATRIX_MEMORY_CACHE_SIZE:
+            self._matrices.popitem(last=False)
+
+    def _matrix(self, plan: SWRatePlan, stage: int, bit: int, rows: int) -> tuple[np.ndarray, np.ndarray]:
+        key = self._key(plan, stage, bit, rows)
+        self._prepare(plan, {key: (stage, bit, rows)})
+        self._matrices.move_to_end(key)
         return self._matrices[key]
+
+    def _edges(
+        self, plan: SWRatePlan, stage: int, bit: int, rows: int, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the plane's edge indices on ``device``, uploaded once per plan rather than per call."""
+        key = self._key(plan, stage, bit, rows)
+        cached = self._edge_tensors.get(key)
+        if cached is None or cached[0].device != device:
+            edge_variable, edge_check = self._matrix(plan, stage, bit, rows)
+            cached = (torch.as_tensor(edge_variable, device=device), torch.as_tensor(edge_check, device=device))
+            self._edge_tensors[key] = cached
+        return cached
 
     @staticmethod
     def _expected_syndrome_bits(plan: SWRatePlan, positions: int) -> int:
@@ -476,7 +594,8 @@ class SlepianWolfCodec:
         positions = bins.shape[1]
         blocks = ceil(positions / plan.block_length)
         padding = blocks * plan.block_length - positions
-        packed_planes: list[np.ndarray] = []
+        self._prepare(plan)
+        coded_planes: list[torch.Tensor] = []
 
         for stage, stage_rows in enumerate(plan.syndrome_rows):
             symbols = bins[stage].long()
@@ -489,15 +608,16 @@ class SlepianWolfCodec:
                 elif rows == 0:
                     continue
                 else:
-                    edge_variable, edge_check = self._matrix(plan, stage, bit, rows)
-                    variable_index = torch.as_tensor(edge_variable, device=plane.device)
-                    check_index = torch.as_tensor(edge_check, device=plane.device)
+                    variable_index, check_index = self._edges(plan, stage, bit, rows, plane.device)
                     syndrome = torch.zeros(
                         blocks, rows, dtype=plane.dtype, device=plane.device
                     ).index_add_(1, check_index, plane[:, variable_index]) % 2
-                packed_planes.append(syndrome.to(torch.uint8).cpu().numpy().reshape(-1))
+                coded_planes.append(syndrome.to(torch.uint8).reshape(-1))
 
-        syndrome_bits = np.concatenate(packed_planes) if packed_planes else np.empty(0, dtype=np.uint8)
+        # One host transfer for the whole payload; per-plane copies would sync the device each time.
+        syndrome_bits = (
+            torch.cat(coded_planes).cpu().numpy() if coded_planes else np.empty(0, dtype=np.uint8)
+        )
         syndromes = np.packbits(syndrome_bits, bitorder="little").tobytes()
         assert syndrome_bits.size == self._expected_syndrome_bits(plan, positions)
         return SWPayload(positions=positions, plan_id=plan.identifier, syndromes=syndromes)
@@ -526,6 +646,7 @@ class SlepianWolfCodec:
         blocks = ceil(positions / plan.block_length)
         padding = blocks * plan.block_length - positions
         device = side_info.device
+        self._prepare(plan)
         decoded = torch.zeros((plan.num_stages, positions), dtype=torch.long)
         entropies: list[tuple[float, ...]] = []
         decoded_cross_entropies: list[float] = []
@@ -565,10 +686,8 @@ class SlepianWolfCodec:
                     plane = (llr < 0).to(llr.dtype)
                     succeeded = torch.ones(blocks, dtype=torch.bool, device=device)
                 else:
-                    edge_variable, edge_check = self._matrix(plan, stage, bit, rows)
-                    variable_index = torch.as_tensor(edge_variable, device=device)
-                    check_index = torch.as_tensor(edge_check, device=device)
-                    per_pass = max(1, self.cfg.message_budget // edge_variable.size)
+                    variable_index, check_index = self._edges(plan, stage, bit, rows, device)
+                    per_pass = max(1, self.cfg.message_budget // variable_index.numel())
                     plane = torch.empty_like(llr)
                     succeeded = torch.empty(blocks, dtype=torch.bool, device=device)
                     for chunk in torch.arange(blocks, device=device).split(per_pass):
@@ -609,22 +728,6 @@ class SlepianWolfCodec:
         )
 
 
-def encode_syndromes(bins: torch.Tensor, plan: SWRatePlan, cfg: SWCoderConfig | None = None) -> SWPayload:
-    """Encode quantizer symbols without exposing decoder-only state to the encoder."""
-    return SlepianWolfCodec(cfg).encode_syndromes(bins, plan)
-
-
-def decode_syndromes(
-    payload: SWPayload,
-    plan: SWRatePlan,
-    prior_provider: ConditionalPrior,
-    side_info: torch.Tensor,
-    cfg: SWCoderConfig | None = None,
-) -> SWDecodeResult:
-    """Decode a syndrome payload and produce the following round's rate plan."""
-    return SlepianWolfCodec(cfg).decode_syndromes(payload, plan, prior_provider, side_info)
-
-
 def _true_prior_stage_statistics(
     bins: torch.Tensor, prior_provider: ConditionalPrior, side_info: torch.Tensor, alphabet: int
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
@@ -644,7 +747,9 @@ def _true_prior_stage_statistics(
     return tuple(entropies), tuple(cross_entropies)
 
 
-def _undetected_block_errors(differences: torch.Tensor, plan: SWRatePlan, codec: SlepianWolfCodec) -> int:
+def _undetected_block_errors(
+    differences: torch.Tensor, plan: SWRatePlan, codec: SlepianWolfCodec, device: torch.device
+) -> int:
     """Count erroneous BP-decoded plane blocks that still satisfy their syndrome."""
     blocks = ceil(differences.shape[1] / plan.block_length)
     padding = blocks * plan.block_length - differences.shape[1]
@@ -654,11 +759,11 @@ def _undetected_block_errors(differences: torch.Tensor, plan: SWRatePlan, codec:
             if rows in (0, plan.block_length):
                 continue
             errors = torch.nn.functional.pad(
-                ((differences[stage] >> bit) & 1).float(), (0, padding)
+                ((differences[stage].to(device) >> bit) & 1).float(), (0, padding)
             ).view(blocks, plan.block_length)
-            edge_variable, edge_check = codec._matrix(plan, stage, bit, rows)
-            parity = torch.zeros(blocks, rows).index_add_(
-                1, torch.as_tensor(edge_check), errors[:, torch.as_tensor(edge_variable)]
+            variable_index, check_index = codec._edges(plan, stage, bit, rows, device)
+            parity = torch.zeros(blocks, rows, device=device).index_add_(
+                1, check_index, errors[:, variable_index]
             ) % 2
             undetected += int((errors.bool().any(dim=1) & ~parity.bool().any(dim=1)).sum())
     return undetected
@@ -669,26 +774,32 @@ def evaluate_slepian_wolf(
     plan: SWRatePlan,
     prior_provider: ConditionalPrior,
     side_info: torch.Tensor,
-    cfg: SWCoderConfig | None = None,
+    codec: SlepianWolfCodec | None = None,
 ) -> SWResult:
-    """Round-trip a quantized vector and measure rate beside residual decoding errors."""
+    """Round-trip a quantized vector and measure rate beside residual decoding errors.
+
+    Pass the caller's own codec whenever there is one: a fresh codec rebuilds every parity
+    matrix the plan names, which costs far more than the round trip being measured.
+    """
     start = perf_counter()
-    codec = SlepianWolfCodec(cfg)
+    codec = codec or SlepianWolfCodec()
     payload = codec.encode_syndromes(bins, plan)
     decoded = codec.decode_syndromes(payload, plan, prior_provider, side_info)
     source = bins.long().cpu()
     differences = decoded.symbols ^ source
     model_entropies, cross_entropies = _true_prior_stage_statistics(bins, prior_provider, side_info, plan.alphabet)
     blocks = ceil(bins.shape[1] / plan.block_length)
+    padding = blocks * plan.block_length - bins.shape[1]
     plane_bit_errors: list[tuple[int, ...]] = []
     plane_block_errors: list[tuple[int, ...]] = []
     for stage in range(plan.num_stages):
         stage_bit_errors: list[int] = []
         stage_block_errors: list[int] = []
+        blocked = torch.nn.functional.pad(differences[stage], (0, padding)).view(blocks, plan.block_length)
         for bit in range(plan.bit_width):
-            errors = (differences[stage] >> bit) & 1
+            errors = (blocked >> bit) & 1
             stage_bit_errors.append(int(errors.sum()))
-            stage_block_errors.append(sum(bool(chunk.any()) for chunk in errors.split(plan.block_length)))
+            stage_block_errors.append(int(errors.any(dim=1).sum()))
         plane_bit_errors.append(tuple(stage_bit_errors))
         plane_block_errors.append(tuple(stage_block_errors))
     syndrome_stage_rates = tuple(blocks * sum(rows) / bins.shape[1] for rows in plan.syndrome_rows)
@@ -701,7 +812,7 @@ def evaluate_slepian_wolf(
         bit_errors=sum(map(sum, plane_bit_errors)),
         symbol_errors=int((differences != 0).sum()),
         block_errors=sum(map(sum, plane_block_errors)),
-        undetected_block_errors=_undetected_block_errors(differences, plan, codec),
+        undetected_block_errors=_undetected_block_errors(differences, plan, codec, side_info.device),
         nonconverged_blocks=decoded.nonconverged_blocks,
         bp_attempted_blocks=decoded.bp_attempted_blocks,
         syndrome_consistent_blocks=decoded.syndrome_consistent_blocks,
@@ -788,7 +899,7 @@ def main() -> None:
     bootstrap = codec.initial_plan(args.num_planes, args.bins_per_plane)
     bootstrap_payload = codec.encode_syndromes(bins, bootstrap)
     plan = codec.decode_syndromes(bootstrap_payload, bootstrap, prior_provider, side_info).next_plan
-    result = evaluate_slepian_wolf(bins, plan, prior_provider, side_info, cfg)
+    result = evaluate_slepian_wolf(bins, plan, prior_provider, side_info, codec)
     marginal = sum(PriorCalculator.compute_plane_rates(
         PriorCalculator.compute_marginal_prior(bins, args.bins_per_plane, args.num_planes),
         bins, args.num_planes,
