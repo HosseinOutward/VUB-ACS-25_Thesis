@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[5]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from Experiments.Protocol_test.analysis import averaged_curve
-from FL_code.FL_core.rd_metrics import rd_curve_gap
+from Experiments.Protocol_test.rd_metrics import rd_curve_gap
 
 
 MODES = ("O", "T", "OM", "TM", "OMI", "TMI")

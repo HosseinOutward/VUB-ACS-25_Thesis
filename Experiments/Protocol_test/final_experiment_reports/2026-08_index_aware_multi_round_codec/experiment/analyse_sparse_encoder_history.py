@@ -21,7 +21,7 @@ from Experiments.Protocol_test.analysis import (
     validate_columns,
     variant_gap_table,
 )
-from FL_code.FL_core.rd_metrics import rd_curve_gap
+from Experiments.Protocol_test.rd_metrics import rd_curve_gap
 
 
 RECORDS_DIR = REPORT_ROOT / "results/sparse_encoder_history/records"

@@ -6,7 +6,7 @@
   "num_clients": 5,
   "num_loader_workers": 3,
   "data_folder": "data",
-  "rounds": 20,
+  "rounds": 51,
   "local_epochs": 5,
   "batch_size": 500,
   "lr": 0.001,

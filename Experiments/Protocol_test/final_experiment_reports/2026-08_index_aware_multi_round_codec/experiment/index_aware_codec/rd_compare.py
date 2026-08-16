@@ -15,7 +15,7 @@ from Experiments.Protocol_test.analysis import (
     validate_columns,
     wmape_to_db,
 )
-from FL_code.FL_core.rd_metrics import rd_curve_gap
+from Experiments.Protocol_test.rd_metrics import rd_curve_gap
 
 
 DEFAULT_RATE_TOLERANCE = 0.05

@@ -15,20 +15,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from FL_code.FL_core.codec import (
     Access,
-    BaseProtocol,
     CompressionRecord,
     DEFAULT_PROTOCOL_CACHE_DIR,
     create_protocol,
     simulate_compression,
 )
+from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
 from FL_code.FL_core.models import initialize_model
-from FL_code.FL_core.utils import StateDictManager, _prepare_records_dir, set_global_seed
+from FL_code.FL_core.utils import StateDictManager, prepare_records_dir, set_global_seed
 from FL_code.run_fl import FLConfig
 
 
 DEFAULT_PROTOCOL = "wz_cancer"
 DEFAULT_RECONSTRUCTIONS = PROJECT_ROOT / "_/data/federated_learning/T_RD_reconst"
-DEFAULT_DELTAS = PROJECT_ROOT / "_/data/federated_learning/client_deltas"
+DEFAULT_DELTAS = PROJECT_ROOT / "_/data/federated_learning/raw_client_deltas"
 DEFAULT_RECORDS_ROOT = Path(__file__).parent / "exp_records"
 # The delta dump carries its own fl_config.json, but it was written by the pre-protocol API and no
 # longer validates; this one is the FL setup that produced those deltas, minus the replay-only fields.
@@ -81,7 +81,8 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_tensor(directory: Path, round_id: int, client_id: int) -> torch.Tensor:
+def load_replay_tensor(directory: Path, round_id: int, client_id: int) -> torch.Tensor:
+    """Load and validate one saved client delta or reconstruction tensor."""
     path = directory / f"round_{round_id}_client_{client_id}.pt"
     assert path.is_file(), f"Missing replay tensor: {path}."
     tensor = torch.load(path, map_location="cpu", weights_only=True)
@@ -92,7 +93,7 @@ def _load_tensor(directory: Path, round_id: int, client_id: int) -> torch.Tensor
     return tensor
 
 
-def _load_replay_config(
+def load_replay_config(
     config_path: Path,
     protocol: str,
     name: str,
@@ -112,14 +113,14 @@ def _load_replay_config(
     )
 
 
-def _build_state_manager(cfg: FLConfig) -> StateDictManager:
+def build_state_manager(cfg: FLConfig) -> StateDictManager:
     """Build the trainable-state flattener used by compression replay."""
     model = initialize_model(cfg, torch.device("cpu"))
     return StateDictManager(model)
 
 
 def seed_history(
-    protocol: BaseProtocol,
+    protocol: _WZProtocol,
     source: HistorySource,
     start_round: int,
     client_ids: range,
@@ -127,7 +128,13 @@ def seed_history(
     deltas_dir: Path,
 ) -> None:
     """Recreate every bounded protocol history immediately before the first replayed round."""
-    history_depth = max(history.max_per_client for history in protocol.histories())
+    histories = protocol.histories
+    history_depth = max(history.max_per_client for history in histories)
+    history_dtypes = {history.dtype for history in histories}
+    assert len(history_dtypes) == 1, (
+        f"Protocol {protocol.protocol_name_full!r} histories use mixed dtypes: {history_dtypes}."
+    )
+    history_dtype = next(iter(history_dtypes))
     assert history_depth > 0, (
         f"Protocol {protocol.protocol_name_full!r} does not retain reconstruction history."
     )
@@ -138,26 +145,31 @@ def seed_history(
     for round_id in range(start_round - history_depth, start_round):
         for client_id in client_ids:
             history_tensor = (
-                _load_tensor(reconstructions_dir, round_id, client_id)
+                load_replay_tensor(reconstructions_dir, round_id, client_id)
                 if source is HistorySource.RECONSTRUCTIONS
-                else _load_tensor(deltas_dir, round_id, client_id)
+                else load_replay_tensor(deltas_dir, round_id, client_id)
             )
             record = CompressionRecord(round_id, client_id, f"history_seed_{source.value}")
-            protocol.commit_history(
-                history_tensor.to(dtype=torch.float16), record, Access.TEMPORAL_TOO
-            )
+            for history in histories:
+                history.commit(
+                    history_tensor.to(dtype=history_dtype), record, Access.TEMPORAL_TOO)
 
 
 def replace_latest_reconstruction(
-    protocol: BaseProtocol,
+    protocol: _WZProtocol,
     raw_delta: torch.Tensor,
     round_id: int,
     client_id: int,
 ) -> None:
     """Replace the history entries just committed by simulate_compression with raw delta."""
-    replacement = raw_delta.detach().to(device="cpu", dtype=torch.float16)
+    histories = protocol.histories
+    history_dtypes = {history.dtype for history in histories}
+    assert len(history_dtypes) == 1, (
+        f"Protocol {protocol.protocol_name_full!r} histories use mixed dtypes: {history_dtypes}."
+    )
+    replacement = raw_delta.detach().to(device="cpu", dtype=next(iter(history_dtypes)))
     replaced = False
-    for history in protocol.histories():
+    for history in histories:
         assert history.dtype == replacement.dtype
         for ledger in (history._server.get(client_id), history._temporal.get(client_id)):
             if ledger is None or not ledger or ledger[-1].round_id != round_id:
@@ -196,7 +208,7 @@ def main() -> None:
         print(f"\n{'!' * 88}\n{message}\n{'!' * 88}\n")
 
     set_global_seed(args.seed)
-    cfg = _load_replay_config(
+    cfg = load_replay_config(
         args.fl_config,
         args.protocol,
         args.name,
@@ -207,7 +219,7 @@ def main() -> None:
     cfg.protocol_cache_overwrite = args.protocol_cache_overwrite
     clients = args.clients if args.clients is not None else cfg.num_clients
     assert clients > 0, "clients must be positive."
-    state_manager = _build_state_manager(cfg)
+    state_manager = build_state_manager(cfg)
     protocol = create_protocol(
         args.protocol,
         state_manager.get_slices(),
@@ -224,12 +236,12 @@ def main() -> None:
         args.deltas,
     )
 
-    _prepare_records_dir(cfg)
+    prepare_records_dir(cfg)
     output_dir = cfg.records_dir
 
     for round_id in range(args.start_round, args.end_round + 1):
         for client_id in client_ids:
-            delta = _load_tensor(args.deltas, round_id, client_id)
+            delta = load_replay_tensor(args.deltas, round_id, client_id)
             assert delta.numel() == state_manager.param_count, (
                 f"round {round_id}, client {client_id} has {delta.numel()} values; "
                 f"the configured model has {state_manager.param_count}."
