@@ -9,7 +9,7 @@ from pathlib import Path
 import random
 import sys
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,101 @@ if TYPE_CHECKING:
 # Canonical key order for evaluate() results. Client and server exchange worker
 # metrics as a flat tensor, so both sides must agree on this exact order.
 EVAL_METRIC_KEYS: tuple[str, ...] = ("loss", "acc", "f1", "auc")
+OUTLIER_CHUNK = 2**8
+
+
+class OutlierMetadata(NamedTuple):
+    """Compact outlier tail data produced during normalization and consumed during restoration."""
+
+    positions: tuple[np.ndarray, ...]
+    scale: np.ndarray | None
+    signs: np.ndarray
+
+
+class PreprocessMetadata(NamedTuple):
+    """Per-layer normalization and outlier data produced and consumed by reversible preprocessing."""
+
+    norm_factors: torch.Tensor
+    outliers: OutlierMetadata
+
+
+class CompactOutlierMetadata(NamedTuple):
+    """Flat outlier locations and packed signs retained by memory-optimized gradient history."""
+
+    positions: np.ndarray
+    scale: np.ndarray | None
+    packed_signs: np.ndarray
+
+
+class GradientPreprocessMetadata(NamedTuple):
+    """Layer normalization and compact outlier data retained by optimized gradient history."""
+
+    norm_factors: torch.Tensor
+    outliers: CompactOutlierMetadata
+
+
+def normalization_params(values: torch.Tensor) -> tuple[float, float]:
+    """Estimate a robust center and scale from a seeded quantile-trimmed sample."""
+    sample_size = min(200_000, values.numel())
+    generator = torch.Generator(device=values.device).manual_seed(0)
+
+    def random_sample() -> torch.Tensor:
+        return values[torch.randint(
+            values.numel(), (sample_size,), device=values.device, generator=generator)].float()
+
+    centers: list[float] = []
+    for _ in range(5):
+        sample = random_sample()
+        q02, q98 = torch.quantile(sample, torch.tensor([0.02, 0.98], device=sample.device))
+        centers.append(sample[(sample >= q02) & (sample <= q98)].mean().item())
+    center = float(np.mean(centers))
+
+    scales: list[float] = []
+    for _ in range(5):
+        centered = random_sample() - center
+        q01, q99 = torch.quantile(centered, torch.tensor([0.01, 0.99], device=values.device))
+        scales.append(centered.clamp(q01, q99).square().mean().sqrt().item())
+    scale = float(np.mean(scales))
+    assert scale != 0
+    return scale, center
+
+
+def compact_outlier_metadata(
+    values: torch.Tensor, threshold: float
+) -> tuple[torch.Tensor, CompactOutlierMetadata]:
+    """Move normalized outliers into a tail and retain flat positions plus bit-packed signs."""
+    positions = torch.nonzero(values.abs() > threshold, as_tuple=False).flatten()
+    if positions.numel() == 0:
+        return values, CompactOutlierMetadata(
+            np.array([], dtype=np.uint32), None, np.array([], dtype=np.uint8))
+
+    outliers = values[positions]
+    tail = outliers.abs() - threshold
+    scale = torch.quantile(tail.float(), 0.99).item() / threshold
+    assert scale != 0
+    values = values.clone()
+    values[positions] = tail * outliers.sign() / scale
+    return values, CompactOutlierMetadata(
+        positions.cpu().numpy().astype(np.uint32 if values.numel() <= 2**32 else np.uint64),
+        np.array(scale, dtype=np.float32),
+        np.packbits((outliers > 0).cpu().numpy(), bitorder="little"),
+    )
+
+
+def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tensor, OutlierMetadata]:
+    """Move normalized outliers into the quantizer's chunk-addressed tail representation."""
+    values, compact = compact_outlier_metadata(values, threshold)
+    if compact.positions.size == 0:
+        return values, OutlierMetadata((), None, np.array([], dtype=np.bool_))
+    positions_np = compact.positions.astype(np.int64)
+    return values, OutlierMetadata(
+        tuple(
+            (positions_np[(positions_np >= start) & (positions_np < start + OUTLIER_CHUNK)] - start).astype(np.uint8)
+            for start in range(0, values.numel(), OUTLIER_CHUNK)
+        ),
+        compact.scale,
+        np.unpackbits(compact.packed_signs, count=positions_np.size, bitorder="little").astype(np.bool_),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,6 +449,90 @@ class StateDictManager:
             slices.append(slice(offset, offset + numel))
             offset += numel
         return slices
+
+    def normalize_delta(
+        self, delta: torch.Tensor, outlier_threshold: float | None
+    ) -> tuple[torch.Tensor, GradientPreprocessMetadata]:
+        """Normalize a flat delta per trainable state entry and optionally compact its outliers."""
+        assert delta.ndim == 1 and delta.numel() == self.param_count, (
+            f"Flat delta has shape {tuple(delta.shape)}; expected ({self.param_count},).")
+        assert delta.device.type == "cpu" and delta.is_floating_point()
+        assert outlier_threshold is None or outlier_threshold > 0
+
+        normalized = delta.detach().to(torch.float32).clone()
+        factors: list[tuple[float, float]] = []
+        for layer_slice in self.get_slices():
+            layer = normalized[layer_slice]
+            scale, center = torch.std_mean(layer, correction=0)
+            scale_value, center_value = float(scale), float(center)
+            # A constant layer is fully represented by its center and needs no scaling.
+            if scale_value == 0:
+                scale_value = 1.0
+            layer.sub_(center_value).div_(scale_value)
+            factors.append((scale_value, center_value))
+
+        outliers = CompactOutlierMetadata(
+            np.array([], dtype=np.uint32), None, np.array([], dtype=np.uint8))
+        if outlier_threshold is not None:
+            normalized, outliers = compact_outlier_metadata(normalized, outlier_threshold)
+        return normalized, GradientPreprocessMetadata(
+            torch.tensor(factors, dtype=torch.float32), outliers)
+
+    def denormalize_delta(
+        self,
+        normalized: torch.Tensor,
+        metadata: GradientPreprocessMetadata,
+        outlier_threshold: float | None,
+        indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Restore all or selected flat-delta coordinates from normalized storage values."""
+        assert normalized.device.type == "cpu" and normalized.is_floating_point()
+        assert metadata.norm_factors.shape == (len(self.numels), 2)
+        restored = normalized.to(torch.float32).clone().reshape(-1)
+
+        if indices is None:
+            assert restored.numel() == self.param_count
+            if metadata.outliers.positions.size:
+                positions = torch.from_numpy(metadata.outliers.positions.astype(np.int64))
+                signs = torch.from_numpy(np.unpackbits(
+                    metadata.outliers.packed_signs,
+                    count=positions.numel(),
+                    bitorder="little",
+                )).to(torch.float32) * 2 - 1
+                assert outlier_threshold is not None and metadata.outliers.scale is not None
+                restored[positions] = (
+                    restored[positions].abs() * float(metadata.outliers.scale) + outlier_threshold
+                ) * signs
+            for layer_slice, (scale, center) in zip(
+                self.get_slices(), metadata.norm_factors, strict=True
+            ):
+                restored[layer_slice].mul_(scale).add_(center)
+            return restored.reshape(normalized.shape)
+
+        flat_indices = indices.to(device="cpu", dtype=torch.long).reshape(-1).contiguous()
+        assert flat_indices.numel() == restored.numel()
+        assert bool(((flat_indices >= 0) & (flat_indices < self.param_count)).all())
+        if metadata.outliers.positions.size:
+            positions = torch.from_numpy(metadata.outliers.positions.astype(np.int64))
+            locations = torch.searchsorted(positions, flat_indices)
+            valid = locations < positions.numel()
+            matches = valid & (positions[locations.clamp_max(positions.numel() - 1)] == flat_indices)
+            if bool(matches.any()):
+                assert outlier_threshold is not None and metadata.outliers.scale is not None
+                signs = torch.from_numpy(np.unpackbits(
+                    metadata.outliers.packed_signs,
+                    count=positions.numel(),
+                    bitorder="little",
+                )).to(torch.float32) * 2 - 1
+                restored[matches] = (
+                    restored[matches].abs() * float(metadata.outliers.scale) + outlier_threshold
+                ) * signs[locations[matches]]
+
+        boundaries = torch.tensor(np.cumsum(self.numels[:-1]), dtype=torch.long)
+        layers = torch.bucketize(flat_indices, boundaries, right=True)
+        factors = metadata.norm_factors[layers]
+        restored.mul_(factors[:, 0]).add_(factors[:, 1])
+        return restored.reshape(normalized.shape)
 
     def clone_trainable(self, state_dict: dict[str, torch.Tensor]) -> OrderedDict[str, torch.Tensor]:
         return OrderedDict((k, state_dict[k].cpu().detach().clone()) for k in self.keys)

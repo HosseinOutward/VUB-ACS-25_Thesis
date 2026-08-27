@@ -19,18 +19,18 @@ import torch
 
 from FL_code.FL_core.codec import record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
-from FL_code.cancer_protocol.oracle_sw_mixin import (
+from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import (
     OracleSWPayload,
     OracleSWRoundMixin,
     _wilson_upper,
 )
-from FL_code.cancer_protocol.oracle_index_mapping_mixin import (
+from FL_code.cancer_protocol.bin_coder.oracle_index_mapping_mixin import (
     MappedOracleSWPayload,
     OracleValueOrderedIndexMixin,
 )
 from FL_code.cancer_protocol.prior_code import PriorCalculator
 from FL_code.cancer_protocol.round_codecs import Oracle_RoundCodec
-from FL_code.cancer_protocol.sw_coder import SWCoderConfig, SlepianWolfCodec
+from FL_code.cancer_protocol.bin_coder.sw_coder import SWCoderConfig, SlepianWolfCodec
 from FL_code.cancer_protocol.wz_quantizer import (
     DedupedWZQuantizerCancer,
     PreprocessMetadata,

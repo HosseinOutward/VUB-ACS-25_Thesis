@@ -347,8 +347,8 @@ def main() -> None:
     """Benchmark the coder on the learned quantizer's synthetic Gaussian Wyner-Ziv source."""
     from FL_code.FL_core.utils import set_global_seed
 
-    from .prior_code import PriorCalculator
-    from .wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
+    from ..prior_code import PriorCalculator
+    from ..wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--size", type=int, default=1_000_000, help="coded vector length")

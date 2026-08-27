@@ -6,19 +6,29 @@ encoded as an LDPC syndrome, and the decoder conditions each plane on its decode
 and its own side information.  The paper's Gaussian-CEO estimator is replaced by a generic
 decoder-side conditional prior supplied by the quantizer.
 
-Encoding and decoding are deliberately separate.  The encoder receives only symbols and an
-immutable rate plan; the prior and side information exist only at the decoder.  There is no
-feedback, checksum, or lossless fallback.  As in the paper's practical experiments, residual
-belief-propagation errors are therefore measured rather than hidden.
+Two code families live here.  ``balanced_4cycle_v1`` builds one purpose-made parity matrix per
+rate, which is the better code at any single rate but forces the rate to be decided before a bit
+is sent.  ``ldpca_split_v1`` is Varodayan et al.'s rate-adaptive accumulator: one rate-one mother
+code per plane whose accumulated syndrome any nested subset of levels can be read from, so a
+decoder can climb from level to level, one bit per level, until the block decodes.
+
+Both are used the same way at a fixed rate: :meth:`SlepianWolfCodec.encode_syndromes` receives
+only symbols and an immutable rate plan, and the prior and side information exist only at the
+decoder.  :meth:`SlepianWolfCodec.decode_ladder` is the LDPCA-only path where the rate is instead
+discovered per block over a feedback channel; it needs a per-block verification, because a
+satisfied syndrome is not proof of a correct decode.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from hashlib import sha256
+from functools import cache
+from heapq import heappop, heappush
 from math import ceil, log2
 from multiprocessing import get_context
 import os
@@ -46,6 +56,8 @@ LIVERIS_2002_RATE_HALF_NODE_DISTRIBUTION: tuple[tuple[int, float], ...] = (
 )
 DEFAULT_DEGREE_DISTRIBUTION = LIVERIS_2002_RATE_HALF_NODE_DISTRIBUTION
 MATRIX_BACKEND: Literal["balanced_4cycle_v1"] = "balanced_4cycle_v1"
+LDPCA_BACKEND: Literal["ldpca_split_v1"] = "ldpca_split_v1"
+MatrixBackend = Literal["balanced_4cycle_v1", "ldpca_split_v1"]
 PAYLOAD_HEADER = struct.Struct(">Q8s")
 # Sentinel load for check rows this variable already uses; larger than any reachable degree sum.
 _MASKED_LOAD = np.iinfo(np.int64).max
@@ -57,6 +69,9 @@ PARALLEL_BUILD_MIN_BLOCK_LENGTH = 512
 
 # Identifies one parity matrix: everything the construction reads, in plan order.
 MatrixKey = tuple[str, int, int, tuple[tuple[int, float], ...], int, int, int, int, int]
+# One LDPCA mother code serves every level of its plane, so neither the row count nor the
+# full-rank retry budget that only the per-rate constructor reads belong in its key.
+MotherKey = tuple[str, int, int, tuple[tuple[int, float], ...], int, int, int]
 
 
 class ConditionalPrior(Protocol):
@@ -64,6 +79,50 @@ class ConditionalPrior(Protocol):
 
     def __call__(self, decoded_stages: torch.Tensor, side_info: torch.Tensor, stage: int) -> torch.Tensor:
         """Return ``q(U_stage | U_<stage, side_info)`` with shape ``(positions, alphabet)``."""
+
+
+class BlockRecovery(Protocol):
+    """Encoder-side supplier of the raw bits of blocks whose syndrome failed to decode.
+
+    Calling one is a request over the feedback channel and costs ``block_length`` uplink bits per
+    block; the decoder invokes it before the next plane reads the recovered prefix, so a failure
+    never propagates.  Passing no recovery leaves belief-propagation failures in the output, which
+    is the paper's one-shot behaviour.
+    """
+
+    def __call__(self, stage: int, bit: int, blocks: torch.Tensor) -> torch.Tensor:
+        """Return the ``(blocks.numel(), block_length)`` true plane bits of the named blocks."""
+
+
+class PlaneVerification(Protocol):
+    """Decoder-side check that a decoded block really is the source block.
+
+    A satisfied syndrome only says the decode is *a* solution.  Near and below the conditional
+    entropy belief propagation regularly settles on a different word with the same syndrome:
+    measured here, one in sixty blocks still decoded wrongly while every syndrome checked out.
+    Varodayan et al. send a per-block CRC for exactly this reason; the transport supplies whatever
+    it chose to send, and without one no amount of repair makes a decode exact.
+    """
+
+    def __call__(self, stage: int, bit: int, plane: torch.Tensor, blocks: torch.Tensor) -> torch.Tensor:
+        """Return a mask over ``blocks`` that is False where the block has to be resent."""
+
+
+class LadderChannel(Protocol):
+    """Encoder-side LDPCA accumulator, serving one rung of the ladder per decoder request.
+
+    ``request`` is the uplink.  Level ``k + 1``'s transmitted positions are level ``k``'s plus one,
+    so asking for a higher rung costs exactly the bits it adds and the decoder keeps everything it
+    already holds.  ``raw`` is the ladder's terminal rung -- the block itself -- which exists only
+    because the merged code at level ``block_length`` is not quite full rank and belief propagation
+    is not guaranteed; a run in which it is ever called says so in its result.
+    """
+
+    def request(self, plane: int, blocks: torch.Tensor, level: int) -> torch.Tensor:
+        """Return the ``(blocks.numel(), level)`` accumulated bits transmitted at ``level``."""
+
+    def raw(self, plane: int, blocks: torch.Tensor) -> torch.Tensor:
+        """Return the ``(blocks.numel(), block_length)`` true plane bits of the named blocks."""
 
 
 class SWCoderConfig(BaseModel):
@@ -76,12 +135,15 @@ class SWCoderConfig(BaseModel):
     damping: float = Field(default=0.9, gt=0.0, le=1.0)
     llr_clip: float = Field(default=20.0, gt=0.0)
     code_seed: int = Field(default=0, ge=0, le=2**32 - 1)
-    rate_margin: float = Field(default=0.0, ge=0.0, le=1.0)
     degree_distribution: tuple[tuple[int, float], ...] = DEFAULT_DEGREE_DISTRIBUTION
     girth_candidates: int = Field(default=8, ge=1)
     matrix_attempts: int = Field(default=8, ge=1)
     message_budget: int = Field(default=8_000_000, ge=1)
-    matrix_backend: Literal["balanced_4cycle_v1"] = MATRIX_BACKEND
+    # Rows added per LDPCA rung.  Purely a decoder-side choice -- the encoder serves whatever
+    # level it is asked for -- trading a mean overshoot of half a step against one belief
+    # propagation pass per rung.  At the default block length a step is 1% of the rate.
+    ladder_step: int = Field(default=24, ge=1)
+    matrix_backend: MatrixBackend = MATRIX_BACKEND
     matrix_cache_dir: Path | None = None
 
     @model_validator(mode="after")
@@ -108,7 +170,7 @@ class SWRatePlan(BaseModel):
     degree_distribution: tuple[tuple[int, float], ...]
     girth_candidates: int = Field(ge=1)
     matrix_attempts: int = Field(ge=1)
-    matrix_backend: Literal["balanced_4cycle_v1"]
+    matrix_backend: MatrixBackend
 
     @model_validator(mode="after")
     def validate_shape(self) -> Self:
@@ -191,13 +253,245 @@ class SWPayload(BaseModel):
         return len(self.to_bytes()) * 8
 
 
+
+class PlaneHashes:
+    """Random GF(2) block hashes, sent with the syndromes and checked after decoding.
+
+    The role Varodayan et al.'s CRC plays: it is what turns "the syndrome is satisfied" into
+    "this is the source block".  ``hash_bits`` is a rate, ``hash_bits / block_length`` per plane,
+    against a false-accept probability of ``2 ** -hash_bits`` per decode attempt -- and a ladder
+    makes many attempts per block, so it needs more bits than a one-shot transport does.
+    """
+
+    def __init__(self, block_length: int, hash_bits: int, seed: int) -> None:
+        self.block_length = block_length
+        self.hash_bits = hash_bits
+        self.projection = torch.as_tensor(
+            np.random.default_rng([seed, block_length, hash_bits]).integers(
+                0, 2, (block_length, hash_bits)
+            ),
+            dtype=torch.float32,
+        )
+
+    def digest(self, plane: torch.Tensor) -> torch.Tensor:
+        """Return each block's hash; the float product is exact at these block lengths."""
+        return (plane @ self.projection.to(plane)) % 2
+
+    def digest_planes(self, planes: torch.Tensor) -> torch.Tensor:
+        """Return the block hashes of every ``(planes, blocks, block_length)`` plane."""
+        return torch.stack([self.digest(plane) for plane in planes])
+
+    def pack(self, digests: torch.Tensor) -> bytes:
+        """Pack every plane's hashes into the bytes that travel with the syndromes."""
+        return np.packbits(digests.reshape(-1).to(torch.uint8).numpy(), bitorder="little").tobytes()
+
+    def unpack(self, packed: bytes, planes: int) -> torch.Tensor:
+        """Recover transmitted hashes as ``(planes, blocks, hash_bits)``."""
+        unpacked = np.unpackbits(np.frombuffer(packed, dtype=np.uint8), bitorder="little")
+        return torch.as_tensor(unpacked.astype(np.float32)).view(planes, -1, self.hash_bits)
+
+
+class HashVerification:
+    """Compare decoded blocks against the hashes their encoder sent."""
+
+    def __init__(self, hashes: PlaneHashes, digests: torch.Tensor, bit_width: int) -> None:
+        self.hashes = hashes
+        self.digests = digests
+        self.bit_width = bit_width
+
+    def __call__(
+        self, stage: int, bit: int, plane: torch.Tensor, blocks: torch.Tensor
+    ) -> torch.Tensor:
+        expected = self.digests[stage * self.bit_width + bit].to(plane.device)[blocks]
+        return (self.hashes.digest(plane) == expected).all(dim=1)
+
+
+class SWLadderPayload(BaseModel):
+    """Every accumulated LDPCA bit one worker sent, and the rung each block stopped at.
+
+    Produced by :class:`SWLadder` once the decode that drove the feedback has finished, and
+    replayed at the receiver by :class:`SWLadderReplay`.  ``levels[plane][block]`` is both the rung
+    the decoder settled on and that block's cost in bits, which is what makes the accounting of a
+    rate-adaptive transport a sum rather than a guess.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    positions: int = Field(gt=0)
+    plan_id: str = Field(min_length=16, max_length=16, pattern=r"^[0-9a-f]{16}$")
+    block_length: int = Field(ge=32)
+    levels: tuple[tuple[int, ...], ...]
+    accumulated: bytes
+    requests: int = Field(ge=0)
+    raw: tuple[tuple[int, int], ...] = ()
+    raw_planes: bytes = b""
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> Self:
+        """Require one packed accumulator prefix per block and one packed block per raw rung."""
+        assert self.levels and all(len(plane) == len(self.levels[0]) for plane in self.levels)
+        assert all(1 <= level <= self.block_length for plane in self.levels for level in plane), (
+            f"every ladder level must lie in 1..{self.block_length}."
+        )
+        assert len(self.accumulated) == ceil(self.uplink_syndrome_bits / 8), (
+            f"{self.uplink_syndrome_bits} accumulated bits do not fit {len(self.accumulated)} bytes."
+        )
+        assert len(self.raw_planes) == ceil(len(self.raw) * self.block_length / 8), (
+            f"{len(self.raw)} raw blocks do not fit {len(self.raw_planes)} bytes."
+        )
+        return self
+
+    @property
+    def uplink_syndrome_bits(self) -> int:
+        return sum(map(sum, self.levels))
+
+    @property
+    def uplink_bits(self) -> int:
+        """Return what the ladder cost the uplink: one bit per rung climbed, plus any raw block."""
+        return self.uplink_syndrome_bits + len(self.raw) * self.block_length
+
+    @property
+    def blocks(self) -> int:
+        return len(self.levels[0])
+
+
+@cache
+def _boundary_index(block_length: int, level: int) -> torch.Tensor:
+    """Return the accumulator positions transmitted at one ladder level."""
+    return torch.as_tensor(split_boundaries(block_length, level), dtype=torch.long) - 1
+
+
+def _ladder_syndrome(accumulated: torch.Tensor) -> torch.Tensor:
+    """Difference an accumulated prefix back into the merged code's syndrome.
+
+    The accumulator is why a rung costs one bit: consecutive transmitted values differ by the sum
+    of the mother syndromes in between, which is exactly the merged check the decoder needs.
+    """
+    syndrome = accumulated.clone()
+    syndrome[:, 1:] = (accumulated[:, 1:] - accumulated[:, :-1]) % 2
+    return syndrome
+
+
+class SWLadder:
+    """Encoder side of the LDPCA feedback channel: the accumulated syndrome, served in rungs.
+
+    The encoder computes the whole rate-one accumulator without knowing any rate; which prefix of
+    it leaves the machine is the decoder's decision, arriving later over the feedback channel.
+    """
+
+    def __init__(self, accumulated: torch.Tensor, planes: torch.Tensor, block_length: int) -> None:
+        assert accumulated.shape == planes.shape
+        self.accumulated = accumulated
+        self.planes = planes
+        self.block_length = block_length
+        self.levels = torch.zeros(accumulated.shape[:2], dtype=torch.long)
+        self.requests = 0
+        self.raw_requests: list[tuple[int, int]] = []
+
+    def request(self, plane: int, blocks: torch.Tensor, level: int) -> torch.Tensor:
+        """Serve one rung and charge the bits it added to each named block."""
+        wanted = blocks.cpu()
+        assert 1 <= level <= self.block_length, f"rung {level} outside 1..{self.block_length}."
+        assert bool((self.levels[plane, wanted] <= level).all()), "a ladder never climbs down."
+        self.levels[plane, wanted] = level
+        self.requests += int(wanted.numel())
+        return self.accumulated[plane][wanted][:, _boundary_index(self.block_length, level)].float()
+
+    def raw(self, plane: int, blocks: torch.Tensor) -> torch.Tensor:
+        """Serve the terminal rung: the plane bits themselves."""
+        self.raw_requests.extend((plane, int(block)) for block in blocks.cpu())
+        return self.planes[plane][blocks.cpu()]
+
+    def payload(self, positions: int, plan_id: str) -> SWLadderPayload:
+        """Return the bits that actually crossed the uplink, packed in plane and block order."""
+        levels = [[int(level) for level in plane] for plane in self.levels]
+        prefixes = [
+            self.accumulated[plane, block][_boundary_index(self.block_length, level)]
+            for plane, plane_levels in enumerate(levels)
+            for block, level in enumerate(plane_levels)
+        ]
+        raw = [self.planes[plane][block] for plane, block in self.raw_requests]
+        return SWLadderPayload(
+            positions=positions,
+            plan_id=plan_id,
+            block_length=self.block_length,
+            levels=tuple(tuple(plane) for plane in levels),
+            accumulated=_pack(torch.cat(prefixes)),
+            requests=self.requests,
+            raw=tuple(self.raw_requests),
+            raw_planes=_pack(torch.cat(raw)) if raw else b"",
+        )
+
+
+class SWLadderReplay:
+    """Serve a recorded ladder to a rerun of the decode and refuse any rung nobody sent.
+
+    The worker ran the decoder's half of the protocol to discover the levels; the receiver runs it
+    again for real.  Both must ask for the same rungs, so asking for one the payload does not carry
+    is a determinism failure and is raised rather than papered over.
+    """
+
+    def __init__(self, payload: SWLadderPayload) -> None:
+        self.payload = payload
+        self.levels = torch.as_tensor(payload.levels, dtype=torch.long)
+        self.requests = 0
+        block_length = payload.block_length
+        self.accumulated = torch.zeros((*self.levels.shape, block_length), dtype=torch.uint8)
+        sent = _unpack(payload.accumulated, payload.uplink_syndrome_bits)
+        offset = 0
+        for plane, plane_levels in enumerate(payload.levels):
+            for block, level in enumerate(plane_levels):
+                self.accumulated[plane, block, _boundary_index(block_length, level)] = sent[
+                    offset : offset + level
+                ].to(torch.uint8)
+                offset += level
+        self.raw_rows = {pair: row for row, pair in enumerate(payload.raw)}
+        self.raw_bits = _unpack(payload.raw_planes, len(payload.raw) * block_length).view(-1, block_length)
+
+    def request(self, plane: int, blocks: torch.Tensor, level: int) -> torch.Tensor:
+        """Serve a rung the worker already paid for, or fail loudly."""
+        wanted = blocks.cpu()
+        assert bool((self.levels[plane, wanted] >= level).all()), (
+            f"the rerun asked plane {plane} for rung {level}; the worker stopped at "
+            f"{int(self.levels[plane, wanted].min())}, so belief propagation did not reproduce."
+        )
+        self.requests += int(wanted.numel())
+        return self.accumulated[plane][wanted][
+            :, _boundary_index(self.payload.block_length, level)
+        ].float()
+
+    def raw(self, plane: int, blocks: torch.Tensor) -> torch.Tensor:
+        """Serve a terminal rung the worker already sent, or fail loudly."""
+        missing = [int(block) for block in blocks.cpu() if (plane, int(block)) not in self.raw_rows]
+        assert not missing, (
+            f"the rerun asked for raw plane {plane} blocks {missing}, which the worker never sent."
+        )
+        return self.raw_bits[[self.raw_rows[(plane, int(block))] for block in blocks.cpu()]]
+
+
+def _pack(bits: torch.Tensor) -> bytes:
+    """Pack a flat 0/1 tensor into little-endian bytes."""
+    return np.packbits(bits.reshape(-1).to(torch.uint8).numpy(), bitorder="little").tobytes()
+
+
+def _unpack(packed: bytes, count: int) -> torch.Tensor:
+    """Unpack ``count`` little-endian bits and refuse a payload whose byte padding is dirty."""
+    unpacked = np.unpackbits(np.frombuffer(packed, dtype=np.uint8), bitorder="little")
+    assert unpacked.size >= count and not unpacked[count:].any(), "dirty byte padding in payload."
+    return torch.as_tensor(unpacked[:count].astype(np.float32))
+
+
 @dataclass(frozen=True, slots=True)
 class SWDecodeResult:
     """Decoder output, diagnostics, and the rate plan inferred for the following round."""
 
     symbols: torch.Tensor
     plane_model_entropies: tuple[tuple[float, ...], ...]
+    plane_decoded_cross_entropies: tuple[tuple[float, ...], ...]
     decoded_cross_entropy_stage_rates: tuple[float, ...]
+    recovered_blocks: int
+    recovery_bits: int
+    verification_failures: int
     nonconverged_blocks: int
     bp_attempted_blocks: int
     syndrome_consistent_blocks: int
@@ -206,6 +500,33 @@ class SWDecodeResult:
     bp_iterations: int
     next_plan: SWRatePlan
     seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class SWLadderResult:
+    """What one rate-adaptive decode recovered, what each block cost, and how it was found."""
+
+    symbols: torch.Tensor
+    plane_levels: torch.Tensor
+    block_length: int
+    plane_model_entropies: tuple[tuple[float, ...], ...]
+    plane_decoded_cross_entropies: tuple[tuple[float, ...], ...]
+    raw_blocks: int
+    verification_failures: int
+    bp_attempted_blocks: int
+    syndrome_consistent_blocks: int
+    bp_iterations: int
+    seconds: float
+
+    @property
+    def plane_rates(self) -> tuple[float, ...]:
+        """Return each plane's mean settled level as a rate in bits per coded position."""
+        return tuple(float(level) / self.block_length for level in self.plane_levels.float().mean(dim=1))
+
+    @property
+    def syndrome_rate(self) -> float:
+        """Return the rate every plane's ladder settled on, in bits per position."""
+        return sum(self.plane_rates)
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,25 +716,90 @@ def _parity_matrix(
     )
 
 
-def _matrix_cache_path(cache_dir: Path, key: MatrixKey) -> Path:
+@cache
+def split_boundaries(block_length: int, level: int) -> tuple[int, ...]:
+    """Return the end position of each interval of the mother code at one ladder level.
+
+    Varodayan et al.'s accumulator lets a decoder use any nested subset of the accumulated
+    syndrome, and which subsets exist is the ladder's whole design.  Splitting the widest interval
+    in half, leftmost of equals first, makes level ``k + 1`` a refinement of level ``k`` for every
+    ``k``, so asking for more redundancy costs one bit per level instead of a jump to the next
+    rung of a coarse ladder.  Yu and Sharma instead choose each split to shape the merged degree
+    distribution; this does not, which is the obvious thing to try if the merged code disappoints.
+    """
+    assert 1 <= level <= block_length, f"level {level} outside 1..{block_length}."
+    intervals = [(-block_length, 0, block_length)]
+    for _ in range(level - 1):
+        width, start, end = heappop(intervals)
+        assert width < -1, "cannot split an interval of one row; level exceeds the mother code."
+        middle = (start + end) // 2
+        heappush(intervals, (start - middle, start, middle))
+        heappush(intervals, (middle - end, middle, end))
+    return tuple(sorted(end for _, _, end in intervals))
+
+
+def _merged_structure(
+    mother: tuple[np.ndarray, np.ndarray], order: np.ndarray, boundaries: tuple[int, ...]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Merge the mother code's checks into one check per interval, cancelling repeated edges.
+
+    A variable that reaches the same merged check an even number of times drops out of it, which
+    is what costs the merged code its degree at low levels.
+    """
+    edge_variable, edge_check = mother
+    group = np.searchsorted(boundaries, order[edge_check], side="right")
+    pairs, counts = np.unique(np.stack((group, edge_variable)), axis=1, return_counts=True)
+    kept = pairs[:, counts % 2 == 1]
+    return np.ascontiguousarray(kept[1]), np.ascontiguousarray(kept[0])
+
+
+def _mother_matrix(
+    block_length: int,
+    code_seed: int,
+    stage: int,
+    bit: int,
+    distribution: tuple[tuple[int, float], ...],
+    girth_candidates: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build one plane's rate-one LDPCA mother code and the order its checks are transmitted in.
+
+    Free-standing so worker processes can run it.  No rank rejection: a square sparse GF(2) matrix
+    is rarely full rank, the levels a plan actually codes at are far below rate one, and a level
+    that cannot decode is repaired rather than assumed away.
+    """
+    rng = np.random.default_rng(np.random.SeedSequence([code_seed, stage, bit, block_length]))
+    edge_variable, edge_check = _parity_structure(
+        block_length, block_length, rng, distribution, girth_candidates
+    )
+    return edge_variable, edge_check, rng.permutation(block_length)
+
+
+def _matrix_cache_path(cache_dir: Path, key: MatrixKey | MotherKey) -> Path:
     return cache_dir / f"{sha256(repr(key).encode()).hexdigest()[:32]}.npz"
 
 
-def _load_cached_matrix(cache_dir: Path, key: MatrixKey) -> tuple[np.ndarray, np.ndarray] | None:
+def _load_cached_matrix(
+    cache_dir: Path, key: MatrixKey | MotherKey, names: tuple[str, ...] = ("variable", "check")
+) -> tuple[np.ndarray, ...] | None:
     path = _matrix_cache_path(cache_dir, key)
     if not path.exists():
         return None
     with np.load(path) as stored:
-        return stored["variable"], stored["check"]
+        return tuple(stored[name] for name in names)
 
 
-def _store_cached_matrix(cache_dir: Path, key: MatrixKey, structure: tuple[np.ndarray, np.ndarray]) -> None:
+def _store_cached_matrix(
+    cache_dir: Path,
+    key: MatrixKey | MotherKey,
+    structure: tuple[np.ndarray, ...],
+    names: tuple[str, ...] = ("variable", "check"),
+) -> None:
     """Publish a built matrix atomically so a killed run can never leave a half-written entry."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = _matrix_cache_path(cache_dir, key)
     partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
     with partial.open("wb") as handle:
-        np.savez(handle, variable=structure[0], check=structure[1])
+        np.savez(handle, **dict(zip(names, structure, strict=True)))
     partial.replace(path)
 
 
@@ -462,23 +848,117 @@ def _bp_decode(
     return decoded, succeeded, iterations_used
 
 
-def _lsb_plane_probabilities(prior: torch.Tensor, prefix: torch.Tensor, bit: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return zero/one probabilities conditioned on already decoded less-significant bits."""
+def _lsb_plane_probabilities(
+    prior: torch.Tensor, prefix: torch.Tensor, bit: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return zero/one probabilities conditioned on the less-significant bits, and the prefix weight.
+
+    The weight is the prefix's own probability.  A decoder always passes a prefix it has decoded
+    and therefore observed, but the rate controller averages over prefixes nobody has observed,
+    where a zero weight is an ordinary outcome rather than a fault.
+    """
     alphabet = prior.shape[1]
     groups = alphabet >> (bit + 1)
     bases = prefix[:, None] + torch.arange(groups, device=prior.device)[None, :] * (2 << bit)
     zero = prior.gather(1, bases).sum(dim=1)
     one = prior.gather(1, bases + (1 << bit)).sum(dim=1)
-    normalization = zero + one
-    assert bool((normalization > 0).all()), f"decoded lower-bit prefix has zero probability at bit {bit + 1}."
-    return zero / normalization, one / normalization
+    weight = zero + one
+    return zero / weight.clamp(min=1e-30), one / weight.clamp(min=1e-30), weight
+
+
+def _binary_entropy(zero: torch.Tensor, one: torch.Tensor) -> torch.Tensor:
+    """Return the entropy in bits of each position's binary distribution."""
+    return -(torch.xlogy(zero, zero) + torch.xlogy(one, one)) / float(np.log(2))
+
+
+def _plane_cross_entropy(zero: torch.Tensor, one: torch.Tensor, bits: torch.Tensor) -> float:
+    """Return the mean code length in bits that this plane's realized bits cost under the prior."""
+    return float(-torch.log2(torch.where(bits.bool(), one, zero).clamp(min=1e-12)).mean())
 
 
 def _plane_llr(prior: torch.Tensor, prefix: torch.Tensor, bit: int, clip: float) -> tuple[torch.Tensor, torch.Tensor]:
     """Return posterior source LLRs and binary entropies for one LSB-first plane."""
-    zero, one = _lsb_plane_probabilities(prior, prefix, bit)
-    entropy = -(torch.xlogy(zero, zero) + torch.xlogy(one, one)) / float(np.log(2))
-    return (zero.clamp(min=1e-12).log() - one.clamp(min=1e-12).log()).clamp(-clip, clip), entropy
+    zero, one, weight = _lsb_plane_probabilities(prior, prefix, bit)
+    assert bool((weight > 0).all()), f"decoded lower-bit prefix has zero probability at bit {bit + 1}."
+    return (
+        (zero.clamp(min=1e-12).log() - one.clamp(min=1e-12).log()).clamp(-clip, clip),
+        _binary_entropy(zero, one),
+    )
+
+
+def blocked_planes(bins: torch.Tensor, plan: SWRatePlan) -> torch.Tensor:
+    """Return every bit plane of every stage as ``(planes, blocks, block_length)``, zero padded.
+
+    The layout both the syndrome and the block hash are computed over, in the plan's plane order:
+    stage-major, least-significant bit first.
+    """
+    positions = bins.shape[1]
+    blocks = ceil(positions / plan.block_length)
+    padding = blocks * plan.block_length - positions
+    return torch.stack([
+        torch.nn.functional.pad(
+            ((bins[stage].long().cpu() >> bit) & 1).to(torch.float32), (0, padding)
+        ).view(blocks, plan.block_length)
+        for stage in range(plan.num_stages)
+        for bit in range(plan.bit_width)
+    ])
+
+
+def plane_rows(
+    plane_rates: Sequence[Sequence[float]], margin: float, block_length: int
+) -> tuple[tuple[int, ...], ...]:
+    """Convert per-plane rates in bits per position into syndrome row counts.
+
+    The single place a rate becomes a row count.  The margin belongs to whoever plans the rate:
+    a fixed-rate LDPC plane needs slack above its conditional entropy, and where that slack comes
+    from -- a constant, or a measurement on data the decoder already holds -- is the whole
+    difference between the one-shot controller and the calibrated one.
+    """
+    assert margin >= 0.0
+    return tuple(
+        tuple(min(block_length, max(0, ceil(block_length * (rate + margin)))) for rate in stage)
+        for stage in plane_rates
+    )
+
+
+def expected_plane_rates(
+    prior_provider: ConditionalPrior,
+    side_info: torch.Tensor,
+    num_stages: int,
+    alphabet: int,
+    samples: int = 2,
+    seed: int = 0,
+) -> tuple[tuple[float, ...], ...]:
+    """Return every plane's model conditional entropy without observing one source symbol.
+
+    The learned-prior form of Zhang and Tao's Eq. (45) rate controller, and the only rate a
+    decoder can name before anything is sent.  Within a stage the already split lower bits are
+    enumerated exactly and weighted by their own model probability; the earlier stages that a
+    later stage conditions on are drawn from the model rather than enumerated, which keeps the
+    cost linear instead of exponential in the stage index at the price of a sampling error that
+    averages away over positions.  These are model entropies: the gap to the cross-entropy of a
+    real symbol stream is exactly what a pilot exists to measure.
+    """
+    assert samples >= 1 and alphabet >= 2 and alphabet & (alphabet - 1) == 0
+    positions, bit_width = side_info.shape[0], int(log2(alphabet))
+    generator = torch.Generator(device=side_info.device).manual_seed(seed)
+    totals = np.zeros((num_stages, bit_width))
+
+    for _ in range(samples):
+        drawn = torch.zeros((num_stages, positions), dtype=torch.long)
+        for stage in range(num_stages):
+            prior = prior_provider(drawn, side_info, stage).to(side_info.device)
+            assert prior.shape == (positions, alphabet), (
+                f"stage {stage + 1} prior has shape {tuple(prior.shape)}; expected {(positions, alphabet)}."
+            )
+            for bit in range(bit_width):
+                for prefix_value in range(1 << bit):
+                    prefix = torch.full((positions,), prefix_value, dtype=torch.long, device=prior.device)
+                    zero, one, weight = _lsb_plane_probabilities(prior, prefix, bit)
+                    totals[stage, bit] += float((weight * _binary_entropy(zero, one)).mean())
+            uniform = torch.rand(positions, 1, device=prior.device, generator=generator)
+            drawn[stage] = (prior.cumsum(dim=1) < uniform).sum(dim=1).clamp(max=alphabet - 1).cpu()
+    return tuple(tuple(stage) for stage in (totals / samples).tolist())
 
 
 class SlepianWolfCodec:
@@ -493,6 +973,9 @@ class SlepianWolfCodec:
         self.cfg = cfg or SWCoderConfig()
         self._matrices: OrderedDict[MatrixKey, tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._edge_tensors: dict[MatrixKey, tuple[torch.Tensor, torch.Tensor]] = {}
+        # One mother per plane, not per rate: merging it down to a level costs milliseconds, so
+        # this cache is what makes an LDPCA rate search essentially free.
+        self._mothers: dict[MotherKey, tuple[np.ndarray, ...]] = {}
 
     def initial_plan(self, num_stages: int, alphabet: int) -> SWRatePlan:
         """Return the rate-one plan used to bootstrap previous-round adaptation."""
@@ -536,6 +1019,12 @@ class SlepianWolfCodec:
                     del missing[key]
         if not missing:
             return
+        if plan.matrix_backend == LDPCA_BACKEND:
+            for key, (stage, bit, rows) in missing.items():
+                edge_variable, edge_check, order = self._mother(plan, stage, bit)
+                self._remember(key, _merged_structure(
+                    (edge_variable, edge_check), order, split_boundaries(plan.block_length, rows)))
+            return
         assert plan.matrix_backend == MATRIX_BACKEND, f"unsupported matrix backend {plan.matrix_backend}."
         arguments = [
             (plan.block_length, rows, plan.code_seed, stage, bit,
@@ -561,6 +1050,26 @@ class SlepianWolfCodec:
         self._matrices.move_to_end(key)
         while len(self._matrices) > MATRIX_MEMORY_CACHE_SIZE:
             self._matrices.popitem(last=False)
+
+    def _mother(self, plan: SWRatePlan, stage: int, bit: int) -> tuple[np.ndarray, ...]:
+        """Return the plane's rate-one LDPCA mother code and its check transmission order."""
+        key: MotherKey = (
+            plan.matrix_backend, plan.block_length, plan.code_seed,
+            plan.degree_distribution, plan.girth_candidates, stage, bit,
+        )
+        names = ("variable", "check", "order")
+        cached = self._mothers.get(key)
+        if cached is None and self.cfg.matrix_cache_dir is not None:
+            cached = _load_cached_matrix(self.cfg.matrix_cache_dir, key, names)
+        if cached is None:
+            cached = _mother_matrix(
+                plan.block_length, plan.code_seed, stage, bit,
+                plan.degree_distribution, plan.girth_candidates,
+            )
+            if self.cfg.matrix_cache_dir is not None:
+                _store_cached_matrix(self.cfg.matrix_cache_dir, key, cached, names)
+        self._mothers[key] = cached
+        return cached
 
     def _matrix(self, plan: SWRatePlan, stage: int, bit: int, rows: int) -> tuple[np.ndarray, np.ndarray]:
         key = self._key(plan, stage, bit, rows)
@@ -608,10 +1117,7 @@ class SlepianWolfCodec:
                 elif rows == 0:
                     continue
                 else:
-                    variable_index, check_index = self._edges(plan, stage, bit, rows, plane.device)
-                    syndrome = torch.zeros(
-                        blocks, rows, dtype=plane.dtype, device=plane.device
-                    ).index_add_(1, check_index, plane[:, variable_index]) % 2
+                    syndrome = self._plane_syndrome(plane, plan, stage, bit, rows)
                 coded_planes.append(syndrome.to(torch.uint8).reshape(-1))
 
         # One host transfer for the whole payload; per-plane copies would sync the device each time.
@@ -622,8 +1128,132 @@ class SlepianWolfCodec:
         assert syndrome_bits.size == self._expected_syndrome_bits(plan, positions)
         return SWPayload(positions=positions, plan_id=plan.identifier, syndromes=syndromes)
 
+    def _bp_plane(
+        self, llr: torch.Tensor, syndrome: torch.Tensor, plan: SWRatePlan, stage: int, bit: int, rows: int
+    ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+        """Decode one plane's blocks in message-budget sized passes."""
+        variable_index, check_index = self._edges(plan, stage, bit, rows, llr.device)
+        per_pass = max(1, self.cfg.message_budget // variable_index.numel())
+        plane = torch.empty_like(llr)
+        succeeded = torch.empty(llr.shape[0], dtype=torch.bool, device=llr.device)
+        iterations = passes = 0
+        for chunk in torch.arange(llr.shape[0], device=llr.device).split(per_pass):
+            plane[chunk], succeeded[chunk], used = _bp_decode(
+                llr[chunk], syndrome[chunk], variable_index, check_index, self.cfg
+            )
+            iterations += int(used.sum())
+            passes += 1
+        return plane, succeeded, iterations, passes
+
+    def _plane_syndrome(
+        self, plane: torch.Tensor, plan: SWRatePlan, stage: int, bit: int, rows: int
+    ) -> torch.Tensor:
+        """Multiply one plane's blocks by their parity-check matrix over GF(2)."""
+        variable_index, check_index = self._edges(plan, stage, bit, rows, plane.device)
+        return torch.zeros(
+            plane.shape[0], rows, dtype=plane.dtype, device=plane.device
+        ).index_add_(1, check_index, plane[:, variable_index]) % 2
+
+    def calibrate_plane_rows(
+        self,
+        bins: torch.Tensor,
+        plan: SWRatePlan,
+        prior_provider: ConditionalPrior,
+        side_info: torch.Tensor,
+        row_step: int,
+        grid_points: int,
+    ) -> tuple[tuple[tuple[int, ...], ...], tuple[tuple[float, ...], ...]]:
+        """Return the smallest per-plane rows that decode known symbols exactly, and their cost.
+
+        Nothing here is oracle as long as the caller owns the symbols it passes: on a pilot the
+        decoder has already received, the rows this returns are then applied to positions that
+        took no part in the search.  Each plane's candidate grid starts at the rows of ``plan``
+        and always ends at the full rate, so a plane that cannot be calibrated ends uncompressed
+        and visibly so instead of silently under-rated.  The prefix a later plane conditions on
+        is the true one, because the protocol that uses these rows repairs failed blocks before
+        the next plane reads them.
+        """
+        assert row_step >= 1 and grid_points >= 1
+        assert bins.shape == (plan.num_stages, side_info.shape[0])
+        positions = bins.shape[1]
+        blocks = ceil(positions / plan.block_length)
+        padding = blocks * plan.block_length - positions
+        device = side_info.device
+        known = torch.zeros((plan.num_stages, positions), dtype=torch.long)
+        selected: list[tuple[int, ...]] = []
+        measured: list[tuple[float, ...]] = []
+
+        for stage, stage_rows in enumerate(plan.syndrome_rows):
+            prior = prior_provider(known, side_info, stage).to(device)
+            symbols = bins[stage].long().to(device)
+            prefix = torch.zeros(positions, dtype=torch.long, device=device)
+            stage_selected: list[int] = []
+            stage_measured: list[float] = []
+
+            for bit, start_rows in enumerate(stage_rows):
+                zero, one, _ = _lsb_plane_probabilities(prior, prefix, bit)
+                truth = (symbols >> bit) & 1
+                stage_measured.append(_plane_cross_entropy(zero, one, truth))
+                llr, _ = _plane_llr(prior, prefix, bit, self.cfg.llr_clip)
+                llr = torch.nn.functional.pad(
+                    llr, (0, padding), value=self.cfg.llr_clip
+                ).view(blocks, plan.block_length)
+                plane = torch.nn.functional.pad(
+                    truth.to(llr.dtype), (0, padding)
+                ).view(blocks, plan.block_length)
+                candidates = sorted(
+                    {min(plan.block_length, start_rows + step * row_step) for step in range(grid_points)}
+                    | {plan.block_length}
+                )
+                # Built in one batch: a matrix costs seconds and belief propagation milliseconds,
+                # so the whole grid is worth constructing in parallel even where the scan stops early.
+                self._prepare(
+                    plan,
+                    {
+                        self._key(plan, stage, bit, rows): (stage, bit, rows)
+                        for rows in candidates
+                        if 0 < rows < plan.block_length
+                    },
+                )
+                stage_selected.append(
+                    next(
+                        rows
+                        for rows in candidates
+                        if self._decodes_exactly(plane, llr, plan, stage, bit, rows)
+                    )
+                )
+                prefix |= truth << bit
+
+            known[stage] = symbols.cpu()
+            selected.append(tuple(stage_selected))
+            measured.append(tuple(stage_measured))
+        return tuple(selected), tuple(measured)
+
+    def _decodes_exactly(
+        self,
+        plane: torch.Tensor,
+        llr: torch.Tensor,
+        plan: SWRatePlan,
+        stage: int,
+        bit: int,
+        rows: int,
+    ) -> bool:
+        """Report whether one candidate row count recovers every bit of a known plane."""
+        if rows == plan.block_length:
+            return True
+        if rows == 0:
+            return bool(((llr < 0).to(plane.dtype) == plane).all())
+        syndrome = self._plane_syndrome(plane, plan, stage, bit, rows)
+        return bool((self._bp_plane(llr, syndrome, plan, stage, bit, rows)[0] == plane).all())
+
     def decode_syndromes(
-        self, payload: SWPayload, plan: SWRatePlan, prior_provider: ConditionalPrior, side_info: torch.Tensor
+        self,
+        payload: SWPayload,
+        plan: SWRatePlan,
+        prior_provider: ConditionalPrior,
+        side_info: torch.Tensor,
+        recovery: BlockRecovery | None = None,
+        verify: PlaneVerification | None = None,
     ) -> SWDecodeResult:
         """Decode a packed syndrome payload using only decoder-available conditional information."""
         start = perf_counter()
@@ -649,27 +1279,21 @@ class SlepianWolfCodec:
         self._prepare(plan)
         decoded = torch.zeros((plan.num_stages, positions), dtype=torch.long)
         entropies: list[tuple[float, ...]] = []
+        plane_cross_entropies: list[tuple[float, ...]] = []
         decoded_cross_entropies: list[float] = []
-        next_rows: list[tuple[int, ...]] = []
         offset = passes = iterations = bp_attempted = syndrome_consistent = 0
+        recovered = unverified = 0
 
         for stage, stage_rows in enumerate(plan.syndrome_rows):
-            prior = prior_provider(decoded, side_info, stage).to(device)
-            assert prior.shape == (positions, plan.alphabet), (
-                f"stage {stage + 1} prior has shape {prior.shape}; "
-                f"expected {(positions, plan.alphabet)}."
-            )
-            assert bool(torch.isfinite(prior).all()) and bool((prior >= 0).all())
-            assert torch.allclose(
-                prior.sum(dim=1), torch.ones(positions, device=device), atol=1e-4, rtol=1e-4
-            ), f"stage {stage + 1} prior rows must sum to one."
+            prior = self._stage_prior(prior_provider, decoded, side_info, stage, plan.alphabet)
             prefix = torch.zeros(positions, dtype=torch.long, device=device)
             stage_entropies: list[float] = []
+            stage_cross_entropies: list[float] = []
 
             for bit, rows in enumerate(stage_rows):
+                zero, one, _ = _lsb_plane_probabilities(prior, prefix, bit)
                 llr, entropy = _plane_llr(prior, prefix, bit, self.cfg.llr_clip)
-                mean_entropy = float(entropy.mean())
-                stage_entropies.append(mean_entropy)
+                stage_entropies.append(float(entropy.mean()))
                 llr = torch.nn.functional.pad(
                     llr, (0, padding), value=self.cfg.llr_clip
                 ).view(blocks, plan.block_length)
@@ -683,48 +1307,206 @@ class SlepianWolfCodec:
                     plane = syndrome
                     succeeded = torch.ones(blocks, dtype=torch.bool, device=device)
                 elif rows == 0:
+                    # A rate-zero plane is the prior's guess: nothing constrains it but the check.
                     plane = (llr < 0).to(llr.dtype)
                     succeeded = torch.ones(blocks, dtype=torch.bool, device=device)
                 else:
-                    variable_index, check_index = self._edges(plan, stage, bit, rows, device)
-                    per_pass = max(1, self.cfg.message_budget // variable_index.numel())
-                    plane = torch.empty_like(llr)
-                    succeeded = torch.empty(blocks, dtype=torch.bool, device=device)
-                    for chunk in torch.arange(blocks, device=device).split(per_pass):
-                        plane[chunk], succeeded[chunk], used = _bp_decode(
-                            llr[chunk], syndrome[chunk], variable_index, check_index, self.cfg
-                        )
-                        iterations += int(used.sum())
-                        bp_attempted += chunk.numel()
-                        passes += 1
+                    plane, succeeded, plane_iterations, plane_passes = self._bp_plane(
+                        llr, syndrome, plan, stage, bit, rows
+                    )
+                    iterations += plane_iterations
+                    passes += plane_passes
+                    bp_attempted += blocks
                     syndrome_consistent += int(succeeded.sum())
-                prefix |= plane.flatten()[:positions].long() << bit
+                if verify is not None and rows != plan.block_length:
+                    verified = verify(stage, bit, plane, torch.arange(blocks, device=device))
+                    unverified += int((succeeded & ~verified).sum())
+                    succeeded &= verified
+                if recovery is not None and not bool(succeeded.all()):
+                    failed = torch.nonzero(~succeeded, as_tuple=False).squeeze(1)
+                    plane[failed] = recovery(stage, bit, failed).to(llr.dtype).to(device)
+                    recovered += int(failed.numel())
+                bits = plane.flatten()[:positions]
+                stage_cross_entropies.append(_plane_cross_entropy(zero, one, bits))
+                prefix |= bits.long() << bit
 
             decoded[stage] = prefix.cpu()
             decoded_cross_entropies.append(
                 float(-torch.log2(prior.gather(1, prefix[:, None]).squeeze(1).clamp(min=1e-12)).mean())
             )
             entropies.append(tuple(stage_entropies))
-            next_rows.append(
-                tuple(
-                    min(plan.block_length, ceil(plan.block_length * (entropy + self.cfg.rate_margin)))
-                    for entropy in stage_entropies
-                )
-            )
+            plane_cross_entropies.append(tuple(stage_cross_entropies))
 
         assert offset == expected_bits
         return SWDecodeResult(
             symbols=decoded,
             plane_model_entropies=tuple(entropies),
+            plane_decoded_cross_entropies=tuple(plane_cross_entropies),
             decoded_cross_entropy_stage_rates=tuple(decoded_cross_entropies),
+            recovered_blocks=recovered,
+            recovery_bits=recovered * plan.block_length,
+            verification_failures=unverified,
             nonconverged_blocks=bp_attempted - syndrome_consistent,
             bp_attempted_blocks=bp_attempted,
             syndrome_consistent_blocks=syndrome_consistent,
             plane_blocks=blocks * plan.num_stages * plan.bit_width,
             decode_passes=passes,
             bp_iterations=iterations,
-            next_plan=plan.model_copy(update={"syndrome_rows": tuple(next_rows)}),
+            next_plan=plan.model_copy(
+                update={"syndrome_rows": plane_rows(entropies, 0.0, plan.block_length)}
+            ),
             seconds=perf_counter() - start,
+        )
+
+    def _stage_prior(
+        self,
+        prior_provider: ConditionalPrior,
+        decoded: torch.Tensor,
+        side_info: torch.Tensor,
+        stage: int,
+        alphabet: int,
+    ) -> torch.Tensor:
+        """Return one stage's decoder-side prior after checking that it is a distribution."""
+        positions = side_info.shape[0]
+        prior = prior_provider(decoded, side_info, stage).to(side_info.device)
+        assert prior.shape == (positions, alphabet), (
+            f"stage {stage + 1} prior has shape {tuple(prior.shape)}; expected {(positions, alphabet)}."
+        )
+        assert bool(torch.isfinite(prior).all()) and bool((prior >= 0).all())
+        assert torch.allclose(
+            prior.sum(dim=1), torch.ones(positions, device=side_info.device), atol=1e-4, rtol=1e-4
+        ), f"stage {stage + 1} prior rows must sum to one."
+        return prior
+
+    def accumulate_ladder(self, bins: torch.Tensor, plan: SWRatePlan) -> SWLadder:
+        """Return the LDPCA encoder's entire output: every plane's rate-one accumulated syndrome.
+
+        This is the whole of what the encoder knows how to do.  It never sees a rate: the rate is
+        how far up the accumulator the decoder later asks it to go, which is what makes the
+        transport adaptive without the encoder having any decoder-side information.
+        """
+        assert plan.matrix_backend == LDPCA_BACKEND, (
+            f"the ladder needs the {LDPCA_BACKEND} backend; the plan names {plan.matrix_backend}."
+        )
+        assert bins.ndim == 2 and bins.shape[0] == plan.num_stages, (
+            f"bins must have shape ({plan.num_stages}, positions), got {tuple(bins.shape)}."
+        )
+        assert bool(((bins >= 0) & (bins < plan.alphabet)).all()), f"bins must lie in [0, {plan.alphabet})."
+        planes = blocked_planes(bins, plan)
+        accumulated: list[torch.Tensor] = []
+
+        for index, plane in enumerate(planes):
+            edge_variable, edge_check, order = self._mother(
+                plan, index // plan.bit_width, index % plan.bit_width)
+            syndrome = torch.zeros(plane.shape[0], plan.block_length).index_add_(
+                1, torch.as_tensor(edge_check), plane[:, torch.as_tensor(edge_variable)]
+            ) % 2
+            # The accumulator is taken in transmission order, which is what makes every level's
+            # transmitted positions a subset of every higher level's.
+            transmitted = syndrome[:, torch.as_tensor(np.argsort(order))]
+            accumulated.append((transmitted.cumsum(dim=1) % 2).to(torch.uint8))
+        return SWLadder(torch.stack(accumulated), planes, plan.block_length)
+
+    def decode_ladder(
+        self,
+        ladder: LadderChannel,
+        plan: SWRatePlan,
+        positions: int,
+        prior_provider: ConditionalPrior,
+        side_info: torch.Tensor,
+        verify: PlaneVerification,
+    ) -> SWLadderResult:
+        """Climb each plane's LDPCA ladder until every block verifies, and report what it cost.
+
+        This is where the rate is chosen, per block, by trying: a block stops costing bits the
+        moment its decode verifies, so no margin has to be guessed and a hard block cannot make an
+        easy one pay for it.  ``plan.syndrome_rows`` only says where the climb starts -- starting
+        too low costs belief-propagation passes and no bits at all, starting too high overpays
+        every block, so the model's own conditional entropy is the right guess.
+
+        ``verify`` is not optional here.  Every rung asks "is this the source block?", and a
+        satisfied syndrome cannot answer it, so without a hash the ladder would stop at the first
+        confident wrong word.
+        """
+        start_time = perf_counter()
+        assert plan.matrix_backend == LDPCA_BACKEND, (
+            f"the ladder needs the {LDPCA_BACKEND} backend; the plan names {plan.matrix_backend}."
+        )
+        assert side_info.shape[0] == positions, (
+            f"side information has {side_info.shape[0]} positions; the ladder codes {positions}."
+        )
+        blocks = ceil(positions / plan.block_length)
+        padding = blocks * plan.block_length - positions
+        device = side_info.device
+        decoded = torch.zeros((plan.num_stages, positions), dtype=torch.long)
+        levels = torch.zeros((plan.num_stages * plan.bit_width, blocks), dtype=torch.long)
+        entropies: list[tuple[float, ...]] = []
+        cross_entropies: list[tuple[float, ...]] = []
+        iterations = attempted = consistent = unverified = raw_blocks = 0
+
+        for stage, stage_rows in enumerate(plan.syndrome_rows):
+            prior = self._stage_prior(prior_provider, decoded, side_info, stage, plan.alphabet)
+            prefix = torch.zeros(positions, dtype=torch.long, device=device)
+            stage_entropies: list[float] = []
+            stage_cross_entropies: list[float] = []
+
+            for bit, start_level in enumerate(stage_rows):
+                index = stage * plan.bit_width + bit
+                zero, one, _ = _lsb_plane_probabilities(prior, prefix, bit)
+                llr, entropy = _plane_llr(prior, prefix, bit, self.cfg.llr_clip)
+                stage_entropies.append(float(entropy.mean()))
+                llr = torch.nn.functional.pad(
+                    llr, (0, padding), value=self.cfg.llr_clip
+                ).view(blocks, plan.block_length)
+                plane = torch.zeros_like(llr)
+                active = torch.arange(blocks, device=device)
+                level = max(1, start_level)
+
+                while active.numel():
+                    syndrome = _ladder_syndrome(ladder.request(index, active, level).to(device))
+                    recovered, succeeded, plane_iterations, _ = self._bp_plane(
+                        llr[active], syndrome, plan, stage, bit, level
+                    )
+                    iterations += plane_iterations
+                    attempted += int(active.numel())
+                    consistent += int(succeeded.sum())
+                    verified = verify(stage, bit, recovered, active)
+                    unverified += int((succeeded & ~verified).sum())
+                    succeeded &= verified
+                    plane[active[succeeded]] = recovered[succeeded]
+                    levels[index, active[succeeded].cpu()] = level
+                    active = active[~succeeded]
+                    if level == plan.block_length:
+                        break
+                    level = min(level + self.cfg.ladder_step, plan.block_length)
+
+                if active.numel():
+                    # The merged code at level block_length is one row short of full rank and
+                    # belief propagation is not exact anyway, so the ladder keeps a last rung.
+                    plane[active] = ladder.raw(index, active).to(plane)
+                    levels[index, active.cpu()] = plan.block_length
+                    raw_blocks += int(active.numel())
+
+                bits = plane.flatten()[:positions]
+                stage_cross_entropies.append(_plane_cross_entropy(zero, one, bits))
+                prefix |= bits.long() << bit
+
+            decoded[stage] = prefix.cpu()
+            entropies.append(tuple(stage_entropies))
+            cross_entropies.append(tuple(stage_cross_entropies))
+
+        return SWLadderResult(
+            symbols=decoded,
+            plane_levels=levels,
+            block_length=plan.block_length,
+            plane_model_entropies=tuple(entropies),
+            plane_decoded_cross_entropies=tuple(cross_entropies),
+            raw_blocks=raw_blocks,
+            verification_failures=unverified,
+            bp_attempted_blocks=attempted,
+            syndrome_consistent_blocks=consistent,
+            bp_iterations=iterations,
+            seconds=perf_counter() - start_time,
         )
 
 
@@ -829,12 +1611,41 @@ def evaluate_slepian_wolf(
     )
 
 
+def _ladder_report(
+    codec: SlepianWolfCodec,
+    bins: torch.Tensor,
+    plan: SWRatePlan,
+    prior_provider: ConditionalPrior,
+    side_info: torch.Tensor,
+    hash_bits: int,
+) -> str:
+    """Run the rate-adaptive ladder over the same symbols and render what each block cost."""
+    ladder = codec.accumulate_ladder(bins, plan)
+    hashes = PlaneHashes(plan.block_length, hash_bits, plan.code_seed)
+    digests = hashes.digest_planes(ladder.planes)
+    result = codec.decode_ladder(
+        ladder, plan, bins.shape[1], prior_provider, side_info,
+        HashVerification(hashes, digests, plan.bit_width),
+    )
+    exact = bool((result.symbols == bins.long().cpu()).all())
+    hash_rate = digests.shape[0] * digests.shape[1] * hash_bits / bins.shape[1]
+    levels = result.plane_levels
+    return (
+        f"LDPCA ladder  rungs {result.syndrome_rate:.4f} + hashes {hash_rate:.4f} + raw "
+        f"{result.raw_blocks * plan.block_length / bins.shape[1]:.4f} = "
+        f"{result.syndrome_rate + hash_rate + result.raw_blocks * plan.block_length / bins.shape[1]:.4f} "
+        f"bit/position | exact {exact} | levels {int(levels.min())}-{int(levels.max())} "
+        f"of {plan.block_length} | {result.verification_failures} hash rejections | "
+        f"{result.raw_blocks} raw blocks | {result.seconds:.0f}s"
+    )
+
+
 def main() -> None:
     """Benchmark a previous-round rate plan on the quantizer's synthetic Gaussian source."""
     from FL_code.FL_core.utils import set_global_seed
 
-    from .prior_code import PriorCalculator
-    from .wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
+    from ..prior_code import PriorCalculator
+    from ..wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--size", type=int, default=1_000_000, help="coded vector length")
@@ -843,7 +1654,9 @@ def main() -> None:
     parser.add_argument("--num-planes", type=int, default=3)
     parser.add_argument("--reconst-ld", type=float, default=120.0)
     parser.add_argument("--block-length", type=int, default=SWCoderConfig().block_length)
-    parser.add_argument("--rate-margin", type=float, default=SWCoderConfig().rate_margin)
+    parser.add_argument("--margin", type=float, default=0.0, help="bits per plane added to the entropy plan")
+    parser.add_argument("--ladder-step", type=int, default=SWCoderConfig().ladder_step)
+    parser.add_argument("--ladder-hash-bits", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -894,11 +1707,13 @@ def main() -> None:
             prior_model, decoded_stages, decoder_side_info
         )[stage].to(decoder_side_info.device)
 
-    cfg = SWCoderConfig(block_length=args.block_length, rate_margin=args.rate_margin, code_seed=args.seed)
+    cfg = SWCoderConfig(block_length=args.block_length, code_seed=args.seed)
     codec = SlepianWolfCodec(cfg)
     bootstrap = codec.initial_plan(args.num_planes, args.bins_per_plane)
     bootstrap_payload = codec.encode_syndromes(bins, bootstrap)
-    plan = codec.decode_syndromes(bootstrap_payload, bootstrap, prior_provider, side_info).next_plan
+    bootstrap_decode = codec.decode_syndromes(bootstrap_payload, bootstrap, prior_provider, side_info)
+    plan = bootstrap.model_copy(update={"syndrome_rows": plane_rows(
+        bootstrap_decode.plane_model_entropies, args.margin, cfg.block_length)})
     result = evaluate_slepian_wolf(bins, plan, prior_provider, side_info, codec)
     marginal = sum(PriorCalculator.compute_plane_rates(
         PriorCalculator.compute_marginal_prior(bins, args.bins_per_plane, args.num_planes),
@@ -913,6 +1728,14 @@ def main() -> None:
         f"encoder-side marginal rate {marginal:.4f} "
         f"({1 - result.syndrome_rate / marginal:.1%} saved by Slepian-Wolf coding)"
     )
+    # The same plan, read as a starting rung instead of a fixed rate: the ladder climbs from the
+    # model entropy per block, so this line and the table above differ only in the code family.
+    ladder_codec = SlepianWolfCodec(cfg.model_copy(update={
+        "matrix_backend": LDPCA_BACKEND, "ladder_step": args.ladder_step}))
+    ladder_plan = ladder_codec.initial_plan(args.num_planes, args.bins_per_plane).model_copy(
+        update={"syndrome_rows": plan.syndrome_rows})
+    print(_ladder_report(
+        ladder_codec, bins, ladder_plan, prior_provider, side_info, args.ladder_hash_bits))
 
 
 if __name__ == "__main__":

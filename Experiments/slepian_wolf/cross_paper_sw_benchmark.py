@@ -40,7 +40,7 @@ from Experiments.slepian_wolf.neural_sw_comparison_benchmark import (
     _synchronize,
     _wilson_upper,
 )
-from FL_code.cancer_protocol.sw_coder import (
+from FL_code.cancer_protocol.bin_coder.sw_coder import (
     ConditionalPrior,
     SWCoderConfig,
     SWRatePlan,

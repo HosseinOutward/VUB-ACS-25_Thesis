@@ -9,13 +9,13 @@ import pytest
 import torch
 
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
-from FL_code.cancer_protocol.oracle_sw_mixin import (
+from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import (
     OracleSWPayload,
     OracleSWRoundMixin,
     _wilson_upper,
 )
-from FL_code.cancer_protocol.oracle_index_mapping_mixin import IndexMappingPlan
-from FL_code.cancer_protocol.sw_coder import (
+from FL_code.cancer_protocol.bin_coder.oracle_index_mapping_mixin import IndexMappingPlan
+from FL_code.cancer_protocol.bin_coder.sw_coder import (
     SWCoderConfig,
     SWPayload,
     SWRatePlan,

@@ -32,7 +32,7 @@ import pytest
 from scipy.special import ndtr, roots_hermitenorm, xlogy
 import torch
 
-from FL_code.cancer_protocol.sw_coder import (
+from FL_code.cancer_protocol.bin_coder.sw_coder import (
     LIVERIS_2002_RATE_HALF_NODE_DISTRIBUTION,
     SWCoderConfig,
     SWRatePlan,
@@ -272,7 +272,6 @@ def _evaluate_oracle_worker(
     cfg = SWCoderConfig(
         block_length=PAPER_BLOCK_LENGTH,
         max_bp_iterations=PAPER_BP_ITERATIONS,
-        rate_margin=margin,
         code_seed=seed,
     )
     plan = _binary_plan(entropy_rate + margin, cfg, seed)
@@ -300,7 +299,7 @@ def test_multilevel_lsb_chain_rule() -> None:
     for bit in range(3):
         for prefix_value in range(1 << bit):
             prefix = torch.full((priors.shape[0],), prefix_value, dtype=torch.long)
-            zero, one = _lsb_plane_probabilities(priors, prefix, bit)
+            zero, one, _ = _lsb_plane_probabilities(priors, prefix, bit)
             symbols = torch.arange(priors.shape[1])
             prefix_probability = priors[:, (symbols % (1 << bit)) == prefix_value].sum(
                 dim=1
@@ -667,7 +666,6 @@ def test_successive_worker_decoding_exposes_error_propagation() -> None:
             cfg = SWCoderConfig(
                 block_length=PAPER_BLOCK_LENGTH,
                 max_bp_iterations=PAPER_BP_ITERATIONS,
-                rate_margin=margin,
                 code_seed=410 + worker,
             )
             plan = _binary_plan(reference.worker_rate(worker) + margin, cfg, cfg.code_seed)

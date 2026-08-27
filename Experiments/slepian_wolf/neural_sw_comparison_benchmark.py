@@ -41,7 +41,7 @@ import numpy as np
 import pytest
 import torch
 
-from FL_code.cancer_protocol.sw_coder import SWCoderConfig, _bp_decode
+from FL_code.cancer_protocol.bin_coder.sw_coder import SWCoderConfig, _bp_decode
 
 
 PROJECT_ROOT: Final = Path(__file__).resolve().parents[2]

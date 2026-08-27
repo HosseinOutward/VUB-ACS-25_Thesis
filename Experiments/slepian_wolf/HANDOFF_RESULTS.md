@@ -2,6 +2,8 @@
 
 Numeric artifacts are under `Experiments/slepian_wolf/results/`; paper checks are in `paper_replication_benchmark.py`. Do not generalize single-seed integration results to real FL deltas.
 
+The non-oracle transports are compared over three seeds in `HANDOFF_PRACTICAL.md` (fixed-rate pilot) and `HANDOFF_LDPCA.md` (rate-adaptive ladder), from the same `practical_sw_benchmark.py` runs saved as `results/practical_sw_*seed*.json`. Headline: the ladder sits 11% under the pilot on both configurations, and +23% rather than +39% over the prior cross-entropy.
+
 ## Paper checks
 
 - Fig. 7 worker 10: exact `0.3631`, semi-analytical `0.3621` bit/symbol.

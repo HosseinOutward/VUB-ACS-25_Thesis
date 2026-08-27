@@ -237,9 +237,8 @@ class _WZProtocol(BaseProtocol):
         if self.refresh_frozen_si and not previous.quantizer.no_side_info:
             side_information = [
                 entry.tensor
-                for client_history in self._recons_history.view(
-                    previous.can_decode_where, client_id
-                ).values()
+                for client_history in \
+                     self._recons_history.view(previous.can_decode_where, client_id).values()
                 for entry in client_history
             ]
             assert len(side_information) == previous.quantizer.side_info_size, (

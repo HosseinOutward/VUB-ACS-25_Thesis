@@ -26,7 +26,7 @@ The wrapped codec must produce `payload_content == (bins, PreprocessMetadata)` a
 
 ### Why it is oracle/cheating
 
-A normal one-way SW encoder sees symbols and a previously agreed rate plan; side information, the conditional prior and decoding outcome exist only at the decoder. This mixin instead performs decoder work while encoding: it accesses the current decoder side information and learned prior, knows the true source symbols, repeatedly decodes candidate rates, measures their true BER, and chooses a passing rate on that same vector. It then transmits the selected plan. This gives an optimistic per-vector lower operational rate and bypasses the real problem of choosing a rate before the decoder observes success or failure.
+A normal one-way SW encoder sees symbols and a previously agreed rate plan; side information, the conditional prior and decoding outcome exist only at the decoder. This mixin instead performs decoder work while encoding: it accesses the current decoder side information and learned prior, knows the true source symbols, repeatedly decodes candidate rates, measures their true BER, and chooses a passing rate on that same vector. It then transmits the selected plan. This gives an optimistic per-vector lower operational rate and bypasses the real problem of choosing a rate before the decoder observes success or failure. `PracticalSWRoundMixin` (see `HANDOFF_PRACTICAL.md`) solves that problem instead of skipping it, and measures lower than this mixin on every configuration tried, so do not read the oracle rate as a bound on what a real controller can reach.
 
 ## Optional value mapping
 

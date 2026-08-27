@@ -9,7 +9,7 @@ import torch
 
 from .oracle_sw_mixin import OracleSWPayload
 from .sw_coder import ConditionalPrior
-from .wz_quantizer import PreprocessMetadata
+from ..wz_quantizer import PreprocessMetadata
 
 
 class IndexMappingPlan(BaseModel):

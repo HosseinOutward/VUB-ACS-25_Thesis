@@ -12,80 +12,21 @@ from torch.nn import Parameter
 import torch.nn.functional as F
 
 from FL_code.FL_core.cache import cache_call, model_training_hash
-from FL_code.FL_core.utils import create_training_progress_bar
+from FL_code.FL_core.utils import (
+    OUTLIER_CHUNK,
+    OutlierMetadata,
+    PreprocessMetadata,
+    create_training_progress_bar,
+    normalization_params,
+    outlier_metadata,
+)
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
 from .prior_code import INFERENCE_BATCH, DedupedPriorCalculator, PriorCalculator
 
 
-OUTLIER_CHUNK = 2**8
 # Below this point, exact grouping costs more than the avoided RNN work.
 TRAINING_DEDUPLICATION_MIN_FRACTION = 0.1
-
-
-class OutlierMetadata(NamedTuple):
-    positions: tuple[np.ndarray, ...]
-    scale: np.ndarray | None
-    signs: np.ndarray
-
-
-class PreprocessMetadata(NamedTuple):
-    norm_factors: torch.Tensor
-    outliers: OutlierMetadata
-
-
-def normalization_params(values: torch.Tensor) -> tuple[float, float]:
-    """Estimate a robust center and scale from a seeded quantile-trimmed sample.
-
-    Seeded so encoder and decoder derive bitwise-identical factors from the same values. The
-    factors are kept at the precision they are computed in and transmitted at that precision, so
-    the encoder normalizes with exactly what the decoder will use.
-    """
-    sample_size = min(200_000, values.numel())
-    generator = torch.Generator(device=values.device).manual_seed(0)
-
-    def random_sample() -> torch.Tensor:
-        return values[torch.randint(
-            values.numel(), (sample_size,), device=values.device, generator=generator)].float()
-
-    centers: list[float] = []
-    for _ in range(5):
-        sample = random_sample()
-        q02, q98 = torch.quantile(sample, torch.tensor([0.02, 0.98], device=sample.device))
-        centers.append(sample[(sample >= q02) & (sample <= q98)].mean().item())
-    center = float(np.mean(centers))
-
-    scales: list[float] = []
-    for _ in range(5):
-        centered = random_sample() - center
-        q01, q99 = torch.quantile(centered, torch.tensor([0.01, 0.99], device=values.device))
-        scales.append(centered.clamp(q01, q99).square().mean().sqrt().item())
-    scale = float(np.mean(scales))
-    assert scale != 0
-    return scale, center
-
-
-def outlier_metadata(values: torch.Tensor, threshold: float) -> tuple[torch.Tensor, OutlierMetadata]:
-    """Move values beyond threshold into a separately coded tail representation."""
-    positions = torch.nonzero(values.abs() > threshold, as_tuple=False).flatten()
-    if positions.numel() == 0:
-        return values, OutlierMetadata((), None, np.array([], dtype=np.bool_))
-
-    outliers = values[positions]
-    tail = outliers.abs() - threshold
-    scale = torch.quantile(tail.float(), 0.99).item() / threshold
-    assert scale != 0
-    values = values.clone()
-    values[positions] = tail * outliers.sign() / scale
-    positions_np = positions.cpu().numpy()
-    return values, OutlierMetadata(
-        tuple(
-            (positions_np[(positions_np >= start) & (positions_np < start + OUTLIER_CHUNK)] - start).astype(np.uint8)
-            for start in range(0, values.numel(), OUTLIER_CHUNK)
-        ),
-        np.array(scale, dtype=np.float32),
-        (outliers > 0).cpu().numpy().astype(np.bool_),
-    )
 
 
 def new_rnn_model(

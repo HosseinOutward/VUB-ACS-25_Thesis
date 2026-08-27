@@ -11,9 +11,9 @@ import torch
 
 from FL_code.FL_core.utils import decompress_data_list
 
-from .round_codecs import CancerRecord
+from ..round_codecs import CancerRecord
 from .sw_coder import ConditionalPrior, SWCoderConfig, SWPayload, SWRatePlan, SlepianWolfCodec
-from .wz_quantizer import PreprocessMetadata
+from ..wz_quantizer import PreprocessMetadata
 
 
 class OracleSWPayload(BaseModel):
@@ -61,9 +61,8 @@ class OracleSWRoundMixin:
         self.sw_search_step = sw_search_step
         self.sw_search_bisect = sw_search_bisect
         # One codec for the search, the payload, and the decoder: its parity matrices are the
-        # expensive part, and the study runs both ends in this process anyway.  The margin is
-        # zeroed so the bootstrap decode reports the entropy-matched rates the search backs off from.
-        self.sw_codec = SlepianWolfCodec(self.sw_config.model_copy(update={"rate_margin": 0.0}))
+        # expensive part, and the study runs both ends in this process anyway.
+        self.sw_codec = SlepianWolfCodec(self.sw_config)
         super().__init__(*args, **kwargs)
 
     def _sw_context(self, metadata: PreprocessMetadata) -> tuple[torch.Tensor, ConditionalPrior]:

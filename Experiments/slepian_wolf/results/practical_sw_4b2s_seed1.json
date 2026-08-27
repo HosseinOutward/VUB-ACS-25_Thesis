@@ -1,0 +1,248 @@
+{
+  "bins_per_stage": 4,
+  "stages": 2,
+  "positions": 1000000,
+  "block_length": 2400,
+  "pilot_blocks": 20,
+  "pilot_fraction": 0.048,
+  "bootstrap_margin": 0.2,
+  "safety_rows": 72,
+  "verification_bits": 16,
+  "ladder_step": 24,
+  "ladder_start_margin": 0.0,
+  "ladder_verification_bits": 32,
+  "training_epochs": 60,
+  "oracle_target_ber": 1e-05,
+  "oracle_row_step": 24,
+  "seed": 1,
+  "prior_stage_rates": [
+    0.5128116607666016,
+    0.9874855875968933
+  ],
+  "prior_rate": 1.5002972483634949,
+  "marginal_stage_rates": [
+    1.9785829782485962,
+    1.8963860273361206
+  ],
+  "marginal_rate": 3.874969005584717,
+  "source_index_rate": 4.0,
+  "methods": [
+    {
+      "name": "indices",
+      "stage_rates": [
+        2.0,
+        2.0
+      ],
+      "overhead_rate": 0.0,
+      "downlink_rate": 0.0,
+      "stage_mse": [
+        0.006662486586719751,
+        0.0027361821848899126
+      ],
+      "stage_wmape": [
+        8.035258647451643,
+        4.890461005718529
+      ],
+      "symbol_errors": 0,
+      "repaired_blocks": 0,
+      "seconds": 0.372164249420166,
+      "controller": null
+    },
+    {
+      "name": "oracle",
+      "stage_rates": [
+        0.897801,
+        1.348578
+      ],
+      "overhead_rate": 0.000197,
+      "downlink_rate": 0.0,
+      "stage_mse": [
+        0.006662486586719751,
+        0.002736383816227317
+      ],
+      "stage_wmape": [
+        8.035258647451643,
+        4.890608219071004
+      ],
+      "symbol_errors": 13,
+      "repaired_blocks": 0,
+      "seconds": 22.93921261932701,
+      "controller": null
+    },
+    {
+      "name": "one-shot",
+      "stage_rates": [
+        0.837243,
+        1.364997
+      ],
+      "overhead_rate": 0.000128,
+      "downlink_rate": 0.000316,
+      "stage_mse": [
+        0.006662486586719751,
+        0.0027361821848899126
+      ],
+      "stage_wmape": [
+        8.035258647451643,
+        4.890461005718529
+      ],
+      "symbol_errors": 0,
+      "repaired_blocks": 28,
+      "seconds": 39.80934555083513,
+      "controller": {
+        "sw_positions": 1000000,
+        "sw_pilot_positions": 0,
+        "sw_uplink_rate": 2.202368,
+        "sw_downlink_rate": 0.000316,
+        "sw_bulk_rate": 2.108352,
+        "sw_repair_rate": 0.093888,
+        "sw_repaired_blocks": 28,
+        "sw_pilot_repaired_blocks": 0,
+        "sw_apriori_rate": 1.3057880699634552,
+        "sw_apriori_plane_rates": [
+          [
+            0.4048161804676056,
+            0.006053820252418518
+          ],
+          [
+            0.5269820988178253,
+            0.3679359704256058
+          ]
+        ],
+        "sw_bulk_plane_rows": [
+          [
+            1452,
+            495
+          ],
+          [
+            1745,
+            1364
+          ]
+        ]
+      }
+    },
+    {
+      "name": "pilot",
+      "stage_rates": [
+        0.754107,
+        1.281357
+      ],
+      "overhead_rate": 0.000256,
+      "downlink_rate": 0.000362,
+      "stage_mse": [
+        0.006662486586719751,
+        0.0027361821848899126
+      ],
+      "stage_wmape": [
+        8.035258647451643,
+        4.890461005718529
+      ],
+      "symbol_errors": 0,
+      "repaired_blocks": 26,
+      "seconds": 48.77482521627098,
+      "controller": {
+        "sw_positions": 1000000,
+        "sw_pilot_positions": 48000,
+        "sw_uplink_rate": 2.03572,
+        "sw_downlink_rate": 0.000362,
+        "sw_bulk_rate": 1.845256,
+        "sw_repair_rate": 0.089088,
+        "sw_repaired_blocks": 26,
+        "sw_pilot_repaired_blocks": 0,
+        "sw_apriori_rate": 1.3056996358791366,
+        "sw_apriori_plane_rates": [
+          [
+            0.40491926670074463,
+            0.006057840422727168
+          ],
+          [
+            0.5271055996417999,
+            0.3676169291138649
+          ]
+        ],
+        "sw_bulk_plane_rows": [
+          [
+            1500,
+            159
+          ],
+          [
+            1722,
+            1267
+          ]
+        ],
+        "sw_pilot_rate": 0.10112,
+        "sw_pilot_cross_entropy_rate": 1.491411967203021,
+        "sw_pilot_cross_entropy_plane_rates": [
+          [
+            0.4911230802536011,
+            0.017226947471499443
+          ],
+          [
+            0.5853821039199829,
+            0.3976798355579376
+          ]
+        ]
+      }
+    },
+    {
+      "name": "ldpca",
+      "stage_rates": [
+        0.705771,
+        1.220135
+      ],
+      "overhead_rate": 0.0,
+      "downlink_rate": 0.024433,
+      "stage_mse": [
+        0.006662486586719751,
+        0.0027361821848899126
+      ],
+      "stage_wmape": [
+        8.035258647451643,
+        4.890461005718529
+      ],
+      "symbol_errors": 0,
+      "repaired_blocks": 8,
+      "seconds": 748.968685740605,
+      "controller": {
+        "sw_positions": 1000000,
+        "sw_uplink_rate": 1.925906,
+        "sw_downlink_rate": 0.024433,
+        "sw_syndrome_rate": 1.85333,
+        "sw_hash_rate": 0.053376,
+        "sw_raw_rate": 0.0192,
+        "sw_raw_blocks": 8,
+        "sw_apriori_rate": 1.306842148071155,
+        "sw_apriori_plane_rates": [
+          [
+            0.4048161804676056,
+            0.006053820019587874
+          ],
+          [
+            0.5339317619800568,
+            0.3620403856039047
+          ]
+        ],
+        "sw_decoded_cross_entropy_rate": 1.5002973955124617,
+        "sw_plane_mean_levels": [
+          1544.3165283203125,
+          84.17985534667969,
+          1596.877685546875,
+          1219.0623779296875
+        ],
+        "sw_plane_max_levels": [
+          2292,
+          2247,
+          2002,
+          2400
+        ],
+        "sw_plane_min_levels": [
+          972,
+          15,
+          1282,
+          893
+        ],
+        "sw_verification_failures": 8545,
+        "sw_ladder_requests": 24369
+      }
+    }
+  ]
+}
