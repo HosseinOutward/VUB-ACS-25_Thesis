@@ -9,12 +9,17 @@ import pytest
 import torch
 
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
+from FL_code.cancer_protocol.round_codecs import CancerRecord
 from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import (
     OracleSWPayload,
     OracleSWRoundMixin,
     _wilson_upper,
 )
-from FL_code.cancer_protocol.bin_coder.oracle_index_mapping_mixin import IndexMappingPlan
+from FL_code.cancer_protocol.bin_coder.oracle_index_mapping_mixin import (
+    IndexMappingPlan,
+    MappedOracleSWPayload,
+    OracleValueOrderedIndexMixin,
+)
 from FL_code.cancer_protocol.bin_coder.sw_coder import (
     SWCoderConfig,
     SWPayload,
@@ -93,6 +98,10 @@ class _OracleHost(OracleSWRoundMixin, _FakeIndexRoundCodec):
     pass
 
 
+class _MappedOracleHost(OracleValueOrderedIndexMixin, OracleSWRoundMixin, _FakeIndexRoundCodec):
+    pass
+
+
 def _problem(positions: int = 4_800) -> tuple[torch.Tensor, torch.Tensor]:
     generator = torch.Generator().manual_seed(7)
     side = torch.randint(0, 2, (positions, 1), generator=generator)
@@ -123,7 +132,8 @@ def test_oracle_round_payload_preserves_outer_fields_and_recovers_stages() -> No
         sw_config=SWCoderConfig(block_length=32, max_bp_iterations=30),
     )
 
-    outer = host.get_encod_payload(torch.zeros(bins.shape[1]), object())
+    record = CancerRecord(round_id=0, client_id=0, round_name_full="OSW")
+    outer = host.get_encod_payload(torch.zeros(bins.shape[1]), record)
     assert outer["quantizer_state"] == "preserved"
     transmitted, metadata = outer["payload_content"]
     assert isinstance(transmitted, OracleSWPayload)
@@ -132,8 +142,35 @@ def test_oracle_round_payload_preserves_outer_fields_and_recovers_stages() -> No
         host.decode_staged_indices(restored["payload_content"][0], metadata),
         bins,
     )
-    reconstruction = host.decode(compress_data_list(outer), object())
-    torch.testing.assert_close(reconstruction, bins[-1].float())
+    assert record.symbol_error_rate == 0.0
+
+    decoder = _OracleHost(
+        _FakeQuantizer(bins, side_info),
+        sw_config=SWCoderConfig(block_length=32, max_bp_iterations=30),
+    )
+    for _ in range(2):
+        reconstruction = decoder.decode(compress_data_list(outer), record)
+        torch.testing.assert_close(reconstruction, bins[-1].float())
+
+
+def test_mapped_oracle_rate_includes_the_transmitted_mapping() -> None:
+    """Charge the value-derived label permutation as part of the mapped coder payload."""
+    bins, side_info = _problem()
+    host = _MappedOracleHost(
+        _FakeQuantizer(bins, side_info),
+        sw_config=SWCoderConfig(block_length=32, max_bp_iterations=30),
+    )
+    record = CancerRecord(round_id=0, client_id=0, round_name_full="MOSW")
+    outer = host.get_encod_payload(torch.zeros(bins.shape[1]), record)
+    transmitted = outer["payload_content"][0]
+
+    assert isinstance(transmitted, MappedOracleSWPayload)
+    assert transmitted.wire_bits == (
+        transmitted.syndrome.wire_bits
+        + transmitted.plan.description_bits
+        + transmitted.mapping.description_bits
+    )
+    assert record.coder_rate == pytest.approx(transmitted.wire_bits / bins.shape[1])
 
 
 def test_oracle_plan_is_wilson_safe_and_uses_successive_decoded_context() -> None:

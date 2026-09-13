@@ -72,6 +72,11 @@ class MappedOracleSWPayload(OracleSWPayload):
         assert all(len(stage) == self.plan.alphabet for stage in self.mapping.original_to_label)
         return self
 
+    @property
+    def wire_bits(self) -> int:
+        """Include the value-derived label mapping that must accompany the syndrome."""
+        return super().wire_bits + self.mapping.description_bits
+
 
 class OracleValueOrderedIndexMixin:
     """Relabel staged symbols by reconstruction value along a Gray-code path."""

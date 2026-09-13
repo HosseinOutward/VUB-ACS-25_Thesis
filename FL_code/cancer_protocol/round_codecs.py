@@ -92,6 +92,10 @@ class CancerRecord(CompressionRecord):
     encoder_size: float | None = None
     decoder_size: float | None = None
     meta_data_size: float | None = None
+    coder_rate: float | None = None
+    coder_stage_rates: list[float] | None = None
+    coder_overhead_rate: float | None = None
+    symbol_error_rate: float | None = None
 
     @property
     def element_metrics(self) -> ElementMetrics | None:

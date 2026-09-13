@@ -33,6 +33,11 @@ class OracleSWPayload(BaseModel):
         )
         return self
 
+    @property
+    def wire_bits(self) -> int:
+        """Return the transmitted syndrome and complete rate-plan description size."""
+        return self.syndrome.wire_bits + self.plan.description_bits
+
 
 def _wilson_upper(errors: int, trials: int, confidence: float = 0.95) -> float:
     """Return the one-sided Wilson upper confidence bound for a bit-error rate."""
@@ -53,6 +58,7 @@ class OracleSWRoundMixin:
     sw_config: SWCoderConfig
     sw_search_step: int
     sw_search_bisect: bool
+    sw_search_log: list[tuple[int, tuple[tuple[int, ...], ...], float, float]]
 
     def __init__(self, *args: Any, sw_config: SWCoderConfig | None = None,
                  sw_search_step: int = 1, sw_search_bisect: bool = False, **kwargs: Any) -> None:
@@ -65,18 +71,25 @@ class OracleSWRoundMixin:
         self.sw_codec = SlepianWolfCodec(self.sw_config)
         super().__init__(*args, **kwargs)
 
+    def coder_prior_model(self) -> Any:
+        """Return the network the coder conditions on, and so the rate it is measured against."""
+        return self.quantizer.coding_model
+
     def _sw_context(self, metadata: PreprocessMetadata) -> tuple[torch.Tensor, ConditionalPrior]:
-        """Return decoder side information and the quantizer's causal stage prior."""
+        """Return decoder side information and the coder's causal stage prior."""
         side_info = self.quantizer.side_info_tensor(metadata)
 
         def prior_provider(
             decoded_stages: torch.Tensor, decoder_side_info: torch.Tensor, stage: int
         ) -> torch.Tensor:
             return self.quantizer.prior_calculator.compute_prior_from_network(
-                self.quantizer.coding_model, decoded_stages, decoder_side_info
+                self.coder_prior_model(), decoded_stages, decoder_side_info
             )[stage].to(decoder_side_info.device)
 
         return side_info, prior_provider
+
+    def add_prior_to_record(self, *args: Any, **kwargs: Any) -> None:
+        """Skip the separate diagnostic prior because this payload measures its own coder rate."""
 
     def _validate_staged_indices(self, bins: torch.Tensor) -> tuple[int, int]:
         """Return the staged alphabet and width after checking the current SW contract."""
@@ -116,6 +129,8 @@ class OracleSWRoundMixin:
         if grid[-1] != largest_backoff:
             grid.append(largest_backoff)
 
+        self.sw_search_log = []
+
         def trial(row_backoff: int) -> OracleSWPayload | None:
             plan = base_plan.model_copy(update={
                 "syndrome_rows": tuple(
@@ -126,6 +141,11 @@ class OracleSWRoundMixin:
             syndrome = codec.encode_syndromes(bins, plan)
             decoded = codec.decode_syndromes(syndrome, plan, prior_provider, side_info).symbols
             errors = self._bit_errors(bins, decoded, bit_width)
+            # What the scan tried and why it rejected it; the only way to tell a plan that is
+            # genuinely unreachable from one the grid simply stepped over.
+            self.sw_search_log.append(
+                (row_backoff, plan.syndrome_rows, errors / source_bits,
+                 _wilson_upper(errors, source_bits, self.sw_confidence)))
             if _wilson_upper(errors, source_bits, self.sw_confidence) >= self.sw_target_ber:
                 return None
             return OracleSWPayload(plan=plan, syndrome=syndrome)
@@ -173,7 +193,22 @@ class OracleSWRoundMixin:
         """Replace the ordinary staged indices with their self-contained oracle SW payload."""
         outer_payload = super().get_encod_payload(delta_vec, record)
         bins, metadata = outer_payload["payload_content"]
-        outer_payload["payload_content"] = (self.encode_staged_indices(bins, metadata), metadata)
+        payload = self.encode_staged_indices(bins, metadata)
+        blocks = (bins.shape[1] + payload.plan.block_length - 1) // payload.plan.block_length
+        stage_rates = [
+            blocks * sum(rows) / bins.shape[1] for rows in payload.plan.syndrome_rows
+        ]
+        wire_rate = payload.wire_bits / bins.shape[1]
+        overhead_rate = wire_rate - sum(stage_rates)
+        stage_rates[0] += overhead_rate
+        decoded = self.decode_staged_indices(payload, metadata)
+        record.update_record_fields(
+            coder_rate=wire_rate,
+            coder_stage_rates=stage_rates,
+            coder_overhead_rate=overhead_rate,
+            symbol_error_rate=float((decoded != bins.long().cpu()).sum() / bins.numel()),
+        )
+        outer_payload["payload_content"] = (payload, metadata)
         return outer_payload
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:

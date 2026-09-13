@@ -264,6 +264,7 @@ class PlaneHashes:
     """
 
     def __init__(self, block_length: int, hash_bits: int, seed: int) -> None:
+        assert hash_bits >= 1, "block verification needs at least one hash bit."
         self.block_length = block_length
         self.hash_bits = hash_bits
         self.projection = torch.as_tensor(
@@ -915,10 +916,14 @@ def plane_rows(
     difference between the one-shot controller and the calibrated one.
     """
     assert margin >= 0.0
-    return tuple(
+    counts = (
         tuple(min(block_length, max(0, ceil(block_length * (rate + margin)))) for rate in stage)
         for stage in plane_rates
     )
+    # Two checks can never be independent: every variable has degree >= 2 by the distribution's own
+    # invariant, so both rows touch every variable and the matrix has rank 1.  It is the single
+    # unconstructible width, and a plane whose conditional entropy has collapsed lands on it.
+    return tuple(tuple(3 if rows == 2 else rows for rows in stage) for stage in counts)
 
 
 def expected_plane_rates(

@@ -88,18 +88,18 @@ class PracticalSWConfig(BaseModel):
     safety_rows: int = Field(default=72, ge=0)
     search_row_step: int = Field(default=24, ge=1)
     search_grid_points: int = Field(default=24, ge=1)
-    # Hash bits per coded block. Zero degenerates to no verification, because an empty hash
-    # compares equal for every block -- and then a repaired decode is no longer exact.
-    verification_bits: int = Field(default=16, ge=0)
+    # Hash bits per coded block. Verification is required because satisfying a syndrome does not
+    # establish that belief propagation recovered the source block.
+    verification_bits: int = Field(default=16, ge=1)
     recover_failed_blocks: bool = True
 
     @model_validator(mode="after")
     def validate_pilot(self) -> Self:
         """Require a pilot the decoder can trust: verified and repaired, or uncoded."""
-        exact = (self.recover_failed_blocks and self.verification_bits > 0) or self.bootstrap_margin >= 1.0
+        exact = self.recover_failed_blocks or self.bootstrap_margin >= 1.0
         assert not self.pilot_blocks or exact, (
-            "a pilot calibrates on symbols the decoder holds exactly, so it needs both "
-            "recover_failed_blocks and verification_bits, or bootstrap_margin >= 1.0 to send the "
+            "a pilot calibrates on symbols the decoder holds exactly, so it needs "
+            "recover_failed_blocks, or bootstrap_margin >= 1.0 to send the "
             "pilot uncoded."
         )
         return self

@@ -199,6 +199,11 @@ def decode(payload: bytes, prior: ConditionalPrior) -> torch.Tensor:
                 np.frombuffer(payload[flush_end:], dtype=">u2").astype(np.int64)
             ).to(device)
             pointer = torch.tensor(stream.numel(), dtype=torch.long, device=device)
+            # The refill gather below is unconditional, reading slot zero for the lanes that do
+            # not refill, so it needs one slot to exist even when nothing was coded -- which is
+            # exactly what a deterministic prior emits.  A real over-read still lands on the
+            # pointer check rather than here.
+            stream = torch.cat([stream, stream.new_zeros(1)])
         assert state.device == device, "the conditional prior changed device between stages."
         cdf = quantize_pmf(pmf, precision, rows)
         del pmf

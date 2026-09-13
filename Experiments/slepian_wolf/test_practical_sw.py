@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 import torch
 
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
@@ -247,8 +248,14 @@ def test_replay_refuses_a_repair_the_encoder_never_recorded() -> None:
 
 def test_a_pilot_without_a_way_to_be_exact_is_rejected() -> None:
     """Refuse to calibrate on a pilot the decoder cannot verify or repair."""
-    with pytest.raises(Exception, match="uncoded"):
+    with pytest.raises(ValidationError):
         PracticalSWConfig(pilot_blocks=4, verification_bits=0)
+
+
+def test_zero_bit_block_verification_is_rejected_without_a_pilot() -> None:
+    """Keep the one-shot decoder from accepting every candidate through an empty hash."""
+    with pytest.raises(ValidationError):
+        PracticalSWConfig(pilot_blocks=0, verification_bits=0)
 
 
 def test_ladder_levels_are_nested_and_accumulate() -> None:
