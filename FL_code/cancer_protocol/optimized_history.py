@@ -439,6 +439,17 @@ class OptimizedGradientHistory(ReconstructionHistory):
         if access is Access.TEMPORAL_TOO:
             self._add_entry(self._temporal, entry)
 
+    def config_snapshot(self) -> dict[str, Any]:
+        """Describe the lossy packed representation used for experiment provenance."""
+        return super().config_snapshot() | {
+            "outlier_threshold": self.outlier_threshold,
+            "storage_dir": None if self.storage_dir is None else str(self.storage_dir),
+            "dedup_match_bits": self.dedup_match_bits,
+            "storage_dtype": str(self.storage_dtype),
+            "base_code_bits": self.base_code_bits,
+            "round_prefix": self.round_prefix,
+        }
+
     def _packed_entries(self) -> tuple[_PackedGradient, ...]:
         entries = {
             id(entry.tensor): entry.tensor._packed

@@ -58,6 +58,14 @@ class ReconstructionHistory:
         """Prevent further commits to the reconstruction history."""
         self.frozen = True
 
+    def config_snapshot(self) -> dict[str, Any]:
+        """Describe the retained history representation used by a protocol run."""
+        return {
+            "implementation": f"{type(self).__module__}.{type(self).__qualname__}",
+            "max_per_client": self.max_per_client,
+            "dtype": str(self.dtype),
+        }
+
     def copy(self) -> ReconstructionHistory:
         """Return a state copy that reuses the same immutable history entries.
 
@@ -271,6 +279,7 @@ class _WZProtocol(BaseProtocol):
         snapshot["max_per_client_recons_history"] = self.max_per_client_recons_history
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
         snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
+        snapshot["history"] = self._recons_history.config_snapshot()
         return snapshot
 
 
