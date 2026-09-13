@@ -62,7 +62,12 @@ class GradientPreprocessMetadata(NamedTuple):
 
 
 def normalization_params(values: torch.Tensor) -> tuple[float, float]:
-    """Estimate a robust center and scale from a seeded quantile-trimmed sample."""
+    """Estimate a robust center and scale from a seeded quantile-trimmed sample.
+
+    Seeded so encoder and decoder derive bitwise-identical factors from the same values. The
+    factors are kept at the precision they are computed in and transmitted at that precision, so
+    the encoder normalizes with exactly what the decoder will use.
+    """
     sample_size = min(200_000, values.numel())
     generator = torch.Generator(device=values.device).manual_seed(0)
 

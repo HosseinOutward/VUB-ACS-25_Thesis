@@ -6,7 +6,6 @@ import torch.distributed as dist
 from FL_code.run_fl import FLConfig
 from .utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
 from .codec import simulate_compression, create_protocol
-from .tensor_storage import save_tensor
 
 
 def run_federated_server(
@@ -99,10 +98,9 @@ def run_federated_server(
             if cfg.debug_save_recons is not None:
                 recon_data_path = cfg.debug_data_folder / cfg.debug_save_recons
                 recon_data_path.mkdir(parents=True, exist_ok=True)
-                save_tensor(
+                torch.save(
                     recon_delta_vec.cpu(),
                     recon_data_path / f'round_{rnd_i}_client_{rcvd_client_id}.pt',
-                    "zstd",
                 )
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))

@@ -13,6 +13,7 @@ import torch
 
 
 T = TypeVar("T")
+HASH_CHUNK_ELEMENTS = 1 << 24
 
 
 @runtime_checkable
@@ -110,12 +111,15 @@ def _update_hash(digest: Any, value: Any) -> None:
     if value is None:
         return
     if isinstance(value, torch.Tensor):
-        tensor = value.detach().cpu().contiguous()
         # Hash semantic tensor identity before its raw bytes so equal byte streams
         # with different shapes or dtypes cannot share an entry.
-        digest.update(str(tensor.dtype).encode())
-        digest.update(struct.pack(f"!{tensor.ndim}q", *tensor.shape))
-        digest.update(tensor.reshape(-1).view(torch.uint8).numpy())
+        digest.update(str(value.dtype).encode())
+        digest.update(struct.pack(f"!{value.ndim}q", *value.shape))
+        # Streamed in chunks: one `.cpu()` of a full side-information matrix is a
+        # multi-gigabyte host allocation, and the byte stream is the same either way.
+        flat = value.detach().contiguous().reshape(-1)
+        for start in range(0, flat.numel(), HASH_CHUNK_ELEMENTS):
+            digest.update(flat[start:start + HASH_CHUNK_ELEMENTS].cpu().view(torch.uint8).numpy())
         return
     if isinstance(value, BaseModel):
         _update_hash(digest, value.model_dump())
