@@ -7,6 +7,7 @@
 # Local notes and checks
 /CLAUDE.md
 /STAGED_CHANGES_REVIEW.md
+/opencode.json
 
 # Generated datasets and binary artifacts
 /FL_code/data/
@@ -41,3 +42,5 @@
 Experiments/statistical_relation_boosting/results/history/*/logs/*
 
 Experiments/review_before_simplification/**
+Experiments/Protocol_test/coder_round_plans/*
+Experiments/Protocol_test/exp_records/**

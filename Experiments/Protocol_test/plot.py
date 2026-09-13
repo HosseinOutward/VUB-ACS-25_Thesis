@@ -16,7 +16,7 @@ import pandas as pd  # noqa: E402
 
 from Experiments.Protocol_test.rd_metrics import rd_curve_gap  # noqa: E402
 
-REQUIRED_COLUMNS = {"round_id", "prior_stage_rates", "stage_wmapes", "protocol_name_full"}
+REQUIRED_COLUMNS = {"round_id", "stage_wmapes", "protocol_name_full"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,9 +40,16 @@ def numeric_list(value: str, field: str, records_path: Path) -> NDArray[np.float
 
 
 def round_curve(records: pd.DataFrame, records_path: Path) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Average clients into cumulative prior rate and WMAPE-dB stage coordinates."""
-    rates = [numeric_list(str(value), "prior_stage_rates", records_path)
-             for value in records["prior_stage_rates"]]
+    """Average clients into cumulative operational-or-prior rate and WMAPE-dB coordinates."""
+    rate_field = (
+        "coder_stage_rates"
+        if "coder_stage_rates" in records and records["coder_stage_rates"].notna().all()
+        else "prior_stage_rates"
+    )
+    assert rate_field in records and records[rate_field].notna().all(), (
+        f"{records_path} has neither complete operational nor prior stage rates."
+    )
+    rates = [numeric_list(str(value), rate_field, records_path) for value in records[rate_field]]
     wmapes = [numeric_list(str(value), "stage_wmapes", records_path)
               for value in records["stage_wmapes"]]
     stage_counts = {len(values) for values in (*rates, *wmapes)}
@@ -71,7 +78,7 @@ def plot_records(records_path: Path, output_path: Path) -> None:
 
     colorbar = figure.colorbar(matplotlib.cm.ScalarMappable(normalization, colormap), ax=axis)
     colorbar.set_label("Round")
-    axis.set_xlabel("Cumulative prior rate (bits/element)")
+    axis.set_xlabel("Cumulative operational/estimated rate (bits/element)")
     axis.set_ylabel("WMAPE (dB relative to 100%)")
     axis.set_title(protocols[0])
     axis.grid(alpha=0.25)
@@ -96,7 +103,7 @@ def plot_sparse_results(output_root: Path, comparisons: tuple[tuple[str, str], .
     for codec_id, records in records_by_codec.items():
         rate, distortion = round_curve(records, output_root / "records" / codec_id / "compression_records.csv")
         axis.plot(rate, distortion, marker="o", linewidth=1.8, label=codec_id)
-    axis.set_xlabel("Cumulative prior rate (bits/element)")
+    axis.set_xlabel("Cumulative operational/estimated rate (bits/element)")
     axis.set_ylabel("WMAPE (dB relative to 100%)")
     axis.grid(alpha=0.25)
     axis.spines[["top", "right"]].set_visible(False)

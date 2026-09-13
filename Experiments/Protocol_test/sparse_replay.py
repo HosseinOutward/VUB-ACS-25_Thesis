@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
 from importlib import import_module
@@ -28,7 +28,7 @@ from Experiments.Protocol_test.replay import (
 )
 from FL_code.FL_core.codec import Access, BaseProtocol, CompressionRecord, create_protocol, simulate_compression
 from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
-from FL_code.FL_core.utils import set_global_seed, write_fl_config_snapshot
+from FL_code.FL_core.utils import StateDictManager, set_global_seed, write_fl_config_snapshot
 
 
 class ReplayCase(BaseModel):
@@ -106,7 +106,7 @@ class ReplayPlan(BaseModel):
         return self
 
 
-ProtocolFactory = Callable[[ReplayCase, Sequence[slice], Path, bool], _WZProtocol]
+ProtocolFactory = Callable[[ReplayCase, StateDictManager, Path, bool], _WZProtocol]
 
 
 def load_plan(path: Path) -> ReplayPlan:
@@ -147,10 +147,12 @@ def _resolved_schedule(protocol: BaseProtocol, case: ReplayCase) -> tuple[str, .
 
 
 def default_protocol_factory(
-    case: ReplayCase, sd_slices: Sequence[slice], cache_dir: Path, cache_overwrite: bool
+    case: ReplayCase, state_manager: StateDictManager, cache_dir: Path, cache_overwrite: bool
 ) -> _WZProtocol:
     """Create the declared protocol and align the case schedule to its absolute start round."""
-    protocol = create_protocol(case.protocol, sd_slices, cache_dir, cache_overwrite)
+    protocol = create_protocol(
+        case.protocol, state_manager.get_slices(), cache_dir, cache_overwrite
+    )
     assert isinstance(protocol, _WZProtocol)
     assert case.start_round >= len(protocol.warmup_round_codecs), (
         "The default sparse factory can place schedules only after protocol warmup; use "
@@ -240,7 +242,7 @@ def run_case(plan: ReplayPlan, case: ReplayCase, protocol_factory: ProtocolFacto
     assert max(case.client_ids) < cfg.num_clients
     state_manager = build_state_manager(cfg)
     protocol = protocol_factory(
-        case, state_manager.get_slices(), plan.cache_root / case.codec_id, plan.cache_overwrite
+        case, state_manager, plan.cache_root / case.codec_id, plan.cache_overwrite
     )
     assert protocol.protocol_name_full == case.protocol
     assert _resolved_schedule(protocol, case) == case.round_codecs, (
