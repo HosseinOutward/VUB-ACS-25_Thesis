@@ -74,9 +74,6 @@ class MethodResult:
     def total_rate(self) -> float:
         return sum(self.stage_rates) + self.overhead_rate
 
-    def cumulative_rate(self, stage: int) -> float:
-        return sum(self.stage_rates[: stage + 1])
-
 
 class _SkipReferencePrior:
     """Avoid retraining the diagnostic prior four times; the shared quantizer prior is measured once."""
