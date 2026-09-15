@@ -29,12 +29,12 @@ class FLConfig(BaseModel):
     model_name: str = Field(
         "resnet18",
         description="Model backbone.",
-        json_schema_extra={"flags": ("--model",), "choices": BACKBONE_NAMES},
+        json_schema_extra={"flags": ["--model"], "choices": list(BACKBONE_NAMES)},
     )
     dataset_name: str = Field(
         "SVHN",
         description="Dataset name.",
-        json_schema_extra={"flags": ("--dataset",), "choices": DATASET_NAMES},
+        json_schema_extra={"flags": ["--dataset"], "choices": list(DATASET_NAMES)},
     )
     num_classes: int | None = Field(
         None,
@@ -46,7 +46,7 @@ class FLConfig(BaseModel):
     debug_mode: bool = Field(
         False,
         description="Use a small, quick debug configuration.",
-        json_schema_extra={"flags": ("--debug-mode", "--debug_mode")},
+        json_schema_extra={"flags": ["--debug-mode", "--debug_mode"]},
     )
 
     num_clients: int = Field(5, description="Number of federated clients.")
@@ -77,7 +77,7 @@ class FLConfig(BaseModel):
     non_iid_partition: bool = Field(
         False,
         description="Use a non-IID client partition.",
-        json_schema_extra={"flags": ("--non-iid",)},
+        json_schema_extra={"flags": ["--non-iid"]},
     )
     # Concentration of that label skew, for the datasets with no client ids. 0.5 is the usual
     # benchmark setting; smaller leaves each client holding fewer classes.
@@ -223,7 +223,9 @@ def _argparse_type(annotation: Any) -> Any:
 def _add_fl_config_arguments(parser: argparse.ArgumentParser) -> None:
     """Add one CLI argument for each FLConfig field exposed as a command-line setting."""
     for name, field in FLConfig.model_fields.items():
-        extra = field.json_schema_extra or {}
+        schema_extra = field.json_schema_extra
+        assert schema_extra is None or isinstance(schema_extra, dict)
+        extra: dict[str, Any] = schema_extra or {}
         if extra.get("cli", True) is False:
             continue
 
