@@ -1,4 +1,6 @@
-"""Top-k transformations used by the report's sparsification experiments."""
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Top-k transformations used by the report's sparsification experiments."""
 
 from __future__ import annotations
 

@@ -1,3 +1,5 @@
+"""Frozen study: last ran against commit 3df7927; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols."""
+
 from __future__ import annotations
 
 from collections.abc import Callable

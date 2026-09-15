@@ -1,4 +1,6 @@
-"""Compare the O and T rounds coordinate by coordinate, using the per-element dumps.
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Compare the O and T rounds coordinate by coordinate, using the per-element dumps.
 
 O sees everything T sees and more: T conditions on the five reconstructions of its own client,
 which are a subset of the server ledger O conditions on. O should therefore never lose. This

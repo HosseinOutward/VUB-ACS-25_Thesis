@@ -1,4 +1,6 @@
-"""Reassign every coordinate to whichever of the three trained quantizers codes it best.
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Reassign every coordinate to whichever of the three trained quantizers codes it best.
 
 The first split was made before the three quantizers existed, from how the single O and T models
 compared. Once they are trained, each of them can code the whole vector, so every coordinate has

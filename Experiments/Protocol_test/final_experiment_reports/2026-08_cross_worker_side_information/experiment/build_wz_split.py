@@ -1,4 +1,6 @@
-"""Find which coordinates gain from the extra Wyner-Ziv side information, and split the vector on it.
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Find which coordinates gain from the extra Wyner-Ziv side information, and split the vector on it.
 
 O and T code the same coordinates against different side information: O sees the whole server
 ledger, T only the worker's own history. Their per-element dumps therefore say, coordinate by

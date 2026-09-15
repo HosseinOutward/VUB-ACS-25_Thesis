@@ -1,4 +1,6 @@
-"""Experimental coordinate-conditioned Wyner-Ziv codecs and replay tooling."""
+"""Frozen study: last ran against commit 3df7927; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Experimental coordinate-conditioned Wyner-Ziv codecs and replay tooling."""
 
 from .encoder_history_quantizer import (
     EncoderHistoryDedupedWZQuantizer,

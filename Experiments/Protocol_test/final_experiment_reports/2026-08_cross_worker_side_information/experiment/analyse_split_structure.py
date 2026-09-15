@@ -1,4 +1,6 @@
-"""What kind of coordinate ends up on each of the three quantizers?
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+What kind of coordinate ends up on each of the three quantizers?
 
 The reassignment gave every coordinate to whichever quantizer actually codes it best, so the
 resulting labels are a measurement, not a design. This asks whether that measurement lines up with
