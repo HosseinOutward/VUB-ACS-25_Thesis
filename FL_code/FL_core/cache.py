@@ -78,8 +78,6 @@ def client_update_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
         "debug_save_recons",
         "debug_save_recons_rounds",
         "debug_load_from_saved_data",
-        "debug_continue_from_saved_data",
-        "debug_continue_then_save",
     }
     assert not ignored_fields - type(cfg).model_fields.keys()
     return content_hash(

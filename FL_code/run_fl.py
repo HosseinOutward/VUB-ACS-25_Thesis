@@ -115,16 +115,6 @@ class FLConfig(BaseModel):
     debug_save_recons: str | None = Field(None, description="Subdirectory for saved reconstructions.")
     debug_save_recons_rounds: int | None = Field(None, description="Optional reconstruction-save round limit.")
     debug_load_from_saved_data: bool = Field(False, description="Reuse saved client updates when available.")
-    debug_continue_from_saved_data: bool = Field(
-        False,
-        description="Removed compatibility option.",
-        json_schema_extra={"cli": False},
-    )
-    debug_continue_then_save: bool = Field(
-        False,
-        description="Removed compatibility option.",
-        json_schema_extra={"cli": False},
-    )
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent changing the configured protocol after configuration creation."""
@@ -145,10 +135,6 @@ class FLConfig(BaseModel):
         assert not (
             self.debug_save_train_data and self.debug_load_from_saved_data
         ), "debug_save_train_data and debug_load_from_saved_data cannot both be enabled."
-        assert not (
-            self.debug_continue_from_saved_data or self.debug_continue_then_save
-        ), ("debug_continue_from_saved_data and debug_continue_then_save were removed because they "
-            "change behavior when saved debug files are missing.")
         assert self.protocol_cache_dir is not None or not self.protocol_cache_overwrite, (
             "protocol_cache_overwrite requires protocol_cache_dir.")
         assert self.dataset_fraction is None or 0.0 < self.dataset_fraction < 1.0, (
