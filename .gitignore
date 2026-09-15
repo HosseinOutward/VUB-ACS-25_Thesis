@@ -41,6 +41,4 @@
 /tests/test_n_split_protocol.py
 Experiments/statistical_relation_boosting/results/history/*/logs/*
 
-Experiments/review_before_simplification/**
-Experiments/Protocol_test/coder_round_plans/*
 Experiments/Protocol_test/exp_records/**

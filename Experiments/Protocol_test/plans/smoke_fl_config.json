@@ -1,0 +1,15 @@
+{
+  "protocol": "identity",
+  "dataset_name": "SVHN",
+  "model_name": "resnet56",
+  "data_folder": "../../../FL_code/data",
+  "num_clients": 3,
+  "num_loader_workers": 0,
+  "rounds": 11,
+  "local_epochs": 1,
+  "batch_size": 128,
+  "lr": 0.1,
+  "dataset_fraction": 0.05,
+  "recalibrate_bn": false,
+  "seed": 43
+}
