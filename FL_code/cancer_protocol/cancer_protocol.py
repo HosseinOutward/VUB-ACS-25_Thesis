@@ -82,14 +82,19 @@ class ReconstructionHistory:
         return copied
 
     def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
-        """Commit a reconstructed tensor to every ledger allowed to retain it."""
+        """Commit a reconstructed tensor to every ledger allowed to retain it.
+
+        Stores a clone: `reconst` is typically a round codec's freshly decoded tensor, but
+        nothing prevents a caller from mutating it afterward, and a stored history entry must
+        stay exactly what was committed.
+        """
         assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
         assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
         if access is Access.NONE:
             return
 
         entry = HistoryEntry(
-            tensor=reconst,
+            tensor=reconst.clone(),
             round_id=record.round_id,
             client_id=record.client_id,
             access=access,
@@ -98,6 +103,33 @@ class ReconstructionHistory:
         self._add_entry(self._server, entry)
         if access is Access.TEMPORAL_TOO:
             self._add_entry(self._temporal, entry)
+
+    def replace_latest(self, reconst: torch.Tensor, round_id: int, client_id: int) -> None:
+        """Replace one client's latest commit in place, preserving its round and access.
+
+        Used when a selected worker's measured reconstruction is superseded by the raw delta
+        after compression is simulated: the ledger keeps exactly one entry for that round, and a
+        `SERVER_ONLY` entry must not gain temporal access merely because the replacement value
+        happens to be raw.
+        """
+        assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
+        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
+        server_ledger = self._server.get(client_id)
+        assert server_ledger and server_ledger[-1].round_id == round_id, (
+            f"No latest reconstruction exists for round {round_id}, client {client_id}.")
+        previous = server_ledger[-1]
+        replacement = HistoryEntry(
+            tensor=reconst.clone(),
+            round_id=previous.round_id,
+            client_id=previous.client_id,
+            access=previous.access,
+            round_name=previous.round_name,
+        )
+        server_ledger[-1] = replacement
+        if previous.access is Access.TEMPORAL_TOO:
+            temporal_ledger = self._temporal.get(client_id)
+            assert temporal_ledger and temporal_ledger[-1] is previous
+            temporal_ledger[-1] = replacement
 
     def view(self, access: Access, client_id: int) -> dict[int, tuple[HistoryEntry, ...]]:
         """Return the history entries visible to the requested process.
@@ -149,7 +181,6 @@ class _WZProtocol(BaseProtocol):
     refresh_frozen_si: bool = True
     retrained_prior_uses_server_si: bool = True
     last_trained_codec: dict[int, _WZRoundCodec]
-    _train_at_round: int | None = None
 
     def __init__(
         self,
@@ -170,11 +201,6 @@ class _WZProtocol(BaseProtocol):
         self._recons_history = ReconstructionHistory(self.max_per_client_recons_history)
         self.histories = (self._recons_history,)
         self.allocate_training_histories()
-        if self._train_at_round is not None:
-            required = max(history.max_per_client for history in self.histories)
-            assert self._train_at_round >= required, (
-                f"train_at_round={self._train_at_round} leaves fewer than {required} preceding "
-                "history rounds.")
 
     def allocate_training_histories(self) -> None:
         """Append ledgers beyond the decoder-visible one; a single-round schedule needs none."""
@@ -303,40 +329,14 @@ class WZCancerProtocol(_WZProtocol):
 
     def options_to_config(
         self,
-        replace_O_with: str | None = None,
-        extra_train_tokens: Sequence[str] = (),
         refresh_frozen_si: bool = True,
         retrained_prior_uses_server_si: bool = True,
-        train_at_round: int | None = None,
     ) -> None:
-        """Configure SI policies and optionally replace/collapse the scheduled training rounds."""
+        """Configure the SI-refresh and retrained-prior policies; placement uses `set_schedule`."""
         assert isinstance(refresh_frozen_si, bool)
         assert isinstance(retrained_prior_uses_server_si, bool)
         self.refresh_frozen_si = refresh_frozen_si
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
-
-        assert not extra_train_tokens or replace_O_with is not None, (
-            "extra_train_tokens configures the replacement round, so replace_O_with is required.")
-        if replace_O_with is not None:
-            replacement = "|".join((replace_O_with, *extra_train_tokens))
-            self.warmup_round_codecs = tuple(
-                round_name.replace("O|", f"{replacement}|")
-                if round_name.startswith("O|")
-                else round_name
-                for round_name in self.warmup_round_codecs
-            )
-            self.routine_round_codecs = tuple(
-                round_name.replace("O|", f"{replacement}|")
-                if round_name.startswith("O|")
-                else round_name
-                for round_name in self.routine_round_codecs
-            )
-        if train_at_round is not None:
-            assert isinstance(train_at_round, int) and train_at_round >= 0
-            self._train_at_round = train_at_round
-            self.warmup_round_codecs = (
-                ("I",) * train_at_round + (self.routine_round_codecs[0],))
-            self.routine_round_codecs = ("F",)
 
 
 __all__ = [
