@@ -1,4 +1,6 @@
-"""Search around the production default against the actual run-3 O RD polyline."""
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Search around the production default against the actual run-3 O RD polyline."""
 
 from __future__ import annotations
 

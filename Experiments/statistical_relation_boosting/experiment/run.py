@@ -1,4 +1,6 @@
-"""Measure how well cached decoder-side history predicts the next client-delta sign."""
+"""Frozen study: last ran against commit 3df7927; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout.
+
+Measure how well cached decoder-side history predicts the next client-delta sign."""
 
 from __future__ import annotations
 

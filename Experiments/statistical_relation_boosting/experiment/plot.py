@@ -1,4 +1,6 @@
-"""Plot the simple side-information sign-classification experiment."""
+"""Frozen study: last ran against commit 3df7927; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout.
+
+Plot the simple side-information sign-classification experiment."""
 
 from __future__ import annotations
 

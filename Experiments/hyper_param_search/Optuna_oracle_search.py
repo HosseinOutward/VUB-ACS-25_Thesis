@@ -1,4 +1,6 @@
-"""Refine distinct fixed-codec Oracle quantizer basins with independent Optuna studies."""
+"""Frozen study: last ran against commit bb5d9f1; not maintained. Reads the removed _/data/federated_learning/raw_client_deltas layout and imports removed symbols.
+
+Refine distinct fixed-codec Oracle quantizer basins with independent Optuna studies."""
 
 from __future__ import annotations
 
