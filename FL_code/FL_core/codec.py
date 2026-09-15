@@ -14,8 +14,6 @@ import numpy as np
 from FL_code.FL_core.utils import (
     ParsedConfigurableName,
     payload_size_mib,
-    compress_data_list,
-    decompress_data_list,
     parse_configurable_name,
 )
 
@@ -371,7 +369,6 @@ def create_protocol(
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
     from FL_code.cancer_protocol.bin_coder import coded_rounds as _coded_rounds
-    from FL_code.other_protocols import n_split_protocol
     parsed = parse_configurable_name(protocol_name, "protocol")
     return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(
         parsed.options,
@@ -500,56 +497,3 @@ def simulate_compression(
     record.save_artifacts(save_dir)
 
     return reconstructed
-
-
-# --- Demo Round Codec and Protocol --- #
-class RCDemo(BaseRoundCodec):
-    """Round codec that serializes raw float32 deltas with the shared gzip transport."""
-
-    round_cfg: bool
-
-    class RecordDemo(CompressionRecord):
-        comp_report: int | None = None
-        random_field: int | None = None
-    record_class = RecordDemo
-    round_name = "DemoRC"
-    can_decode_where = Access.TEMPORAL_TOO
-
-    def create_r_record(self, round_id: int, client_id: int) -> RCDemo.RecordDemo:
-        """Create a demo metrics record with a random demo-only field."""
-        raw_record = super().create_r_record(round_id, client_id)
-        assert isinstance(raw_record, RCDemo.RecordDemo)
-        raw_record.random_field = int(np.random.randint(0, 100))
-        return raw_record
-
-    def options_to_config(self, compReport: bool) -> None:
-        """Set whether demo records include the compression-report metric."""
-        self.round_cfg = compReport
-
-    @staticmethod
-    def validate_cfg(compReport: bool) -> None:
-        assert isinstance(compReport, bool), "DemoRC compReport option must be a boolean."
-
-    def encode(self, delta_vec: torch.Tensor, record: CompressionRecord) -> bytes:
-        """Encode one raw float32 delta with pickle then gzip."""
-        assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
-        payload = compress_data_list(delta_vec)
-        if self.round_cfg:
-            record.update_record_fields(comp_report=1)
-        return payload
-
-    def decode(self, payload: bytes, record: CompressionRecord) -> torch.Tensor:
-        """Decode one raw float32 delta from pickle plus gzip."""
-        reconstructed = decompress_data_list(payload)
-        return reconstructed
-
-
-class DemoProtocol(BaseProtocol):
-    """Protocol schedule that repeatedly uses the raw demo round codec."""
-    warmup_round_codecs: ClassVar[tuple[str, ...]] = ()
-    routine_round_codecs: ClassVar[tuple[str, ...]] = ("DemoRC|compReport",)
-    protocol_name: ClassVar[str] = "demo"
-
-    def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
-        rc_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
-        return rc_class(parsed.options, round_name_full)

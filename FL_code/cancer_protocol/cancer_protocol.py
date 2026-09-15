@@ -14,8 +14,6 @@ from .round_codecs import (
     CancerRecord,
     F_RoundCodec,
     Oracle_RoundCodec,
-    P_RoundCodec,
-    R_RoundCodec,
     T_RoundCodec,
     _WZRoundCodec,
 )
@@ -349,8 +347,6 @@ __all__ = [
     "CancerRecord",
     "F_RoundCodec",
     "Oracle_RoundCodec",
-    "P_RoundCodec",
-    "R_RoundCodec",
     "T_RoundCodec",
     "WZCancerProtocol",
 ]

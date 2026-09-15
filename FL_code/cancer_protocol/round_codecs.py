@@ -411,69 +411,6 @@ class _WZRoundCodec(BaseRoundCodec):
         return stage_reconstructions[-1]
 
 
-class P_RoundCodec(_WZRoundCodec):
-    """Load the pretrained marginal quantizer used before useful history exists."""
-
-    round_name: ClassVar[str] = "P"
-    can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
-    quantizer_training_access: ClassVar[str] = "none_pretrained"
-
-    def get_training_data(
-        self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[None, None]:
-        """Return no training data: this round loads a pretrained model instead of fitting one."""
-        return None, None
-
-    def build_quantizer(
-        self, x: torch.Tensor | None, si: list[torch.Tensor] | None
-    ) -> DedupedWZQuantizerCancer:
-        """Load the configured pretrained state without fitting it in this round."""
-        assert x is None and si is None
-        self.c_cfg = self.c_cfg.model_copy(update={"marginal_loss": True})
-        self.quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=0)
-        weight_path = self.c_cfg.pretrain_pth_dir / (
-            f"bpp{self.c_cfg.bins_per_plane}_np{self.c_cfg.num_planes}_pretrained_wzq_rnn.pth")
-        assert weight_path.is_file(), (
-            f"{self.round_name_full} needs a pretrained marginal quantizer at {weight_path}; "
-            "one file is required per (bins_per_plane, num_planes) pair.")
-        # The checkpoint carries no record of the architecture it was trained with, so a config
-        # change since it was written surfaces here as an unreadable wall of shape mismatches.
-        try:
-            self.quantizer.coding_model.load_state_dict(
-                torch.load(weight_path, map_location="cpu", weights_only=True))
-        except RuntimeError as error:
-            raise RuntimeError(
-                f"{weight_path} was trained with a different architecture than the current "
-                f"hidden_dim={self.c_cfg.hidden_dim}, layers={self.c_cfg.layers}, "
-                f"shared_heads={self.c_cfg.shared_heads}; retrain it or pin those fields."
-            ) from error
-        self.quantizer.side_info_list_used = []
-        return self.quantizer
-
-
-class R_RoundCodec(_WZRoundCodec):
-    """Train at the server on the latest reconstruction as target and earlier history as SI."""
-
-    round_name: ClassVar[str] = "R"
-    can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
-    quantizer_training_access: ClassVar[str] = "server_reconstruction_target"
-
-    def get_training_data(
-        self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Return the latest own reconstruction and all other server-visible entries."""
-        history = given_history.view(self.can_decode_where, client_id)
-        target = history[client_id][-1]
-        assert target.client_id == client_id
-        side_info = [
-            entry.tensor
-            for client_history in history.values()
-            for entry in client_history
-            if entry is not target
-        ]
-        return target.tensor, side_info
-
-
 class T_RoundCodec(_WZRoundCodec):
     """Train at the worker on its raw delta with worker-local temporal SI."""
 
