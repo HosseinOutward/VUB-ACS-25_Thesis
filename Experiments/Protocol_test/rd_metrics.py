@@ -5,10 +5,7 @@ import logging
 import numpy as np
 from numpy.typing import NDArray
 
-# Label for `rd_curve_gap`'s output in analysis tables. This is the historical mean interpolated
-# equal-distortion/equal-rate gap, not the repository's average-slope/perpendicular-distance
-# specification (see CLAUDE.md's Research Principles); that metric is a separate scientific
-# decision and is not implemented here.
+# Label for `rd_curve_gap`'s output in analysis tables.
 GAP_METRIC_NAME = "mean_interpolated_equal_distortion_gap"
 
 
@@ -52,7 +49,7 @@ def rd_curve_gap(
 
     Each curve is read as its own piecewise-linear function. Positive values mean the candidate is
     worse: more rate at matched distortion or more distortion at matched rate. This is the
-    `GAP_METRIC_NAME` interpolation gap, not the repository's average-slope/perpendicular metric.
+    `GAP_METRIC_NAME` interpolation gap.
     """
     rate_gap, mean_ref_rate = _mean_curve_gap(
         distortions_db, rates, ref_distortions_db, ref_rates, f"{name} rate"
@@ -66,4 +63,3 @@ def rd_curve_gap(
         "distortion_gap_db": distortion_gap,
         "distortion_gap_percent": 100.0 * (10.0 ** (distortion_gap / 20.0) - 1.0),
     }
-

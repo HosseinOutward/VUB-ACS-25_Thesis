@@ -17,7 +17,7 @@ The central design question is always: what side information is available at the
 
 ## 0. Research Principles
 
-- **rate-distortion** - our goal is to reduce RD, not just rate or distortion in isolation. RD gap between 2 experiments is only possible if we have an idea of the RD curves. the LWZQ outputs in stages, and each stage can be a node on the curve. by comparing how far a curve is under another methods curve, we can get a metric for how improve the resutls are. To have this gap be human readable, it's best to convert the gap with the slop in mind, i.e. the perpendicular distance between curves, into rate and distortion components and report the rate change, which is in a way the rate difference for the same distortion. The slope has to be computed as an average of the stage to stage slope. the current optimal curve is [(), (), ()] (wmape db, prior bit)
+- **rate-distortion** - our goal is to reduce RD, not just rate or distortion in isolation. Each LWZQ stage is a point on a method's RD curve. Curves are compared by the mean rate difference at equal distortion over their shared distortion range, reading each curve piecewise-linearly (`Experiments/Protocol_test/rd_metrics.py`). the current optimal curve is [(), (), ()] (wmape db, prior bit)
 - **Two-step compression.** Keep quantization and entropy coding conceptually separate. The quantizer produces symbols; the conditional entropy coder compresses those symbols using decoder-available side information.
 - **Decoder-side priors matter.** Both the DSC quantizer and the conditional entropy coder need priors. Before using a prior, identify where decoding happens and which data is actually available there. Do not assume worker-only or server-only information is available everywhere.
 - **Multi-stage learned quantization per float.** A learned quantizer emit several vectors of indices per float. Each stage can use earlier stage outputs as side information for later stages, producing multiple low-bit symbols from one floating-point value.
@@ -52,7 +52,7 @@ These standards apply to every module unless a more specific local instruction s
 ## 2. Repository Structure
 
 Important ones:
-- `_/data/federated_learning/raw_client_deltas/` Contains raw, cached gradient delta for an uncompressed training test speed ups, or analysis, or for use to test protocols
+- `_/data/federated_learning/<name>/` contains a versioned `Trace` layout created by the sparse runner for deterministic protocol replay.
 
 Rest:
 - `FL_code/` contains the core of the code, with FL logic, and also the main body of protocols, codec, quantizer and wyner-ziv logic and training.

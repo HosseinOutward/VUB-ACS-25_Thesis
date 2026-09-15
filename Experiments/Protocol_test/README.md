@@ -23,8 +23,8 @@ independent of which clients are measured for compression.
    `comparison_gaps.csv`. Workers count equally: stage WMAPE is the mean worker percentage, then
    `20*log10(mean/100)`; stage rates are mean worker rates, then cumulative. Rate sources
    (`prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
-   another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`,
-   not the repository's average-slope/perpendicular specification; single-stage, non-overlapping,
+   another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
+   single-stage, non-overlapping,
    or non-monotone curves are reported as unavailable rather than aborting.
 
 Run a plan with:

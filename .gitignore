@@ -11,7 +11,6 @@
 
 # Generated datasets and binary artifacts
 /FL_code/data/
-/data/SVHN/
 *.npy
 *.npz
 *.pkl
@@ -19,13 +18,7 @@
 *.rar
 
 # Generated training and experiment records
-/FL_code/records/smoke_sampled_protocol*/
-/FL_code/records/run21_sampled_replay_warmup_routine_plus2_complete/
-/FL_code/records/s_round_codec_*
-/FL_code/experiments/percentile_overlap_results/
-/FL_code/experiments/protocol_tests/exp_records/_logs/
 /Experiments/Archive/
-/Experiments/Protocol_test/exp_records_multistart/
 /Experiments/Protocol_test/analysis_plots/**/*.png
 /Experiments/hyper_param_search/final_*_factors.json
 /Experiments/hyper_param_search/results/
@@ -36,9 +29,8 @@
 /Experiments/Protocol_test/final_experiment_reports/**/results/*/records/
 
 # Intentionally local source and test files
-/FL_code/cancer_protocol/__init__.py
-/FL_code/experiments/percentile_overlap.py
-/tests/test_n_split_protocol.py
 Experiments/statistical_relation_boosting/results/history/*/logs/*
 
 Experiments/Protocol_test/exp_records/**
+/.claude/
+/.pytest_cache/
