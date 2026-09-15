@@ -52,10 +52,6 @@ class ReconstructionHistory:
         self._temporal: dict[int, list[HistoryEntry]] = {}
         self.frozen: bool = self.max_per_client == 0
 
-    def freeze(self) -> None:
-        """Prevent further commits to the reconstruction history."""
-        self.frozen = True
-
     def config_snapshot(self) -> dict[str, Any]:
         """Describe the retained history representation used by a protocol run."""
         return {

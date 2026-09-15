@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from time import perf_counter
-from typing import Any, ClassVar, Literal, NamedTuple
+from typing import Any, ClassVar, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
@@ -291,7 +291,6 @@ class WZcfgQuant(BaseModel):
 
     training_progress_bar: bool = False
     training_log_every_epochs: int | None = None
-    tf32: bool = False
     fused_optimizer: bool = True
     mixed_precision: bool = False
     deduplicate_training: bool = True
@@ -657,20 +656,6 @@ class WZQuantizerCancer:
         dtype = torch.uint8 if self.bins_per_plane <= 2**8 else torch.uint16
         return bins.to(dtype), torch.cat(soft_code_batches, dim=1)
 
-    def decoding_process(
-        self,
-        payload_content: tuple[torch.Tensor, PreprocessMetadata],
-        batch_size: int = INFERENCE_BATCH,
-    ) -> torch.Tensor:
-        """Decode bin indices with side information and invert preprocessing metadata."""
-        bins, metadata = payload_content
-        assert self.vector_size is not None
-        assert bins.shape == (self.num_planes, self.vector_size)
-        assert bins.max().item() < self.bins_per_plane
-        side_info = self.side_info_tensor(metadata)
-        recons = self.decode_prepared(bins, side_info, batch_size)
-        return self.postprocess(recons, metadata)
-
     def decoding_stages_process(
         self,
         payload_content: tuple[torch.Tensor, PreprocessMetadata],
@@ -870,23 +855,11 @@ def unique_row_groups(
     return representatives, inverse, mismatched.nonzero(as_tuple=False).flatten()
 
 
-class DeduplicationStats(NamedTuple):
-    """Diagnostics from one encoder or decoder deduplication pass."""
-
-    vector_size: int
-    unique_count: int
-    reused_count: int
-    collision_count: int
-
-
 class DedupedWZQuantizerCancer(WZQuantizerCancer):
     """WZ quantizer that reuses encoder, decoder, and prior results across float-prefix rows."""
 
     prior_calculator: ClassVar[type[PriorCalculator]] = DedupedPriorCalculator
     match_bits: ClassVar[int] = 24
-
-    last_encoding_stats: DeduplicationStats | None = None
-    last_decoding_stats: DeduplicationStats | None = None
 
     def encode_prepared(
         self,
@@ -906,12 +879,6 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
             collisions_cpu = collisions.cpu()
             bins[:, collisions_cpu] = collision_bins
             soft_codes[:, collisions_cpu] = collision_codes
-        self.last_encoding_stats = DeduplicationStats(
-            x_prep.shape[0],
-            representatives.numel(),
-            x_prep.shape[0] - representatives.numel() - collisions.numel(),
-            collisions.numel(),
-        )
         return bins, soft_codes
 
     def decode_stages_prepared(
@@ -933,10 +900,4 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
                 bins_device[:, collisions], side_info[collisions], batch_size
             ).to(self.device)
 
-        self.last_decoding_stats = DeduplicationStats(
-            bins.shape[1],
-            representatives.numel(),
-            bins.shape[1] - representatives.numel() - collisions.numel(),
-            collisions.numel(),
-        )
         return recons.cpu()

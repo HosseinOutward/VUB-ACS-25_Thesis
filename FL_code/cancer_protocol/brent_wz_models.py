@@ -117,10 +117,6 @@ class EncoderDecoderLayeredRNN(nn.Module):
         else:
             self.conditionalPrior = nn.Linear(hidden_dim, bins_per_plane)
 
-    @property
-    def bin_count(self) -> int:
-        return self.bins_per_plane**self.num_planes
-
     @staticmethod
     def _transmission_state_dict(
         state_dict: dict[str, torch.Tensor],

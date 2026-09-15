@@ -114,7 +114,6 @@ def run_single_experiment(
         shared_heads=True,
         prior_context="hard",
         prior_probabilities="categorical",
-        tf32=False,
         fused_optimizer=True,
         hidden_dim=100,
         layers=3,
