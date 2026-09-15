@@ -370,6 +370,7 @@ def create_protocol(
 ) -> BaseProtocol:
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
+    from FL_code.cancer_protocol.bin_coder import coded_rounds as _coded_rounds
     from FL_code.other_protocols import n_split_protocol
     parsed = parse_configurable_name(protocol_name, "protocol")
     return _single_named_subclass(BaseProtocol, "protocol_name", parsed.name)(

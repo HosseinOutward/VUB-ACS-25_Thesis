@@ -306,6 +306,12 @@ class _WZProtocol(BaseProtocol):
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
         snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
         snapshot["history"] = self._recons_history.config_snapshot()
+        # Codec facts and resolved transport settings, so D/E read oracle grants and rate-field
+        # availability from here rather than inferring them from a display label like codec_id.
+        for round_name, entry in snapshot["round_codecs"].items():
+            round_codec_class = self._round_codec_classes[round_name]
+            if issubclass(round_codec_class, _WZRoundCodec):
+                entry["codec_provenance"] = round_codec_class.codec_provenance(**entry["options"])
         return snapshot
 
 

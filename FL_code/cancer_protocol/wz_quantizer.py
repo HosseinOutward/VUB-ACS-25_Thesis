@@ -284,6 +284,10 @@ class WZcfgQuant(BaseModel):
     tau: float = 5.5
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
+    # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
+    # inputs, e.g. a sparse-replay case seeding torch's RNG per client-round. Omitted from the
+    # cache payload when unset so every existing cache entry keeps its current key.
+    training_seed: int | None = None
 
     training_progress_bar: bool = False
     training_log_every_epochs: int | None = None
@@ -313,6 +317,8 @@ class WZcfgQuant(BaseModel):
         }
         if self.quantizer_train_repeats != 2:
             payload["quantizer_train_repeats"] = self.quantizer_train_repeats
+        if self.training_seed is not None:
+            payload["training_seed"] = self.training_seed
         return payload
 
 
@@ -806,8 +812,14 @@ def _train_quantizer_parameters(
     extra_training_pairs: tuple[tuple[torch.Tensor, tuple[torch.Tensor, ...]], ...] = (),
     problem_weights: tuple[float, ...] | None = None,
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
-    quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
-    quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
+    # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss
+    # leave the caller's RNG identical for later stochastic steps in the same client-round.
+    seeded = c_cfg.training_seed is not None
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()], enabled=seeded):
+        if seeded:
+            torch.manual_seed(c_cfg.training_seed)
+        quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
+        quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
     assert quantizer.training_prior_stage_rates is not None
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
 

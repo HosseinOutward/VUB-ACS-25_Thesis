@@ -208,9 +208,12 @@ def _train_prior_parameters(
     c_cfg: WZcfgQuant,
     batch_size: int,
 ) -> dict[str, torch.Tensor]:
-    return _train_prior_model(
-        bins_vec, soft_codes, side_info, c_cfg, batch_size
-    ).state_dict()
+    # See _train_quantizer_parameters: seeded on a cache miss, forked so hits and misses match.
+    seeded = c_cfg.training_seed is not None
+    with torch.random.fork_rng(devices=[torch.cuda.current_device()], enabled=seeded):
+        if seeded:
+            torch.manual_seed(c_cfg.training_seed)
+        return _train_prior_model(bins_vec, soft_codes, side_info, c_cfg, batch_size).state_dict()
 
 
 class DedupedPriorCalculator(PriorCalculator):

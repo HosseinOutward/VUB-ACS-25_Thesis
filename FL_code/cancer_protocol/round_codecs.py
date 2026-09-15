@@ -142,6 +142,9 @@ class _WZRoundCodec(BaseRoundCodec):
     record_class = CancerRecord
     round_name: ClassVar[str]
     can_decode_where: ClassVar[Access]
+    # States, without inferring it from a display label such as codec_id, whether the quantizer
+    # trained on temporal (worker-only) or oracle (server-visible) side information.
+    quantizer_training_access: ClassVar[str]
     quantizer_class: type[DedupedWZQuantizerCancer] = DedupedWZQuantizerCancer
     config_class: type[WZcfgQuant] = WZcfgQuant
 
@@ -194,6 +197,34 @@ class _WZRoundCodec(BaseRoundCodec):
             num_planes=num_planes,
             **quant_overrides,
         )
+
+    @classmethod
+    def codec_provenance(cls, **options: Any) -> dict[str, Any]:
+        """Return the oracle-access facts and rate-field availability `config_snapshot` records.
+
+        Transport mixins layer coder facts and resolved settings on top via `super()`; unused
+        quantizer options are accepted and ignored so a full round-token options dict can be
+        passed straight through the cooperative chain without filtering it first.
+        """
+        return {
+            "quantizer_training_access": cls.quantizer_training_access,
+            "oracle_prior_granted": False,
+            "sw_oracle_search": False,
+            "coder_prior_si": None,
+            # T/O's prior_stage_rates follow the protocol-wide retrained_prior_uses_server_si
+            # policy recorded alongside this in config_snapshot; transport mixins override this
+            # when they instead fix the coder prior to the exact decoder-legal SI.
+            "prior_stage_rates_si": "protocol_retrained_prior_uses_server_si_policy",
+            "rate_fields_available": {
+                "prior_stage_rates": True,
+                "marginal_stage_rates": True,
+                "training_prior_stage_rates": True,
+                "coder_rate": False,
+                "coder_stage_rates": False,
+                "coder_overhead_rate": False,
+                "symbol_error_rate": False,
+            },
+        }
 
     def create_r_record(self, round_id: int, client_id: int) -> CancerRecord:
         """Create the metrics row and optional per-element artifact for this round."""
@@ -385,6 +416,7 @@ class P_RoundCodec(_WZRoundCodec):
 
     round_name: ClassVar[str] = "P"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
+    quantizer_training_access: ClassVar[str] = "none_pretrained"
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -424,6 +456,7 @@ class R_RoundCodec(_WZRoundCodec):
 
     round_name: ClassVar[str] = "R"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
+    quantizer_training_access: ClassVar[str] = "server_reconstruction_target"
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
@@ -446,6 +479,7 @@ class T_RoundCodec(_WZRoundCodec):
 
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
+    quantizer_training_access: ClassVar[str] = "temporal"
     si: list[torch.Tensor]
     _send_quantizer_state: bool
 
@@ -521,6 +555,7 @@ class Oracle_RoundCodec(T_RoundCodec):
 
     round_name: ClassVar[str] = "O"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
+    quantizer_training_access: ClassVar[str] = "oracle"
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int

@@ -9,9 +9,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, model_validator
 import torch
 
-from FL_code.FL_core.utils import decompress_data_list
-
-from ..round_codecs import CancerRecord
+from .staged_transport import StagedIndexTransportMixin
 from .sw_coder import ConditionalPrior, SWCoderConfig, SWPayload, SWRatePlan, SlepianWolfCodec
 from ..wz_quantizer import PreprocessMetadata
 
@@ -50,15 +48,22 @@ def _wilson_upper(errors: int, trials: int, confidence: float = 0.95) -> float:
     return (center + radius) / denominator
 
 
-class OracleSWRoundMixin:
-    """Cheating staged-index SW transport mixed in before an index-producing round codec."""
+class OracleSWRoundMixin(StagedIndexTransportMixin):
+    """Cheating staged-index SW transport mixed in before an index-producing round codec.
+
+    ``sw_config=``/``sw_search_step=`` constructor kwargs are the direct-construction path used
+    by tests that build this mixin without a round-token protocol (bypassing ``options_to_config``
+    entirely). Whenever a round token is parsed instead, ``options_to_config`` is the single
+    source of truth: an explicit ``sw_search_step`` option always wins, and omitting it keeps
+    whatever the constructor already set rather than silently resetting it to 1.
+    """
 
     sw_target_ber = 0.01
     sw_confidence = 0.95
     sw_config: SWCoderConfig
-    sw_search_step: int
-    sw_search_bisect: bool
-    sw_search_log: list[tuple[int, tuple[tuple[int, ...], ...], float, float]]
+    sw_search_step: int = 1
+    sw_search_bisect: bool = False
+    _encoded_symbol_error_rate: float
 
     def __init__(self, *args: Any, sw_config: SWCoderConfig | None = None,
                  sw_search_step: int = 1, sw_search_bisect: bool = False, **kwargs: Any) -> None:
@@ -66,14 +71,42 @@ class OracleSWRoundMixin:
         self.sw_config = SWCoderConfig() if sw_config is None else sw_config
         self.sw_search_step = sw_search_step
         self.sw_search_bisect = sw_search_bisect
-        # One codec for the search, the payload, and the decoder: its parity matrices are the
-        # expensive part, and the study runs both ends in this process anyway.
-        self.sw_codec = SlepianWolfCodec(self.sw_config)
         super().__init__(*args, **kwargs)
+        # One codec owns the deterministic matrices used by search, payload production, and decode.
+        self.sw_codec = SlepianWolfCodec(self.sw_config)
 
-    def coder_prior_model(self) -> Any:
-        """Return the network the coder conditions on, and so the rate it is measured against."""
-        return self.quantizer.coding_model
+    def options_to_config(self, sw_search_step: int | None = None, **options: Any) -> None:
+        """Apply an explicit row-search-step override before forwarding quantizer/cache options."""
+        if sw_search_step is not None:
+            self.sw_search_step = sw_search_step
+        if (cache_dir := options.get("cache_dir")) is not None:
+            self.sw_config = self.sw_config.model_copy(
+                update={"matrix_cache_dir": cache_dir / "sw_matrices"}
+            )
+        super().options_to_config(**options)
+
+    @classmethod
+    def validate_cfg(cls, sw_search_step: int | None = None, **options: Any) -> None:
+        """Validate an explicit row-search step alongside the remaining quantizer options."""
+        assert sw_search_step is None or (isinstance(sw_search_step, int) and sw_search_step >= 1), (
+            f"sw_search_step must be a positive integer; got {sw_search_step!r}."
+        )
+        super().validate_cfg(**options)
+
+    @classmethod
+    def codec_provenance(cls, *, sw_search_step: int | None = None, **options: Any) -> dict[str, Any]:
+        """Report the oracle SW search and its resolved settings alongside the base coder facts."""
+        facts = super().codec_provenance(**options)
+        facts["sw_oracle_search"] = True
+        facts["transport"] = "oracle_sw"
+        facts["resolved_transport_settings"] = {
+            "sw_search_step": cls.sw_search_step if sw_search_step is None else sw_search_step,
+            "sw_search_bisect": cls.sw_search_bisect,
+            "sw_target_ber": cls.sw_target_ber,
+            "sw_confidence": cls.sw_confidence,
+            "sw_block_length": SWCoderConfig().block_length,
+        }
+        return facts
 
     def _sw_context(self, metadata: PreprocessMetadata) -> tuple[torch.Tensor, ConditionalPrior]:
         """Return decoder side information and the coder's causal stage prior."""
@@ -87,9 +120,6 @@ class OracleSWRoundMixin:
             )[stage].to(decoder_side_info.device)
 
         return side_info, prior_provider
-
-    def add_prior_to_record(self, *args: Any, **kwargs: Any) -> None:
-        """Skip the separate diagnostic prior because this payload measures its own coder rate."""
 
     def _validate_staged_indices(self, bins: torch.Tensor) -> tuple[int, int]:
         """Return the staged alphabet and width after checking the current SW contract."""
@@ -129,9 +159,7 @@ class OracleSWRoundMixin:
         if grid[-1] != largest_backoff:
             grid.append(largest_backoff)
 
-        self.sw_search_log = []
-
-        def trial(row_backoff: int) -> OracleSWPayload | None:
+        def trial(row_backoff: int) -> tuple[OracleSWPayload, float] | None:
             plan = base_plan.model_copy(update={
                 "syndrome_rows": tuple(
                     tuple(min(block_length, rows + row_backoff) for rows in stage_rows)
@@ -141,14 +169,9 @@ class OracleSWRoundMixin:
             syndrome = codec.encode_syndromes(bins, plan)
             decoded = codec.decode_syndromes(syndrome, plan, prior_provider, side_info).symbols
             errors = self._bit_errors(bins, decoded, bit_width)
-            # What the scan tried and why it rejected it; the only way to tell a plan that is
-            # genuinely unreachable from one the grid simply stepped over.
-            self.sw_search_log.append(
-                (row_backoff, plan.syndrome_rows, errors / source_bits,
-                 _wilson_upper(errors, source_bits, self.sw_confidence)))
             if _wilson_upper(errors, source_bits, self.sw_confidence) >= self.sw_target_ber:
                 return None
-            return OracleSWPayload(plan=plan, syndrome=syndrome)
+            return OracleSWPayload(plan=plan, syndrome=syndrome), float((decoded != bins).float().mean())
 
         # The scan returns the smallest reliable grid point, at one trial per point.  Bisection
         # costs log-many trials but is NOT equivalent: measured at step 1, the reliable backoffs
@@ -156,7 +179,7 @@ class OracleSWRoundMixin:
         # pass and fail alternate -- so bisection returns a point inside that band rather than
         # its lower edge, overshooting the scan by 0-31 rows (0 to 0.039 bit/position here).
         # That is a different, more conservative estimator, not a faster one; opt in knowingly.
-        selected: OracleSWPayload | None = None
+        selected: tuple[OracleSWPayload, float] | None = None
         if self.sw_search_bisect:
             low, high = 0, len(grid) - 1
             while low <= high:
@@ -174,7 +197,8 @@ class OracleSWRoundMixin:
             f"{self.sw_confidence:.0%} confidence over {source_bits} source bits; "
             "the vector may be too short to certify even an error-free full-rate result."
         )
-        return selected
+        payload, self._encoded_symbol_error_rate = selected
+        return payload
 
     def decode_staged_indices(self, payload: OracleSWPayload, metadata: PreprocessMetadata) -> torch.Tensor:
         """Recover successive staged indices using the payload's complete rate plan."""
@@ -189,36 +213,19 @@ class OracleSWRoundMixin:
             payload.syndrome, payload.plan, prior_provider, side_info
         ).symbols
 
-    def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
-        """Replace the ordinary staged indices with their self-contained oracle SW payload."""
-        outer_payload = super().get_encod_payload(delta_vec, record)
-        bins, metadata = outer_payload["payload_content"]
-        payload = self.encode_staged_indices(bins, metadata)
+    def payload_bits(
+        self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: OracleSWPayload
+    ) -> tuple[list[int], int]:
+        """Separate stage syndromes from the transmitted rate-plan and framing overhead."""
         blocks = (bins.shape[1] + payload.plan.block_length - 1) // payload.plan.block_length
-        stage_rates = [
-            blocks * sum(rows) / bins.shape[1] for rows in payload.plan.syndrome_rows
-        ]
-        wire_rate = payload.wire_bits / bins.shape[1]
-        overhead_rate = wire_rate - sum(stage_rates)
-        stage_rates[0] += overhead_rate
-        decoded = self.decode_staged_indices(payload, metadata)
-        record.update_record_fields(
-            coder_rate=wire_rate,
-            coder_stage_rates=stage_rates,
-            coder_overhead_rate=overhead_rate,
-            symbol_error_rate=float((decoded != bins.long().cpu()).sum() / bins.numel()),
-        )
-        outer_payload["payload_content"] = (payload, metadata)
-        return outer_payload
+        stage_bits = [blocks * sum(rows) for rows in payload.plan.syndrome_rows]
+        return stage_bits, payload.wire_bits - sum(stage_bits)
 
-    def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
-        """Recover staged indices and return the quantizer's normal final reconstruction."""
-        transmitted, metadata = decompress_data_list(payload)["payload_content"]
-        assert isinstance(transmitted, OracleSWPayload)
-        bins = self.decode_staged_indices(transmitted, metadata)
-        stage_reconstructions = self.quantizer.decoding_stages_process((bins, metadata))
-        self.add_stage_distortion_to_record(stage_reconstructions, record)
-        return stage_reconstructions[-1]
+    def symbol_error_rate(
+        self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: OracleSWPayload
+    ) -> float:
+        """Return the error rate already observed in the selected oracle-search trial."""
+        return self._encoded_symbol_error_rate
 
 
 __all__ = ["OracleSWPayload", "OracleSWRoundMixin"]

@@ -51,17 +51,20 @@ class _CausalPrior:
 
 
 class _FakeQuantizer:
+    """``bins=None`` builds decoder-legal state only: no source bins, num_planes given directly."""
+
     def __init__(
         self,
-        bins: torch.Tensor,
+        bins: torch.Tensor | None,
         side_info: torch.Tensor,
         alphabet: int = 2,
         crossover: float = 0.11,
+        num_planes: int | None = None,
     ) -> None:
         self.source_bins = bins
         self.side_info = side_info
         self.bins_per_plane = alphabet
-        self.num_planes = bins.shape[0]
+        self.num_planes = num_planes if bins is None else bins.shape[0]
         self.coding_model = object()
         self.prior_calculator = _CausalPrior(crossover)
 
@@ -125,15 +128,27 @@ def test_index_mapping_round_trip_and_prior_permutation() -> None:
     torch.testing.assert_close(mapped, torch.tensor([[0.1, 0.2, 0.4, 0.3]]))
 
 
-def test_oracle_round_payload_preserves_outer_fields_and_recovers_stages() -> None:
+def test_oracle_round_payload_preserves_outer_fields_and_recovers_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bins, side_info = _problem()
     host = _OracleHost(
         _FakeQuantizer(bins, side_info),
         sw_config=SWCoderConfig(block_length=32, max_bp_iterations=30),
     )
 
+    decoder_calls = 0
+    original_decode = host.decode_staged_indices
+
+    def counted_decode(payload: OracleSWPayload, metadata: object) -> torch.Tensor:
+        nonlocal decoder_calls
+        decoder_calls += 1
+        return original_decode(payload, metadata)
+
+    monkeypatch.setattr(host, "decode_staged_indices", counted_decode)
     record = CancerRecord(round_id=0, client_id=0, round_name_full="OSW")
     outer = host.get_encod_payload(torch.zeros(bins.shape[1]), record)
+    assert decoder_calls == 0
     assert outer["quantizer_state"] == "preserved"
     transmitted, metadata = outer["payload_content"]
     assert isinstance(transmitted, OracleSWPayload)
@@ -144,8 +159,10 @@ def test_oracle_round_payload_preserves_outer_fields_and_recovers_stages() -> No
     )
     assert record.symbol_error_rate == 0.0
 
+    # A genuinely separate decoder: no source bins, only the side information a real decoder
+    # would legally hold plus whatever the wire payload carries.
     decoder = _OracleHost(
-        _FakeQuantizer(bins, side_info),
+        _FakeQuantizer(None, side_info, num_planes=bins.shape[0]),
         sw_config=SWCoderConfig(block_length=32, max_bp_iterations=30),
     )
     for _ in range(2):
