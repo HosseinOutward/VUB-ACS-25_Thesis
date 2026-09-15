@@ -1,11 +1,11 @@
 {
-  "name": "frozen_coder_rounds",
+  "name": "frozen_schedule",
   "description": "New study (not a reproduction of exp_records/binary_frozen): schedule placement, record identity, and trace generation all changed in this refactor. Recovered settings per REFACTOR_PLAN.md coordinator decision 1, 2026-09-15.",
-  "fl_config": "frozen_coder_rounds_fl_config.json",
+  "fl_config": "frozen_schedule_fl_config.json",
   "trace": "../../../_/data/federated_learning/r56_cifar10_30c_frozen_v2",
   "trace_device": "cuda:0",
   "dataset_revision": "torchvision-cifar-10-python.tar.gz-md5:c58f30108f718f92721af3b95e74349a",
-  "output_root": "../exp_records/frozen_coder_rounds",
+  "output_root": "../exp_records/frozen_schedule",
   "cache_root": "../../../_/data/protocol_cache/r56_cifar10_30c_frozen_v2",
   "gpu_ids": [
     0,

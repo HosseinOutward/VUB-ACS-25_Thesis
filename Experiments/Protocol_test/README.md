@@ -39,11 +39,10 @@ Run a plan with:
   validating the pipeline end to end. Two windows (starts 5 and 8), workers `[0, 2]`, codecs `T`
   and `O` only, tiny quantizer settings. Output under
   `Experiments/Protocol_test/exp_records/refactor_smoke`.
-- `plans/frozen_coder_rounds.json` (+ `plans/frozen_coder_rounds_fl_config.json`): the retained
+- `plans/frozen_schedule.json` (+ `plans/frozen_schedule_fl_config.json`): the retained
   study (ResNet-56/CIFAR-10, 30 clients, starts 5 and 12, all 30 workers, codecs `T`, `TR`, `TRR`,
   `O`, `OSW`, `OSWR`). Its settings were recovered from
-  `exp_records/binary_frozen/r56_cifar10/test_config.json` per the coordinator's decision
-  (`REFACTOR_PLAN.md`, "Coordinator decisions", item 1). **This is a new study, not a reproduction
+  `exp_records/binary_frozen/r56_cifar10/test_config.json`. **This is a new study, not a reproduction
   of `binary_frozen`**: schedule placement (`protocol.set_schedule`), record identity
   (`complete.json`'s identity/provenance split), and trace generation (`Trace`, a new directory
   `r56_cifar10_30c_frozen_v2`) all differ from that run. Do not run this plan casually - it
