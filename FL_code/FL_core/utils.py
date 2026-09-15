@@ -129,7 +129,6 @@ class ParsedConfigurableName:
 
     name: str
     options: dict[str, Any] | None
-    option_tokens: tuple[str, ...]
 
 
 def parse_configurable_name(raw_name: str, field_name: str) -> ParsedConfigurableName:
@@ -157,7 +156,7 @@ def parse_configurable_name(raw_name: str, field_name: str) -> ParsedConfigurabl
             f"{field_name} option {token!r} must not have an empty value.")
 
     options = None if not options else options
-    return ParsedConfigurableName(name=name, options=options, option_tokens=tuple(parts[1:]))
+    return ParsedConfigurableName(name=name, options=options)
 
 
 
@@ -386,14 +385,6 @@ class StateDictManager:
                 self.numels.append(param.numel())
 
         self.param_count = sum(self.numels)
-
-        # State entries the workers never train via backprop: BatchNorm buffers
-        # (running_mean, running_var, num_batches_tracked) plus any frozen params.
-        # These are never transmitted in either direction; each node recomputes
-        # them from its own local data (BN recalibration). Kept explicit here,
-        # unused for now, until their handling is decided.
-        tracked = set(self.keys)
-        self.non_backprop_state_keys: list[str] = [key for key in model.state_dict() if key not in tracked]
 
     def flatten(self, state_dict: dict[str, torch.Tensor]) -> torch.Tensor:
         flat_list = []

@@ -164,8 +164,7 @@ class _WZProtocol(BaseProtocol):
     reconstruction back through `after_decode`. One training problem per round: each scheduled codec
     is trained from the ledger the decoder can see, and frozen rounds replay the model the last
     training round produced. Training on more than the current round is an experiment-side extension
-    of `allocate_training_histories`, `codec_protocol_inputs` and `training_problem`; nothing here
-    assumes it exists.
+    of `allocate_training_histories` and `training_problem`; nothing here assumes it exists.
     """
 
     max_per_client_recons_history: ClassVar[int | None] = 5
@@ -210,12 +209,6 @@ class _WZProtocol(BaseProtocol):
         for history in self.histories:
             history.commit(reconst, record, round_codec.can_decode_where)
 
-    def codec_protocol_inputs(
-        self, round_codec_class: type[_WZRoundCodec], previous: _WZRoundCodec | None
-    ) -> dict[str, Any]:
-        """Return constructor inputs the protocol supplies; ordinary WZ rounds need none."""
-        return {}
-
     def training_problem(
         self, codec: _WZRoundCodec, round_id: int, client_id: int
     ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
@@ -232,7 +225,6 @@ class _WZProtocol(BaseProtocol):
         if not issubclass(round_codec_class, _WZRoundCodec):
             return round_codec_class(parsed.options, round_name_full)
 
-        previous = self.last_trained_codec.get(client_id)
         assert isinstance(parsed.options, dict)
         codec = round_codec_class(
             parsed.options | {
@@ -241,7 +233,6 @@ class _WZProtocol(BaseProtocol):
                 "cache_overwrite": self.cache_overwrite,
             },
             round_name_full,
-            **self.codec_protocol_inputs(round_codec_class, previous),
         )
         assert isinstance(codec, _WZRoundCodec)
 

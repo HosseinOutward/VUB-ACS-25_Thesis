@@ -177,7 +177,6 @@ class BaseRoundCodec:
         self,
         cfg_options: Mapping[str, Any] | None,
         round_name_full: str,
-        **protocol_inputs: Any,
     ) -> None:
         self.round_name_full = round_name_full
         if cfg_options:
