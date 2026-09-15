@@ -52,7 +52,7 @@ Run a plan with:
 ## Validation commands
 
 ```bash
-.venv/bin/python -m pytest -q Experiments/Protocol_test/tests Experiments/slepian_wolf/test_staged_transport.py Experiments/slepian_wolf/test_oracle_sw_mixin.py Experiments/slepian_wolf/test_practical_sw.py
+.venv/bin/python -m pytest -q --import-mode=importlib tests/test_codec_lifecycle.py tests/test_history.py tests/test_trace.py tests/test_staged_transport.py tests/test_oracle_sw_mixin.py Experiments/Protocol_test/tests/test_plot.py Experiments/Protocol_test/tests/test_sparse_replay.py Experiments/slepian_wolf/test_oracle_sw_mixin.py Experiments/slepian_wolf/test_practical_sw.py
 .venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
 .venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
 .venv/bin/python -m Experiments.Protocol_test.plot Experiments/Protocol_test/exp_records/refactor_smoke
