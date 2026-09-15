@@ -20,7 +20,7 @@ from .utils import (
 )
 
 
-def _train_client_update(
+def train_client_update(
     model: FLModelTemplate,
     train_loader: DataLoader,
     optimizer: torch.optim.Optimizer,
@@ -98,7 +98,7 @@ def run_federated_client(
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
         delta_vec = cache_call(
-            _train_client_update,
+            train_client_update,
             client_update_cache_dir,
             client_update_hash,
             cfg.debug_save_train_data,

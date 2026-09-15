@@ -36,7 +36,7 @@ def run_federated_server(
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using protocol: {protocol.__class__.__name__}")
 
-    # FedAvgM as a plain torch optimizer over the aggregated delta (see _aggregate_and_update).
+    # FedAvgM as a plain torch optimizer over the aggregated delta (see aggregate_and_update).
     server_opt = torch.optim.SGD(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=cfg.server_lr, momentum=cfg.server_momentum, nesterov=cfg.server_nesterov)
@@ -105,13 +105,13 @@ def run_federated_server(
 
             grads_list.append(sd_manager.unflatten(recon_delta_vec))
 
-        _aggregate_and_update(model, grads_list, sample_counts, sd_manager, server_opt)
+        aggregate_and_update(model, grads_list, sample_counts, sd_manager, server_opt)
 
     # Signal clients to terminate
     dist.broadcast(torch.tensor([-1], dtype=torch.long), src=0)
 
 
-def _aggregate_and_update(
+def aggregate_and_update(
     model: torch.nn.Module,
     grads_list: list[dict[str, torch.Tensor]],
     sample_counts: list[int],
@@ -122,8 +122,8 @@ def _aggregate_and_update(
     total_samples = sum(sample_counts)
     weights = [n / total_samples for n in sample_counts]
 
-    # Weighted average of gradients (in-place on first gradient)
-    aggregated_delta = grads_list[0]
+    # Reconstruction histories can retain these dictionaries, so aggregation must not alter them.
+    aggregated_delta = {key: grads_list[0][key].clone() for key in sd_manager.keys}
     for key in sd_manager.keys:
         aggregated_delta[key].mul_(weights[0])
         for grad_dict, weight in zip(grads_list[1:], weights[1:]):
