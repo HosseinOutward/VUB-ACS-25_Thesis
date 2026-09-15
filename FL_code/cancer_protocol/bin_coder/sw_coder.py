@@ -594,10 +594,6 @@ class SWResult:
         return self.undetected_block_errors / max(1, self.bp_attempted_blocks)
 
     @property
-    def bp_convergence_rate(self) -> float:
-        return self.syndrome_consistent_blocks / max(1, self.bp_attempted_blocks)
-
-    @property
     def mean_bp_iterations(self) -> float:
         return self.bp_iterations / max(1, self.bp_attempted_blocks)
 
