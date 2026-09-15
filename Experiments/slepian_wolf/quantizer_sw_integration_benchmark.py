@@ -24,7 +24,7 @@ from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import (
     OracleSWRoundMixin,
     _wilson_upper,
 )
-from FL_code.cancer_protocol.bin_coder.oracle_index_mapping_mixin import (
+from Experiments.slepian_wolf.oracle_index_mapping_mixin import (
     MappedOracleSWPayload,
     OracleValueOrderedIndexMixin,
 )

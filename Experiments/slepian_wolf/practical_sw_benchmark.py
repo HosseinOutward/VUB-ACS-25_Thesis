@@ -38,7 +38,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from FL_code.FL_core.codec import record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
 from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import OracleSWPayload, OracleSWRoundMixin
-from FL_code.cancer_protocol.bin_coder.practical_sw_mixin import (
+from Experiments.slepian_wolf.practical_sw_mixin import (
     LDPCAConfig,
     LDPCASWPayload,
     LDPCASWRoundMixin,

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 import torch
 
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
-from FL_code.cancer_protocol.bin_coder.practical_sw_mixin import (
+from Experiments.slepian_wolf.practical_sw_mixin import (
     LDPCAConfig,
     LDPCASWPayload,
     LDPCASWRecord,

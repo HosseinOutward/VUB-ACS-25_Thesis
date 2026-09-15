@@ -7,9 +7,9 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, model_validator
 import torch
 
-from .oracle_sw_mixin import OracleSWPayload
-from .sw_coder import ConditionalPrior
-from ..wz_quantizer import PreprocessMetadata
+from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import OracleSWPayload
+from FL_code.cancer_protocol.bin_coder.sw_coder import ConditionalPrior
+from FL_code.cancer_protocol.wz_quantizer import PreprocessMetadata
 
 
 class IndexMappingPlan(BaseModel):

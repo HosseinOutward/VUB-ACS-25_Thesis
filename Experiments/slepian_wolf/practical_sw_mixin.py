@@ -46,9 +46,9 @@ import torch
 
 from FL_code.FL_core.utils import decompress_data_list
 
-from ..round_codecs import CancerRecord
-from ..wz_quantizer import PreprocessMetadata
-from .sw_coder import (
+from FL_code.cancer_protocol.round_codecs import CancerRecord
+from FL_code.cancer_protocol.wz_quantizer import PreprocessMetadata
+from FL_code.cancer_protocol.bin_coder.sw_coder import (
     BlockRecovery,
     ConditionalPrior,
     HashVerification,
