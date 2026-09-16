@@ -1,32 +1,31 @@
-"""Validate learned WZ quantizer models on synthetic Gaussian side information, as done in the original paper to see if it is at least as good."""
+"""Validate the production WZ protocol on paired synthetic Gaussian rounds."""
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import itertools
 from pathlib import Path
 import sys
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, Literal, cast
 
 import matplotlib.pyplot as plt
-from matplotlib.axes import Axes
 import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from FL_code.FL_core.codec import record_reconstruction_metrics
-from FL_code.FL_core.utils import decompress_data_list, set_global_seed
-from FL_code.cancer_protocol.prior_code import PriorCalculator
-from FL_code.cancer_protocol.round_codecs import Oracle_RoundCodec
-from FL_code.cancer_protocol.wz_quantizer import (
-    DedupedWZQuantizerCancer,
-    WZcfgQuant,
-)
+from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
+from FL_code.FL_core.utils import StateDictManager, set_global_seed
+from FL_code.cancer_protocol.cancer_protocol import ReconstructionHistory, WZCancerProtocol
+
+
+CodecName = Literal["O", "T"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,39 +36,27 @@ class ExperimentConfig:
     num_planes: int
     reconst_ld: float
 
-    @property
-    def key(self) -> str:
-        """Return the stable CSV and plotting key for this configuration."""
-        return f"{self.bins_per_plane}b_{self.num_planes}p_ld{self.reconst_ld:g}"
-
-
-@dataclass(frozen=True, slots=True)
-class PlotStyle:
-    """Plot styling assigned to one quantizer configuration."""
-
-    color: tuple[float, float, float]
-    marker: str
-    label: str
-
 
 # Keep these settings explicit so model sweeps remain easy to inspect and edit.
 NUM_REPEATS = 2
 DATA_SIZE = 2_000_000
 NOISE_POWER = 0.01
+TRAIN_ROUND_ID = 1
+CLIENT_ID = 0
+CODEC_NAMES: tuple[CodecName, ...] = ("O", "T")
 QUANTIZER_SETTINGS = (  # (bins_per_plane, num_planes, reconst_ld)
     (2, 3, 120.0),
     (4, 2, 160.0),
 )
 EXPERIMENT_CONFIGS = tuple(ExperimentConfig(*setting) for setting in QUANTIZER_SETTINGS)
 RATE_TYPES = {
-    "training_prior_rate": "Training-data prior rate",
-    "inference_prior_rate": "Quantizer prior rate",
+    "training_prior_rate": "Jointly trained prior rate",
     "prior_rate": "Retrained prior rate",
     "marginal_rate": "Empirical marginal rate",
 }
 
 
-def append_to_csv(csv_path: Path, record: dict[str, Any]) -> None:
+def append_to_csv(csv_path: Path, record: Mapping[str, Any]) -> None:
     """Append one result row, creating the CSV header when needed."""
     file_exists = csv_path.exists()
     if file_exists:
@@ -82,14 +69,71 @@ def append_to_csv(csv_path: Path, record: dict[str, Any]) -> None:
         writer.writerow(record)
 
 
+def make_round_token(codec_name: CodecName, config: ExperimentConfig) -> str:
+    """Return the configured Oracle or Temporal training token used by the real protocol."""
+    options: dict[str, Any] = {
+        "bins_per_plane": config.bins_per_plane,
+        "num_planes": config.num_planes,
+        "reconst_ld": config.reconst_ld,
+        "train_epochs": 180,
+        "train_sample_size": 200_000,
+        "train_batch_size": 1_000,
+        "lr": 3e-3,
+        "lr_step": 40,
+        "tau": 1.0,
+        "training_progress_bar": False,
+        "training_log_every_epochs": 5,
+        "quantizer_train_repeats": 1,
+        "shared_heads": True,
+        "prior_context": "hard",
+        "prior_probabilities": "categorical",
+        "fused_optimizer": True,
+        "hidden_dim": 100,
+        "layers": 3,
+    }
+    return codec_name + "".join(f"|{name}={value!r}" for name, value in options.items())
+
+
+def populated_protocol(
+    codec_name: CodecName,
+    config: ExperimentConfig,
+    training_side_information: torch.Tensor,
+) -> WZCancerProtocol:
+    """Create a scheduled production protocol with one decoder-visible synthetic history entry."""
+    protocol = create_protocol("wz_cancer", sd_slices=(slice(None),))
+    assert isinstance(protocol, WZCancerProtocol)
+    protocol.set_schedule(TRAIN_ROUND_ID, (make_round_token(codec_name, config), "F"))
+
+    history = ReconstructionHistory(max_per_client=1)
+    history.commit(
+        training_side_information,
+        CompressionRecord(TRAIN_ROUND_ID - 1, CLIENT_ID, "synthetic_history"),
+        Access.TEMPORAL_TOO,
+    )
+    protocol.max_per_client_recons_history = history.max_per_client
+    protocol._recons_history = history
+    protocol.histories = (history,)
+    return protocol
+
+
+def parse_stage_rates(record: Mapping[str, str], field: str, stages: int) -> list[float]:
+    """Parse one staged metric emitted by ``CompressionRecord.append_record_to_csv``."""
+    values = ast.literal_eval(record[field])
+    assert isinstance(values, list) and len(values) == stages, (
+        f"Protocol record field {field!r} has {len(values) if isinstance(values, list) else type(values)} "
+        f"values; expected {stages}.")
+    return [float(value) for value in values]
+
+
 def run_single_experiment(
     config: ExperimentConfig,
     trial_idx: int,
     run_label: str,
+    codec_name: CodecName,
+    sd_manager: StateDictManager,
 ) -> list[dict[str, Any]]:
-    """Train one full layered model and return one evaluation record per refinement stage."""
+    """Run one trained round and one held-out frozen round through the production endpoint."""
     seed = trial_idx * 42
-    set_global_seed(seed)
     generator = torch.Generator().manual_seed(seed)
     noise_std = float(np.sqrt(NOISE_POWER))
     training_side_information = torch.randn(DATA_SIZE, generator=generator)
@@ -97,109 +141,114 @@ def run_single_experiment(
     inference_side_information = torch.randn(DATA_SIZE, generator=generator)
     inference_target = inference_side_information + torch.randn(DATA_SIZE, generator=generator) * noise_std
 
-    quantizer_config = WZcfgQuant(
-        bins_per_plane=config.bins_per_plane,
-        num_planes=config.num_planes,
-        norm_slices=(slice(None),),
-        reconst_ld=config.reconst_ld,
-        train_epochs=180,
-        train_sample_size=200_000,
-        train_batch_size=1_000,
-        lr=3e-3,
-        lr_step=40,
-        tau=1.0,
-        training_progress_bar=False,
-        training_log_every_epochs=5,
-        quantizer_train_repeats=1,
-        shared_heads=True,
-        prior_context="hard",
-        prior_probabilities="categorical",
-        fused_optimizer=True,
-        hidden_dim=100,
-        layers=3,
-    )
-    training_quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
-    training_quantizer.train_model(training_target, [training_side_information])
+    set_global_seed(seed)
+    protocol = populated_protocol(codec_name, config, training_side_information)
+    with TemporaryDirectory(prefix="brent_quantizer_check_") as temporary_dir:
+        records_dir = Path(temporary_dir)
+        simulate_compression(
+            protocol,
+            training_target,
+            CLIENT_ID,
+            TRAIN_ROUND_ID,
+            sd_manager,
+            records_dir,
+            {},
+            (),
+            (),
+        )
 
-    round_codec = Oracle_RoundCodec(
-        {
-            "bins_per_plane": config.bins_per_plane,
-            "num_planes": config.num_planes,
-            "sd_slices": quantizer_config.norm_slices,
-        },
-        "O",
-    )
-    round_codec.c_cfg = quantizer_config
-    round_codec.quantizer = training_quantizer
-    round_codec._send_quantizer_state = False
-    round_codec.refresh_side_information([inference_side_information])
-    record = round_codec.create_r_record(trial_idx, 0)
-    payload = round_codec.encode(inference_target, record)
-    payload_content = decompress_data_list(payload)["payload_content"]
-    bins, metadata = payload_content
-    formatted_side_information = round_codec.quantizer.side_info_tensor(metadata)
-    inference_prior = PriorCalculator.compute_prior_from_network(
-        round_codec.quantizer.coding_model, bins, formatted_side_information)
-    reconstructions = round_codec.quantizer.decoding_stages_process(payload_content)
-    decoded = round_codec.decode(payload, record)
-    torch.testing.assert_close(decoded, reconstructions[-1], rtol=0, atol=0)
+        # Preserve the real frozen-round transition while supplying the independent paired SI
+        # that defines this synthetic held-out problem.
+        protocol._recons_history.replace_latest(
+            inference_side_information,
+            round_id=TRAIN_ROUND_ID,
+            client_id=CLIENT_ID,
+        )
+        simulate_compression(
+            protocol,
+            inference_target,
+            CLIENT_ID,
+            TRAIN_ROUND_ID + 1,
+            sd_manager,
+            records_dir,
+            {},
+            (),
+            (),
+        )
+        with (records_dir / "compression_records.csv").open(newline="") as file:
+            protocol_records = list(csv.DictReader(file))
 
-    inference_rates = PriorCalculator.compute_plane_rates(inference_prior, bins, config.num_planes)
-    assert record.prior_stage_rates is not None
-    assert record.marginal_stage_rates is not None
+    assert len(protocol_records) == 2
+    assert [int(record["round_id"]) for record in protocol_records] == [
+        TRAIN_ROUND_ID,
+        TRAIN_ROUND_ID + 1,
+    ]
 
     results: list[dict[str, Any]] = []
-    for stage in range(config.num_planes):
-        assert training_quantizer.training_prior_stage_rates
-        training_rate = sum(training_quantizer.training_prior_stage_rates[:stage + 1])
-        inference_rate = sum(inference_rates[:stage + 1])
-        reconstruction_metrics = record_reconstruction_metrics(inference_target, reconstructions[stage])
-        results.append({
-            "config_key": (
-                f"{run_label}|{DedupedWZQuantizerCancer.__name__}|"
-                f"{config.key}|stage{stage + 1}"
-            ),
-            "trial_number": trial_idx,
-            "bins_per_plane": config.bins_per_plane,
-            "num_planes": stage + 1,
-            "model_num_planes": config.num_planes,
-            "data_size": DATA_SIZE,
-            "noise_power": NOISE_POWER,
-            "side_info_count": 1,
-            "marginal_loss": quantizer_config.marginal_loss,
-            "training_prior_rate": training_rate,
-            "inference_prior_rate": inference_rate,
-            "prior_rate": sum(record.prior_stage_rates[:stage + 1]),
-            "marginal_rate": sum(record.marginal_stage_rates[:stage + 1]),
-            **reconstruction_metrics,
-            "inference_wz_gap_db": 10 * np.log10(
-                reconstruction_metrics["mse"] / (NOISE_POWER * 2 ** (-2 * inference_rate))
-            ),
-            "run_label": run_label,
-        })
+    for phase, record in zip(("training", "frozen"), protocol_records, strict=True):
+        stage_fields = {
+            field: list(itertools.accumulate(parse_stage_rates(record, field, config.num_planes)))
+            for field in (
+                "training_prior_stage_rates",
+                "prior_stage_rates",
+                "marginal_stage_rates",
+            )
+        }
+        for stage, mse in enumerate(parse_stage_rates(record, "stage_mses", config.num_planes)):
+            training_prior_rate = stage_fields["training_prior_stage_rates"][stage]
+            results.append({
+                "trial_number": trial_idx,
+                "codec": codec_name,
+                "phase": phase,
+                "round_id": int(record["round_id"]),
+                "round_name_full": record["round_name_full"],
+                "bins_per_plane": config.bins_per_plane,
+                "num_planes": stage + 1,
+                "model_num_planes": config.num_planes,
+                "reconst_ld": config.reconst_ld,
+                "data_size": DATA_SIZE,
+                "noise_power": NOISE_POWER,
+                "side_info_count": 1,
+                "training_prior_rate": training_prior_rate,
+                "prior_rate": stage_fields["prior_stage_rates"][stage],
+                "marginal_rate": stage_fields["marginal_stage_rates"][stage],
+                "mse": mse,
+                "training_prior_wz_gap_db": 10 * np.log10(
+                    mse / (NOISE_POWER * 2 ** (-2 * training_prior_rate))
+                ),
+                "run_label": run_label,
+            })
     return results
 
 
-def run_experiments(out_path: Path, run_label: str = "shared_source_normalization") -> Path:
-    """Run every configured quantizer trial, persisting its row and refreshed plot immediately."""
+def run_experiments(
+    out_path: Path,
+    run_label: str = "protocol_two_round",
+    codec_names: Sequence[CodecName] = ("O",),
+) -> Path:
+    """Run every selected production-protocol trial and refresh the comparison plot."""
     assert run_label and "|" not in run_label
+    assert codec_names and set(codec_names) <= set(CODEC_NAMES)
     out_path.mkdir(exist_ok=True, parents=True)
-    csv_path = out_path / "quantizer_check.csv"
-    total_runs = len(EXPERIMENT_CONFIGS) * NUM_REPEATS
+    csv_path = out_path / "protocol_quantizer_check.csv"
+    model = torch.nn.Module()
+    model.register_parameter("synthetic_vector", torch.nn.Parameter(torch.empty(DATA_SIZE)))
+    sd_manager = StateDictManager(model)
+    cases = tuple(itertools.product(codec_names, EXPERIMENT_CONFIGS, range(NUM_REPEATS)))
 
-    for current_run, (config, trial_idx) in enumerate(
-        itertools.product(EXPERIMENT_CONFIGS, range(NUM_REPEATS)), start=1
-    ):
+    for current_run, (codec_name, config, trial_idx) in enumerate(cases, start=1):
         print(
-            f"\n=== {config.bins_per_plane} bins/plane × "
+            f"\n=== codec={codec_name} | {config.bins_per_plane} bins/plane × "
             f"{config.num_planes} planes | trial {trial_idx} ==="
         )
-        results = run_single_experiment(config, trial_idx, run_label)
+        results = run_single_experiment(
+            config, trial_idx, run_label, codec_name, sd_manager)
         for result in results:
             print(
-                f"[{current_run}/{total_runs}] stage={result['num_planes']} | "
-                f"MSE={result['mse']:.6f} | Quantizer={result['inference_prior_rate']:.3f} | "
-                f"WZ gap={result['inference_wz_gap_db']:.2f} dB | "
+                f"[{current_run}/{len(cases)}] phase={result['phase']} | "
+                f"stage={result['num_planes']} | MSE={result['mse']:.6f} | "
+                f"Training prior={result['training_prior_rate']:.3f} | "
+                f"WZ gap={result['training_prior_wz_gap_db']:.2f} dB | "
                 f"Retrained={result['prior_rate']:.3f} | Marginal={result['marginal_rate']:.3f}"
             )
             append_to_csv(csv_path, result)
@@ -209,92 +258,77 @@ def run_experiments(out_path: Path, run_label: str = "shared_source_normalizatio
     return plot_path
 
 
-def load_records(csv_path: Path) -> list[dict[str, str | float]]:
-    """Load quantizer result rows and convert plotted metrics to floats."""
+def plot_rate_comparison(csv_path: Path) -> Path:
+    """Plot training and held-out protocol rounds for every selected codec and architecture."""
     numeric_fields = {
-        "mse", "training_prior_rate", "inference_prior_rate", "prior_rate",
-        "marginal_rate", "inference_wz_gap_db", "bins_per_plane", "num_planes",
+        "trial_number", "round_id", "bins_per_plane", "num_planes", "model_num_planes",
+        "reconst_ld", "mse", *RATE_TYPES,
     }
     with csv_path.open(newline="") as file:
-        return [
-            {
-                key: float(value) if key in numeric_fields else value
-                for key, value in row.items()
-            }
+        records = [
+            {key: float(value) if key in numeric_fields else value for key, value in row.items()}
             for row in csv.DictReader(file)
         ]
-
-
-def compute_theoretical_bounds(minimum_mse: float = NOISE_POWER * 0.1) -> dict[str, np.ndarray]:
-    """Return Gaussian Wyner-Ziv and point-to-point rate-distortion bounds."""
-    conditional_variance = NOISE_POWER
-    assert minimum_mse > 0
-    mse_range = np.geomspace(min(minimum_mse, conditional_variance * 0.1), conditional_variance, 500)
-    return {
-        "distortion_db": 10 * np.log10(mse_range),
-        "wz_rate": 0.5 * np.log2(conditional_variance / mse_range),
-        "p2p_rate": 0.5 * np.log2((1 + NOISE_POWER) / mse_range),
-    }
-
-
-def plot_theoretical_bounds(axes: Sequence[Axes], bounds: dict[str, np.ndarray]) -> None:
-    """Draw the reference rate-distortion bounds on every supplied axis."""
-    for axis in axes:
-        axis.plot(bounds["wz_rate"], bounds["distortion_db"], "k-", linewidth=2, label="WZ bound")
-        axis.plot(
-            bounds["wz_rate"], bounds["distortion_db"] + 1.53,
-            "k:", linewidth=2, label="WZ + lattice gap",
-        )
-        axis.plot(
-            bounds["p2p_rate"], bounds["distortion_db"],
-            "g--", linewidth=1, alpha=0.5, label="P2P (no SI)",
-        )
-
-
-def plot_rate_comparison(csv_path: Path) -> Path:
-    """Plot each quantizer/prior rate and save the figure beside the source CSV."""
-    records = load_records(csv_path)
-    config_keys = sorted({str(record["config_key"]) for record in records})
+    architecture_keys = sorted({
+        (record["bins_per_plane"], record["model_num_planes"], record["reconst_ld"])
+        for record in records
+    })
     colors = plt.get_cmap("tab10").colors
-    markers = ("o", "s", "^", "v", "D", "P")
-    label_aliases = {
-        "independent_source_normalization": "legacy",
-        "shared_source_norm_author_init_hard_prior": "corrected",
-    }
-    styles: dict[str, PlotStyle] = {}
-    for index, key in enumerate(config_keys):
-        run_label, _, architecture, stage = key.split("|")
-        label = f"{label_aliases.get(run_label, run_label)} | {architecture} | {stage}"
-        styles[key] = PlotStyle(colors[index % len(colors)], markers[index % len(markers)], label)
+    multiple_run_labels = len({record["run_label"] for record in records}) > 1
 
-    figure, axes_array = plt.subplots(2, 2, figsize=(14, 11))
+    figure, axes_array = plt.subplots(1, 3, figsize=(18, 5.5))
     axes = tuple(axes_array.flatten())
-    plot_theoretical_bounds(
-        axes,
-        compute_theoretical_bounds(min(float(record["mse"]) for record in records) / 10**0.2),
+    minimum_mse = min(cast(float, record["mse"]) for record in records) / 10**0.2
+    mse_range = np.geomspace(min(minimum_mse, NOISE_POWER * 0.1), NOISE_POWER, 500)
+    bounds = 10 * np.log10(mse_range)
+    for axis in axes:
+        axis.plot(0.5 * np.log2(NOISE_POWER / mse_range), bounds, "k-", linewidth=2, label="WZ bound")
+        axis.plot(0.5 * np.log2(NOISE_POWER / mse_range), bounds + 1.53,
+                  "k:", linewidth=2, label="WZ + lattice gap")
+        axis.plot(0.5 * np.log2((1 + NOISE_POWER) / mse_range), bounds,
+                  "g--", linewidth=1, alpha=0.5, label="P2P (no SI)")
+    group_fields = (
+        "run_label", "codec", "phase", "bins_per_plane", "model_num_planes", "reconst_ld",
+        "trial_number",
     )
+    grouped_records = itertools.groupby(
+        sorted(records, key=lambda record: tuple(record[field] for field in group_fields)),
+        key=lambda record: tuple(record[field] for field in group_fields),
+    )
+    groups = [(key, sorted(group, key=lambda record: cast(float, record["num_planes"])))
+              for key, group in grouped_records]
 
     for axis, (rate_key, title) in zip(axes, RATE_TYPES.items(), strict=True):
-        for config_key, grouped_records in itertools.groupby(
-            sorted(records, key=lambda record: str(record["config_key"])),
-            key=lambda record: str(record["config_key"]),
-        ):
-            group = list(grouped_records)
-            style = styles[config_key]
-            axis.scatter(
+        labelled: set[tuple[str, str, str, float, float, float]] = set()
+        for key, group in groups:
+            run_label, codec, phase, bins, planes, reconst_ld, _ = key
+            style_key = (str(run_label), str(codec), str(phase), bins, planes, reconst_ld)
+            architecture = (bins, planes, reconst_ld)
+            run_prefix = f"{run_label} | " if multiple_run_labels else ""
+            color = colors[architecture_keys.index(architecture) % len(colors)]
+            frozen = phase == "frozen"
+            marker = {"O": ("o", "D"), "T": ("s", "^")}[str(codec)][frozen]
+            axis.plot(
                 [float(record[rate_key]) for record in group],
                 [10 * np.log10(float(record["mse"])) for record in group],
-                color=style.color,
-                marker=style.marker,
-                s=60,
-                alpha=0.7,
-                edgecolors="black",
-                linewidths=0.5,
-                label=style.label,
+                color=color,
+                marker=marker,
+                markerfacecolor="none" if frozen else color,
+                markeredgewidth=1.8 if frozen else 0.8,
+                linestyle="--" if frozen else "-",
+                linewidth=1.8,
+                markersize=8 if frozen else 6,
+                zorder=4 if frozen else 3,
+                label=(
+                    f"{run_prefix}{codec} {phase} | {int(cast(float, bins))}b × "
+                    f"{int(cast(float, planes))}p, λ={reconst_ld:g}"
+                    if style_key not in labelled else None
+                ),
             )
+            labelled.add(style_key)
         axis.set(xlabel="Rate (bits/symbol)", ylabel="Distortion (dB)", title=title)
         axis.grid(alpha=0.3)
-        axis.legend(fontsize=8, loc="upper right")
+        axis.legend(fontsize=7, loc="upper right")
 
     figure.tight_layout()
     plot_path = csv_path.with_suffix(".png")
@@ -304,19 +338,21 @@ def plot_rate_comparison(csv_path: Path) -> Path:
 
 
 def main() -> None:
-    """Run the configured experiment unless skipped, then plot available results."""
+    """Run the selected protocol codecs unless skipped, then plot available results."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-run", action="store_true", help="Skip experiments and only plot existing results")
-    parser.add_argument("--run-label", default="shared_source_normalization")
+    parser.add_argument("--run-label", default="protocol_two_round")
+    parser.add_argument("--codec", choices=("O", "T", "both"), default="O")
     args = parser.parse_args()
 
     out_dir = Path(__file__).parent / "results"
-    csv_path = out_dir / "quantizer_check.csv"
+    csv_path = out_dir / "protocol_quantizer_check.csv"
     if args.skip_run:
-        assert csv_path.exists(), f"No quantizer results found at {csv_path}."
+        assert csv_path.exists(), f"No protocol quantizer results found at {csv_path}."
         plot_path = plot_rate_comparison(csv_path)
     else:
-        plot_path = run_experiments(out_dir, args.run_label)
+        codec_names = CODEC_NAMES if args.codec == "both" else (cast(CodecName, args.codec),)
+        plot_path = run_experiments(out_dir, args.run_label, codec_names)
     print(f"Plot saved to: {plot_path}")
 
 

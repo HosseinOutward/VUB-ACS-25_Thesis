@@ -287,10 +287,19 @@ class _WZRoundCodec(BaseRoundCodec):
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         self._original_delta_vec = delta_vec
         bins, soft_codes, metadata = self.quantizer.encoding_process(delta_vec)
+        training_prior = self.quantizer.prior_calculator.compute_prior_from_network(
+            self.quantizer.coding_model,
+            bins,
+            self.quantizer.side_info_tensor(metadata),
+        )
+        training_prior_stage_rates = list(self.quantizer.prior_calculator.compute_plane_rates(
+            training_prior, bins, self.c_cfg.num_planes))
         record.update_record_fields(
             encoder_size=compressed_size(self.quantizer.coding_model.encoder_state_dict()),
             decoder_size=compressed_size(self.quantizer.coding_model.decoder_state_dict()),
             meta_data_size=compressed_size(metadata),
+            training_prior_rate=sum(training_prior_stage_rates),
+            training_prior_stage_rates=training_prior_stage_rates,
         )
         self.add_prior_to_record(bins, soft_codes, metadata, record)
         return {"payload_content": (bins, metadata)}
@@ -345,12 +354,6 @@ class _WZRoundCodec(BaseRoundCodec):
             prior_rate=sum(prior_stage_rates),
             marginal_stage_rates=marginal_stage_rates,
             marginal_rate=sum(marginal_stage_rates),
-        )
-        assert self.quantizer.training_prior_stage_rates is not None
-        assert self.quantizer.training_prior_rate is not None
-        record.update_record_fields(
-            training_prior_stage_rates=list(self.quantizer.training_prior_stage_rates),
-            training_prior_rate=self.quantizer.training_prior_rate,
         )
 
     def collect_element_rates(
