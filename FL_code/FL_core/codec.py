@@ -209,6 +209,10 @@ class BaseRoundCodec:
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         raise NotImplementedError
 
+    def take_history_normalization_factors(self) -> torch.Tensor | None:
+        """Return decoder-available factors for the reconstruction history, if this codec has any."""
+        return None
+
 
 class IdentityRoundCodec(BaseRoundCodec):
     """Round codec that reconstructs the original delta exactly."""
@@ -249,6 +253,7 @@ class BaseProtocol:
     sd_slices: Sequence[slice] | None
     cache_dir: Path | None
     cache_overwrite: bool
+    history_root: Path | None
     _schedule_placed: bool = False
 
     def __init_subclass__(cls) -> None:
@@ -271,6 +276,7 @@ class BaseProtocol:
         sd_slices: Sequence[slice] | None = None,
         cache_dir: Path | None = None,
         cache_overwrite: bool = False,
+        history_root: Path | None = None,
     ) -> None:
         self.protocol_name_full = protocol_name_full or type(self).protocol_name
         if options:
@@ -279,6 +285,7 @@ class BaseProtocol:
         self.sd_slices = sd_slices
         self.cache_dir = cache_dir
         self.cache_overwrite = cache_overwrite
+        self.history_root = history_root
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
@@ -364,6 +371,7 @@ def create_protocol(
     sd_slices: Sequence[slice] | None = None,
     cache_dir: Path | None = None,
     cache_overwrite: bool = False,
+    history_root: Path | None = None,
 ) -> BaseProtocol:
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
@@ -375,6 +383,7 @@ def create_protocol(
         sd_slices=sd_slices,
         cache_dir=cache_dir,
         cache_overwrite=cache_overwrite,
+        history_root=history_root,
     )
 
 

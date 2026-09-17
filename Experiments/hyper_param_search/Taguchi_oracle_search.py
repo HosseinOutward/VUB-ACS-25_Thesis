@@ -29,10 +29,14 @@ from Experiments.hyper_param_search.Taguchi_real_si import (  # noqa: E402
     main_effects,
     recommended_values,
 )
-from FL_code.FL_core.codec import Access, CompressionRecord, ReconstructionHistory  # noqa: E402
+from FL_code.FL_core.codec import Access, CompressionRecord  # noqa: E402
 from FL_code.FL_core.models import initialize_model  # noqa: E402
 from FL_code.FL_core.utils import StateDictManager, set_global_seed  # noqa: E402
-from FL_code.cancer_protocol.cancer_protocol import CancerRecord, Oracle_RoundCodec  # noqa: E402
+from FL_code.cancer_protocol.cancer_protocol import (  # noqa: E402
+    CancerRecord,
+    Oracle_RoundCodec,
+    ReconstructionHistory,
+)
 from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant  # noqa: E402
 from FL_code.run_fl import FLConfig  # noqa: E402
 
@@ -229,14 +233,11 @@ def model_slices() -> tuple[slice, ...]:
 
 def raw_history() -> ReconstructionHistory:
     """Build the decoder-visible five-round raw history used by every Oracle trial."""
-    history = ReconstructionHistory(
-        max_per_client=HISTORY_DEPTH,
-        routine_accesses=(Access.SERVER_ONLY,),
-    )
+    history = ReconstructionHistory(max_per_client=HISTORY_DEPTH)
     for history_round in range(ROUND_ID - HISTORY_DEPTH, ROUND_ID):
         for client_id in ALL_CLIENT_IDS:
             history.commit(
-                load_tensor(history_round, client_id).to(dtype=history.dtype),
+                load_tensor(history_round, client_id),
                 CompressionRecord(
                     history_round,
                     client_id,

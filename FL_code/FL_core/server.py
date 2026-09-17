@@ -31,6 +31,7 @@ def run_federated_server(
         sd_manager.get_slices(),
         cache_dir=cfg.protocol_cache_dir,
         cache_overwrite=cfg.protocol_cache_overwrite,
+        history_root=cfg.records_dir / "history",
     )
 
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")

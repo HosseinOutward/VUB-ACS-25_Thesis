@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -22,6 +22,16 @@ class ModelTrainingCacheConfig(Protocol):
 
     def training_cache_payload(self) -> Mapping[str, Any]:
         """Return only configuration values that determine trained model parameters."""
+
+
+@runtime_checkable
+class ContentHashable(Protocol):
+    """Contract for values whose logical contents can be streamed into a cache digest."""
+
+    logical_size: int
+
+    def update_content_hash(self, digest: Any) -> None:
+        """Append ordered logical float32 bytes to ``digest`` without materializing the value."""
 
 
 def cache_call(
@@ -105,19 +115,24 @@ def model_training_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 
 def _update_hash(digest: Any, value: Any) -> None:
+    # Tensor-like logical values share one framing so a retained history handle hashes exactly
+    # like the flat float32 tensor it represents, regardless of its physical backend.
+    if isinstance(value, torch.Tensor):
+        flat = value.detach().contiguous().reshape(-1)
+        _update_typed_hash(digest, value.dtype, tuple(value.shape), (
+            flat[start:start + HASH_CHUNK_ELEMENTS].cpu().view(torch.uint8).numpy()
+            for start in range(0, flat.numel(), HASH_CHUNK_ELEMENTS)
+        ))
+        return
+    if isinstance(value, ContentHashable):
+        # Physical storage (chunking, on-disk dtype, deduplication) must not leak into cache
+        # identity, so a stored history vector presents its header as a flat CPU float32 tensor
+        # and streams its own logical bytes afterward.
+        _update_typed_hash(digest, torch.float32, (value.logical_size,), ())
+        value.update_content_hash(digest)
+        return
     digest.update(f"{type(value).__module__}.{type(value).__qualname__}:".encode())
     if value is None:
-        return
-    if isinstance(value, torch.Tensor):
-        # Hash semantic tensor identity before its raw bytes so equal byte streams
-        # with different shapes or dtypes cannot share an entry.
-        digest.update(str(value.dtype).encode())
-        digest.update(struct.pack(f"!{value.ndim}q", *value.shape))
-        # Streamed in chunks: one `.cpu()` of a full side-information matrix is a
-        # multi-gigabyte host allocation, and the byte stream is the same either way.
-        flat = value.detach().contiguous().reshape(-1)
-        for start in range(0, flat.numel(), HASH_CHUNK_ELEMENTS):
-            digest.update(flat[start:start + HASH_CHUNK_ELEMENTS].cpu().view(torch.uint8).numpy())
         return
     if isinstance(value, BaseModel):
         _update_hash(digest, value.model_dump())
@@ -153,3 +168,19 @@ def _update_hash(digest: Any, value: Any) -> None:
         digest.update(struct.pack("!d", value))
         return
     raise TypeError(f"Cannot build a stable cache hash for {type(value).__name__}.")
+
+
+def _update_typed_hash(
+    digest: Any, dtype: torch.dtype, shape: tuple[int, ...], byte_chunks: Iterable[Any],
+) -> None:
+    """Hash a tensor-shaped value's dtype, shape, and ordered raw byte chunks.
+
+    Hashing semantic identity (dtype, shape) before raw bytes keeps equal byte streams of
+    different shapes or dtypes from sharing an entry; existing model-training cache identities
+    depend on this exact framing.
+    """
+    digest.update(f"{torch.Tensor.__module__}.{torch.Tensor.__qualname__}:".encode())
+    digest.update(str(dtype).encode())
+    digest.update(struct.pack(f"!{len(shape)}q", *shape))
+    for chunk in byte_chunks:
+        digest.update(chunk)

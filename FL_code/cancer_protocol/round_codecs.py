@@ -18,6 +18,7 @@ from FL_code.FL_core.codec import (
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
+from .optimized_history import StoredHistoryVector
 from .prior_code import PriorCalculator
 from .wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, WZcfgQuant
 
@@ -152,7 +153,8 @@ class _WZRoundCodec(BaseRoundCodec):
     quantizer: DedupedWZQuantizerCancer
     dump_element_metrics: bool = False
     _original_delta_vec: torch.Tensor | None = None
-    _prior_side_information: list[torch.Tensor] | None = None
+    _prior_side_information: list[torch.Tensor | StoredHistoryVector] | None = None
+    _decoded_history_norm_factors: torch.Tensor | None = None
 
     def options_to_config(
         self,
@@ -243,7 +245,7 @@ class _WZRoundCodec(BaseRoundCodec):
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor | StoredHistoryVector] | None]:
         """Return data available where this child trains its quantizer."""
         raise NotImplementedError("Subclasses must return the quantizer training data.")
 
@@ -252,12 +254,14 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> None:
         """Store server-visible SI for the separate conditional entropy-prior estimate."""
         self._prior_side_information = [
-            entry.tensor
+            entry.value
             for client_history in history.view(Access.SERVER_ONLY, client_id).values()
             for entry in client_history
         ]
 
-    def refresh_side_information(self, side_information: Sequence[torch.Tensor]) -> None:
+    def refresh_side_information(
+        self, side_information: Sequence[torch.Tensor | StoredHistoryVector]
+    ) -> None:
         """Replace a trained quantizer's decoder-visible SI for protocol-level reuse."""
         assert not self.quantizer.no_side_info, (
             "A no-SI quantizer cannot refresh side information.")
@@ -265,12 +269,11 @@ class _WZRoundCodec(BaseRoundCodec):
             "Side information cannot be refreshed before quantizer training.")
         assert len(side_information) == self.quantizer.side_info_size
         assert self.quantizer.vector_size is not None
-        assert all(
-            value.numel() == self.quantizer.vector_size for value in side_information)
+        assert all(value.numel() == self.quantizer.vector_size for value in side_information)
         self.quantizer.side_info_list_used = list(side_information)
 
     def build_quantizer(
-        self, x: torch.Tensor | None, si: list[torch.Tensor] | None
+        self, x: torch.Tensor | None, si: list[torch.Tensor | StoredHistoryVector] | None
     ) -> DedupedWZQuantizerCancer:
         """Train the ordinary decoder-side quantizer from the supplied target and SI."""
         assert x is not None and si is not None
@@ -402,16 +405,32 @@ class _WZRoundCodec(BaseRoundCodec):
                 ).cpu()
         self._original_delta_vec = None
 
+    def decoded_reconstruction(
+        self,
+        bins: torch.Tensor,
+        metadata: PreprocessMetadata,
+        record: CancerRecord,
+    ) -> torch.Tensor:
+        """Decode bins and retain transmitted normalization factors for history storage."""
+        stage_reconstructions = self.quantizer.decoding_stages_process((bins, metadata))
+        self._decoded_history_norm_factors = metadata.norm_factors
+        self.add_stage_distortion_to_record(stage_reconstructions, record)
+        return stage_reconstructions[-1]
+
+    def take_history_normalization_factors(self) -> torch.Tensor | None:
+        """Consume the factors transmitted with the most recently decoded reconstruction."""
+        factors = self._decoded_history_norm_factors
+        self._decoded_history_norm_factors = None
+        return factors
+
     def encode(self, delta_vec: torch.Tensor, record: CancerRecord) -> bytes:
         """Serialize the round payload after quantization and metric collection."""
         return compress_data_list(self.get_encod_payload(delta_vec, record))
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
         """Decode all refinement stages and return the committed final reconstruction."""
-        stage_reconstructions = self.quantizer.decoding_stages_process(
-            decompress_data_list(payload)["payload_content"])
-        self.add_stage_distortion_to_record(stage_reconstructions, record)
-        return stage_reconstructions[-1]
+        bins, metadata = decompress_data_list(payload)["payload_content"]
+        return self.decoded_reconstruction(bins, metadata, record)
 
 
 class T_RoundCodec(_WZRoundCodec):
@@ -420,12 +439,12 @@ class T_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
     quantizer_training_access: ClassVar[str] = "temporal"
-    si: list[torch.Tensor]
+    si: list[torch.Tensor | StoredHistoryVector]
     _send_quantizer_state: bool
 
     def extra_training_problems(
         self,
-    ) -> Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]]:
+    ) -> Sequence[tuple[torch.Tensor, Sequence[torch.Tensor | StoredHistoryVector]]]:
         """Return further (target, SI) problems to train on; one problem per round by default.
 
         The pair of hooks an experiment overrides to widen the training set without changing what
@@ -439,15 +458,15 @@ class T_RoundCodec(_WZRoundCodec):
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[None, list[torch.Tensor]]:
+    ) -> tuple[None, list[torch.Tensor | StoredHistoryVector]]:
         """Return worker-local history; the raw target arrives during pre-encode training."""
         entries = given_history.view(self.can_decode_where, client_id)[client_id]
         assert entries[-1].client_id == client_id
         assert entries[-1].access == self.can_decode_where
-        return None, [entry.tensor for entry in entries]
+        return None, [entry.value for entry in entries]
 
     def build_quantizer(
-        self, x: torch.Tensor | None, si: list[torch.Tensor] | None
+        self, x: torch.Tensor | None, si: list[torch.Tensor | StoredHistoryVector] | None
     ) -> DedupedWZQuantizerCancer:
         """Create an untrained worker-side quantizer and retain its legal SI."""
         assert x is None and si is not None
@@ -499,8 +518,8 @@ class Oracle_RoundCodec(T_RoundCodec):
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[None, list[torch.Tensor]]:
+    ) -> tuple[None, list[torch.Tensor | StoredHistoryVector]]:
         """Return server-visible history while leaving the raw target for pre-encode training."""
         history = given_history.view(self.can_decode_where, client_id)
         return None, [
-            entry.tensor for client_history in history.values() for entry in client_history]
+            entry.value for client_history in history.values() for entry in client_history]

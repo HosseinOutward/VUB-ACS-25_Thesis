@@ -22,11 +22,13 @@ from FL_code.FL_core.utils import (
 )
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
+from .optimized_history import StoredHistoryVector
 from .prior_code import INFERENCE_BATCH, DedupedPriorCalculator, PriorCalculator
 
 
 # Below this point, exact grouping costs more than the avoided RNN work.
 TRAINING_DEDUPLICATION_MIN_FRACTION = 0.1
+HistoryValue = torch.Tensor | StoredHistoryVector
 
 
 def new_rnn_model(
@@ -376,7 +378,7 @@ class WZQuantizerCancer:
 
         self.coding_model: EncoderDecoderLayeredRNN = self._new_coding_model(self.side_info_size)
 
-        self.side_info_list_used: list[torch.Tensor] | None = None
+        self.side_info_list_used: list[HistoryValue] | None = None
         self.vector_size: int | None = None
         self.training_prior_stage_rates: tuple[float, ...] | None = None
         self.training_prior_rate: float | None = None
@@ -452,8 +454,8 @@ class WZQuantizerCancer:
     def train_model(
         self,
         x_raw: torch.Tensor,
-        si_raw_list: Sequence[torch.Tensor] | None,
-        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
+        si_raw_list: Sequence[HistoryValue] | None,
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[HistoryValue]]] = (),
         problem_weights: tuple[float, ...] | None = None,
     ) -> None:
         """Train repeated quantizer attempts and keep the finite attempt with the lowest loss.
@@ -500,8 +502,8 @@ class WZQuantizerCancer:
     def _train_model_uncached(
         self,
         x_raw: torch.Tensor,
-        si_raw_list: Sequence[torch.Tensor] | None,
-        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]] = (),
+        si_raw_list: Sequence[HistoryValue] | None,
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[HistoryValue]]] = (),
         problem_weights: tuple[float, ...] | None = None,
     ) -> None:
         assert self.side_info_list_used is None
@@ -536,7 +538,7 @@ class WZQuantizerCancer:
         self,
         x_prep: torch.Tensor,
         side_info: torch.Tensor,
-        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[torch.Tensor]]],
+        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[HistoryValue]]],
         problem_weights: tuple[float, ...] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Append further training problems below the coded one, each normalized by its own target."""
@@ -756,9 +758,9 @@ class WZQuantizerCancer:
     def normalize_side_info_tensor(
         self,
         source_metadata: PreprocessMetadata,
-        side_information: Sequence[torch.Tensor],
+        side_information: Sequence[HistoryValue],
     ) -> torch.Tensor:
-        """Normalize and stack decoder side information."""
+        """Stream decoder-visible history into one target-normalized device matrix."""
         assert self.vector_size is not None, "Vector size must be known before side information is formatted."
         assert all(value.numel() == self.vector_size for value in side_information), (
             f"Each side-information vector must contain {self.vector_size} values.")
@@ -771,19 +773,33 @@ class WZQuantizerCancer:
             dtype=torch.float32,
         )
         for index, si in enumerate(side_information):
-            formatted[:, index] = self.preprocess_x(
-                si,
-                skip_outliers=True,
-                normalization_factors=source_metadata.norm_factors,
-            )[0].squeeze(1)
+            # Storage normalization was already inverted by read_range; this applies the target's.
+            # A stored read is already an owned chunk; only a caller's plain tensor needs a copy.
+            chunks = (
+                si.iter_chunks() if isinstance(si, StoredHistoryVector)
+                else ((slice(0, self.vector_size), si.clone()),)
+            )
+            for value_slice, chunk in chunks:
+                # Normalized before the device copy: CUDA float32 division differs from CPU by an
+                # ulp, which would change SI values the model and its training cache have seen.
+                for vector_slice, (scale, center) in zip(self.norm_slices, source_metadata.norm_factors, strict=True):
+                    overlap = slice(
+                        max(value_slice.start, vector_slice.start) - value_slice.start,
+                        min(value_slice.stop, vector_slice.stop) - value_slice.start,
+                    )
+                    if overlap.start < overlap.stop:
+                        chunk[overlap].sub_(center).div_(scale)
+                formatted[value_slice, index] = chunk
         return formatted
 
-    def set_side_information(self, side_info: Sequence[torch.Tensor]) -> None:
+    def set_side_information(self, side_info: Sequence[HistoryValue]) -> None:
         """Set the decoder-available side-information vectors used by decoding and conditional priors."""
         assert not self.no_side_info, "A no-side-information quantizer cannot accept side information."
         assert len(side_info) == self.side_info_size, (
             f"Quantizer requires {self.side_info_size} side-information vectors, got {len(side_info)}.")
-        assert self.vector_size is None or all(value.numel() == self.vector_size for value in side_info), (
+        assert self.vector_size is None or all(
+            value.numel() == self.vector_size for value in side_info
+        ), (
             f"Each side-information vector must contain {self.vector_size} values.")
         assert self.side_info_list_used is None, "Side information can only be set once per quantizer instance."
         self.side_info_list_used = list(side_info)
@@ -793,8 +809,8 @@ def _train_quantizer_parameters(
     quantizer_class: type[WZQuantizerCancer],
     c_cfg: WZcfgQuant,
     x_raw: torch.Tensor,
-    side_information: tuple[torch.Tensor, ...],
-    extra_training_pairs: tuple[tuple[torch.Tensor, tuple[torch.Tensor, ...]], ...] = (),
+    side_information: tuple[HistoryValue, ...],
+    extra_training_pairs: tuple[tuple[torch.Tensor, tuple[HistoryValue, ...]], ...] = (),
     problem_weights: tuple[float, ...] | None = None,
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
     # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss

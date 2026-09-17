@@ -27,7 +27,7 @@ from FL_code.run_fl import FLConfig
 # Bump whenever this module's execution semantics change in a way that could produce different
 # records for an unchanged plan/trace, so a completed case cannot be silently reused as if it
 # still matched.
-_EXPERIMENT_SEMANTICS_VERSION = 1
+_EXPERIMENT_SEMANTICS_VERSION = 3
 _CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -125,8 +125,13 @@ def load_fl_config(path: Path) -> FLConfig:
 
 def case_protocol(plan: ReplayPlan, case: ReplayCase, manager: StateDictManager | None = None) -> _WZProtocol:
     """Build the case using the protocol's schedule and codec configuration APIs."""
-    protocol = create_protocol(case.protocol, None if manager is None else manager.get_slices(),
-                               plan.cache_root, plan.cache_overwrite)
+    protocol = create_protocol(
+        case.protocol,
+        None if manager is None else manager.get_slices(),
+        plan.cache_root,
+        plan.cache_overwrite,
+        history_root=_case_dir(plan, case) / "history",
+    )
     assert isinstance(protocol, _WZProtocol), "Sparse history experiments require a WZ protocol."
     protocol.set_schedule(case.start_round, case.round_codecs)
     return protocol
@@ -145,6 +150,7 @@ def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> i
 def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any],
                     protocol: _WZProtocol) -> dict[str, Any]:
     """Build the part of `complete.json` that decides whether a case can be reused."""
+    protocol_snapshot = json.loads(json.dumps(protocol.config_snapshot()))
     return {
         "experiment_semantics_version": _EXPERIMENT_SEMANTICS_VERSION,
         "trace": trace_identity,
@@ -154,14 +160,14 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
             "protocol": case.protocol, "start_round": case.start_round,
             "client_ids": list(case.client_ids), "round_codecs": list(case.round_codecs),
         },
-        "protocol_snapshot": json.loads(json.dumps(protocol.config_snapshot())),
-        "history_representation": "exact_raw",
+        "protocol_snapshot": protocol_snapshot,
+        "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
             "history_source": "raw_updates",
-            "history_replacement": "raw_after_measurement",
+            "history_replacement": "raw_source_transformed_by_history_storage_after_measurement",
             "client_order": "normal",
             "frozen_si_refresh": protocol.refresh_frozen_si,
-            "server_history": "exact_raw_granted",
+            "server_history": "decoder_visible_values_in_configured_retained_representation",
         },
     }
 
@@ -244,6 +250,7 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
         return records_path
     assert not case_dir.exists(), (
         f"Incomplete case output: {case_dir}. Use a new output root or remove that case before retrying.")
+    case_dir.mkdir(parents=True)
 
     for round_id in range(case.start_round - depth, case.start_round):
         for client_id in range(cfg.num_clients):
@@ -251,7 +258,6 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
             for history in protocol.histories:
                 history.commit(delta, CompressionRecord(round_id, client_id, "raw_history"), Access.TEMPORAL_TOO)
 
-    case_dir.mkdir(parents=True)
     for round_id in range(case.start_round, case.start_round + len(case.round_codecs)):
         for client_id in range(cfg.num_clients):
             delta = trace.load_delta(round_id, client_id)

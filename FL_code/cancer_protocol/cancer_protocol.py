@@ -4,12 +4,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import copy
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import torch
 
 from FL_code.FL_core.codec import Access, BaseProtocol, BaseRoundCodec, CompressionRecord
 
+from .optimized_history import HistoryStorageConfig, HistoryStore, StoredHistoryVector
 from .round_codecs import (
     CancerRecord,
     F_RoundCodec,
@@ -23,7 +24,7 @@ from .wz_quantizer import WZcfgQuant
 @dataclass(frozen=True, slots=True)
 class HistoryEntry:
     """One reconstructed delta committed by the WZ protocol after a successful decode."""
-    tensor: torch.Tensor
+    value: StoredHistoryVector
     round_id: int
     client_id: int
     access: Access
@@ -40,14 +41,16 @@ class ReconstructionHistory:
 
     def __init__(
         self, max_per_client: int | None,
-        # Reconstructions are retained exactly as the decoder produced them. Kept as an asserted
-        # field rather than a bare assumption because half precision cannot hold these values:
-        # mean |delta| is around 1e-5, already inside float16's subnormals.
-        dtype: torch.dtype = torch.float32,
+        *,
+        storage_config: HistoryStorageConfig = HistoryStorageConfig(),
+        sd_slices: Sequence[slice] | None = None,
+        history_root: Path | None = None,
+        protocol_name: str = "unknown",
     ) -> None:
         assert max_per_client != 0, 'to disable reconstruction history, set max_per_client to None'
         self.max_per_client: int = max_per_client or 0
-        self.dtype: torch.dtype = dtype
+        self.storage_config = storage_config
+        self._store = HistoryStore(storage_config, sd_slices, history_root, protocol_name)
         self._server: dict[int, list[HistoryEntry]] = {}
         self._temporal: dict[int, list[HistoryEntry]] = {}
         self.frozen: bool = self.max_per_client == 0
@@ -57,7 +60,7 @@ class ReconstructionHistory:
         return {
             "implementation": f"{type(self).__module__}.{type(self).__qualname__}",
             "max_per_client": self.max_per_client,
-            "dtype": str(self.dtype),
+            "storage_config": self.storage_config.model_dump(mode="json"),
         }
 
     def copy(self) -> ReconstructionHistory:
@@ -75,20 +78,28 @@ class ReconstructionHistory:
         }
         return copied
 
-    def commit(self, reconst: torch.Tensor, record: CompressionRecord, access: Access) -> None:
+    def commit(
+        self, reconst: torch.Tensor, record: CompressionRecord, access: Access,
+        *, normalization_factors: torch.Tensor | None = None,
+    ) -> None:
         """Commit a reconstructed tensor to every ledger allowed to retain it.
 
-        Stores a clone: `reconst` is typically a round codec's freshly decoded tensor, but
-        nothing prevents a caller from mutating it afterward, and a stored history entry must
-        stay exactly what was committed.
+        The store owns the retained copy: `reconst` is typically a round codec's freshly decoded
+        tensor, but nothing prevents a caller from mutating it afterward, and a stored history
+        entry must stay exactly what was committed.
         """
         assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
-        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
+        assert reconst.dtype is torch.float32 and reconst.device == torch.device("cpu")
         if access is Access.NONE:
             return
 
         entry = HistoryEntry(
-            tensor=reconst.clone(),
+            value=self._store.create(
+                reconst,
+                round_id=record.round_id,
+                client_id=record.client_id,
+                normalization_factors=normalization_factors,
+            ),
             round_id=record.round_id,
             client_id=record.client_id,
             access=access,
@@ -107,13 +118,18 @@ class ReconstructionHistory:
         happens to be raw.
         """
         assert not self.frozen, "ReconstructionHistory is frozen and cannot be modified."
-        assert reconst.dtype == self.dtype and reconst.device == torch.device("cpu")
+        assert reconst.dtype is torch.float32 and reconst.device == torch.device("cpu")
         server_ledger = self._server.get(client_id)
         assert server_ledger and server_ledger[-1].round_id == round_id, (
             f"No latest reconstruction exists for round {round_id}, client {client_id}.")
         previous = server_ledger[-1]
         replacement = HistoryEntry(
-            tensor=reconst.clone(),
+            value=self._store.create(
+                reconst,
+                round_id=round_id,
+                client_id=client_id,
+                normalization_factors=previous.value.normalization_factors(),
+            ),
             round_id=previous.round_id,
             client_id=previous.client_id,
             access=previous.access,
@@ -174,6 +190,7 @@ class _WZProtocol(BaseProtocol):
     refresh_frozen_si: bool = True
     retrained_prior_uses_server_si: bool = True
     last_trained_codec: dict[int, _WZRoundCodec]
+    history_storage_config: ClassVar[HistoryStorageConfig] = HistoryStorageConfig()
 
     def __init__(
         self,
@@ -182,6 +199,7 @@ class _WZProtocol(BaseProtocol):
         sd_slices: Sequence[slice] | None = None,
         cache_dir: Path | None = None,
         cache_overwrite: bool = False,
+        history_root: Path | None = None,
     ) -> None:
         super().__init__(
             options,
@@ -189,9 +207,16 @@ class _WZProtocol(BaseProtocol):
             sd_slices,
             cache_dir,
             cache_overwrite,
+            history_root,
         )
         self.last_trained_codec = {}
-        self._recons_history = ReconstructionHistory(self.max_per_client_recons_history)
+        self._recons_history = ReconstructionHistory(
+            self.max_per_client_recons_history,
+            storage_config=self.history_storage_config,
+            sd_slices=self.sd_slices,
+            history_root=self.history_root,
+            protocol_name=self.protocol_name_full,
+        )
         self.histories = (self._recons_history,)
         self.allocate_training_histories()
 
@@ -202,12 +227,18 @@ class _WZProtocol(BaseProtocol):
         self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
     ) -> None:
         """Commit the round's reconstruction under the access level that codec decodes with."""
+        normalization_factors = round_codec.take_history_normalization_factors()
         for history in self.histories:
-            history.commit(reconst, record, round_codec.can_decode_where)
+            history.commit(
+                reconst,
+                record,
+                round_codec.can_decode_where,
+                normalization_factors=normalization_factors,
+            )
 
     def training_problem(
         self, codec: _WZRoundCodec, round_id: int, client_id: int
-    ) -> tuple[torch.Tensor | None, list[torch.Tensor] | None]:
+    ) -> tuple[torch.Tensor | None, list[torch.Tensor | StoredHistoryVector] | None]:
         """Return the (target, SI) this codec trains on, read from the decoder-visible ledger."""
         return codec.get_training_data(self._recons_history, client_id)
 
@@ -255,7 +286,7 @@ class _WZProtocol(BaseProtocol):
         # advance; refreshing is silently inapplicable rather than a configuration error.
         if self.refresh_frozen_si and not previous.quantizer.no_side_info:
             side_information = [
-                entry.tensor
+                entry.value
                 for client_history in \
                      self._recons_history.view(previous.can_decode_where, client_id).values()
                 for entry in client_history
@@ -291,6 +322,9 @@ class _WZProtocol(BaseProtocol):
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
         snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
         snapshot["history"] = self._recons_history.config_snapshot()
+        snapshot["history"]["normalization_factor_source"] = (
+            "decoder_payload_metadata_else_reconstruction"
+        )
         # Codec facts and resolved transport settings, so D/E read oracle grants and rate-field
         # availability from here rather than inferring them from a display label like codec_id.
         for round_name, entry in snapshot["round_codecs"].items():
@@ -322,12 +356,24 @@ class WZCancerProtocol(_WZProtocol):
         self,
         refresh_frozen_si: bool = True,
         retrained_prior_uses_server_si: bool = True,
+        history_normalize: bool = False,
+        history_dtype: Literal["float32", "float16", "bfloat16"] = "float32",
+        history_deduplicate: bool = False,
+        history_disk: bool = False,
+        history_chunk_elements: int = 1 << 20,
     ) -> None:
-        """Configure the SI-refresh and retrained-prior policies; placement uses `set_schedule`."""
+        """Configure SI policies and the immutable reconstruction-history representation."""
         assert isinstance(refresh_frozen_si, bool)
         assert isinstance(retrained_prior_uses_server_si, bool)
         self.refresh_frozen_si = refresh_frozen_si
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
+        self.history_storage_config = HistoryStorageConfig(
+            normalize=history_normalize,
+            dtype=history_dtype,
+            deduplicate=history_deduplicate,
+            disk=history_disk,
+            chunk_elements=history_chunk_elements,
+        )
 
 
 __all__ = [
