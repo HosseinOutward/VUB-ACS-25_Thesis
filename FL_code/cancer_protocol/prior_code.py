@@ -12,7 +12,7 @@ from FL_code.FL_core.cache import cache_call, model_training_hash
 from .brent_wz_models import EncoderDecoderLayeredRNN
 
 if TYPE_CHECKING:
-    from .wz_quantizer import WZcfgQuant
+    from .wz_quantizer import SideInfoMatrix, WZcfgQuant
 
 
 # Rows per full-vector inference pass. The layered RNN holds one hidden state per layer per
@@ -60,7 +60,7 @@ class PriorCalculator:
     def compute_prior_from_network(
         model: EncoderDecoderLayeredRNN,
         bins_vec: torch.Tensor,
-        side_info: torch.Tensor,
+        side_info: SideInfoMatrix | torch.Tensor,
         batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Run a trained quantizer/prior network over all bins and return per-plane probabilities."""
@@ -80,7 +80,7 @@ class PriorCalculator:
     def prior_loss(
         model: EncoderDecoderLayeredRNN,
         training_input: tuple[torch.Tensor, torch.Tensor],
-        side_info: torch.Tensor,
+        side_info: SideInfoMatrix | torch.Tensor,
         epoch: int,
         c_cfg: WZcfgQuant,
         sample_weights: torch.Tensor | None,
@@ -110,7 +110,7 @@ class PriorCalculator:
     def make_trained_prior_model(
         bins_vec: torch.Tensor,
         soft_codes: torch.Tensor,
-        side_info: torch.Tensor,
+        side_info: SideInfoMatrix | torch.Tensor,
         c_cfg: WZcfgQuant,
         batch_size: int = 50_000,
         *,
@@ -158,7 +158,7 @@ class PriorCalculator:
 def _train_prior_model(
     bins_vec: torch.Tensor,
     soft_codes: torch.Tensor,
-    side_info: torch.Tensor,
+    side_info: SideInfoMatrix | torch.Tensor,
     c_cfg: WZcfgQuant,
     batch_size: int,
     *,
@@ -204,7 +204,7 @@ def _train_prior_model(
 def _train_prior_parameters(
     bins_vec: torch.Tensor,
     soft_codes: torch.Tensor,
-    side_info: torch.Tensor,
+    side_info: SideInfoMatrix | torch.Tensor,
     c_cfg: WZcfgQuant,
     batch_size: int,
 ) -> dict[str, torch.Tensor]:
@@ -228,7 +228,7 @@ class DedupedPriorCalculator(PriorCalculator):
     def compute_prior_from_network(
         model: EncoderDecoderLayeredRNN,
         bins_vec: torch.Tensor,
-        side_info: torch.Tensor,
+        side_info: SideInfoMatrix | torch.Tensor,
         batch_size: int = INFERENCE_BATCH,
     ) -> torch.Tensor:
         """Compute priors for unique (bins, side info) rows and broadcast them back to duplicates."""

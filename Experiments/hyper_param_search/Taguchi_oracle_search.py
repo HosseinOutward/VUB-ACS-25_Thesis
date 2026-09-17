@@ -35,8 +35,8 @@ from FL_code.FL_core.utils import StateDictManager, set_global_seed  # noqa: E40
 from FL_code.cancer_protocol.cancer_protocol import (  # noqa: E402
     CancerRecord,
     Oracle_RoundCodec,
-    ReconstructionHistory,
 )
+from FL_code.cancer_protocol.history import ReconstructionHistory  # noqa: E402
 from FL_code.cancer_protocol.wz_quantizer import WZcfgQuant  # noqa: E402
 from FL_code.run_fl import FLConfig  # noqa: E402
 

@@ -27,7 +27,7 @@ from FL_code.run_fl import FLConfig
 # Bump whenever this module's execution semantics change in a way that could produce different
 # records for an unchanged plan/trace, so a completed case cannot be silently reused as if it
 # still matched.
-_EXPERIMENT_SEMANTICS_VERSION = 3
+_EXPERIMENT_SEMANTICS_VERSION = 4
 _CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -130,7 +130,6 @@ def case_protocol(plan: ReplayPlan, case: ReplayCase, manager: StateDictManager 
         None if manager is None else manager.get_slices(),
         plan.cache_root,
         plan.cache_overwrite,
-        history_root=_case_dir(plan, case) / "history",
     )
     assert isinstance(protocol, _WZProtocol), "Sparse history experiments require a WZ protocol."
     protocol.set_schedule(case.start_round, case.round_codecs)
@@ -164,10 +163,10 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
             "history_source": "raw_updates",
-            "history_replacement": "raw_source_transformed_by_history_storage_after_measurement",
+            "history_replacement": "raw_source_prefix_compressed_after_measurement",
             "client_order": "normal",
             "frozen_si_refresh": protocol.refresh_frozen_si,
-            "server_history": "decoder_visible_values_in_configured_retained_representation",
+            "server_history": "decoder_visible_prefix_compressed_values",
         },
     }
 

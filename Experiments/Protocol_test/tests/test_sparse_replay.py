@@ -12,7 +12,7 @@ from torch import nn
 
 from Experiments.Protocol_test import records, sparse_replay
 from FL_code.FL_core.codec import Access, CompressionRecord
-from FL_code.cancer_protocol.cancer_protocol import ReconstructionHistory
+from FL_code.cancer_protocol.history import ReconstructionHistory
 
 SEED = 43
 TRAIN_TOKEN = f"T|training_seed={SEED}"
@@ -54,8 +54,12 @@ class _FakeProtocol:
         self._snapshot_tag = snapshot_tag
         self.histories = (ReconstructionHistory(depth),)
 
-    def config_snapshot(self) -> dict[str, str]:
-        return {"implementation": "test", "tag": self._snapshot_tag}
+    def config_snapshot(self) -> dict[str, Any]:
+        return {
+            "implementation": "test",
+            "tag": self._snapshot_tag,
+            "history": self.histories[0].config_snapshot(),
+        }
 
 
 def _write_plan(tmp_path: Path, cases: tuple[sparse_replay.ReplayCase, ...], **overrides: Any) -> Path:
@@ -99,7 +103,11 @@ def _recording_simulate(seen: list[tuple[int, int, list[float]]]) -> Any:
                   _manager: object, output: Path, *_metrics: object) -> torch.Tensor:
         history = protocol.histories[0]
         view = history.view(Access.SERVER_ONLY, client_id)
-        seen.append((round_id, client_id, [view[c][-1].tensor.item() for c in sorted(view)]))
+        seen.append((
+            round_id,
+            client_id,
+            [view[c][-1].value.materialize().item() for c in sorted(view)],
+        ))
         reconst = delta * 0 - 1  # deliberately distinct from the raw delta, so replace_latest is observable
         history.commit(reconst, CompressionRecord(round_id, client_id, "T"), Access.TEMPORAL_TOO)
         start_round = first_round.setdefault(output, round_id)
@@ -202,7 +210,7 @@ def test_raw_history_is_replaced_with_raw_after_measurement(
     # both rounds 5 and 6 for client 1, so the round-5 entry is index 0, not the latest.
     server_view = protocol.histories[0].view(Access.SERVER_ONLY, 0)
     round5_entry = server_view[1][0]
-    assert round5_entry.round_id == 5 and round5_entry.tensor.item() == 51.0
+    assert round5_entry.round_id == 5 and round5_entry.value.materialize().item() == 51.0
     assert round5_entry.access is Access.TEMPORAL_TOO
 
 

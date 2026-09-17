@@ -11,6 +11,7 @@ from FL_code.FL_core.utils import compress_data_list, decompress_data_list
 from FL_code.cancer_protocol.bin_coder.coded_rounds import TRansOraclePriorRoundCodec
 from FL_code.cancer_protocol.bin_coder.rans_coder import HEADER, RansConfig
 from FL_code.cancer_protocol.bin_coder.rans_mixin import RansRoundMixin
+from FL_code.cancer_protocol.history import HistoryVector
 from FL_code.cancer_protocol.round_codecs import CancerRecord, T_RoundCodec
 
 
@@ -144,7 +145,7 @@ def test_trr_oracle_prior_grant_travels_on_the_wire_and_decodes_independently() 
     torch.manual_seed(0)
     positions = 96
     delta = torch.randn(positions)
-    si = [torch.randn(positions), torch.randn(positions)]
+    si = [HistoryVector(torch.randn(positions)), HistoryVector(torch.randn(positions))]
 
     encoder = TRansOraclePriorRoundCodec(_tiny_wz_options(positions, rans_lanes=4), "TRR")
     encoder.build_quantizer(None, si)
@@ -184,7 +185,7 @@ def test_seeded_training_leaves_caller_rng_identical_on_hit_and_miss(tmp_path: A
     """Cache hits skip training; a miss must fork+restore RNG so both leave it unperturbed."""
     positions = 64
     delta = torch.randn(positions)
-    si = [torch.randn(positions), torch.randn(positions)]
+    si = [HistoryVector(torch.randn(positions)), HistoryVector(torch.randn(positions))]
     cache_dir = tmp_path / "cache"
     device = torch.cuda.current_device()
 
@@ -229,7 +230,7 @@ def test_matched_transports_share_the_cached_quantizer_and_a_changed_seed_misses
     positions = 96
     torch.manual_seed(3)
     delta = torch.randn(positions)
-    si = [torch.randn(positions), torch.randn(positions)]
+    si = [HistoryVector(torch.randn(positions)), HistoryVector(torch.randn(positions))]
     cache_dir = tmp_path / "cache"
 
     plain = T_RoundCodec(_tiny_wz_options(positions, cache_dir=cache_dir), "T")

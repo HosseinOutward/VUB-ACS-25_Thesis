@@ -139,9 +139,6 @@ class StagedIndexTransportMixin:
             self._oracle_prior = self._load_oracle_prior(metadata, self.oracle_prior_grant)
         bins = self.decode_staged_indices(transmitted, metadata)
         stage_reconstructions = self.quantizer.decoding_stages_process((bins, metadata))
-        # Focused transport hosts use lightweight metadata stand-ins; production WZ payloads carry
-        # the normalization factors that the protocol consumes immediately after this decode.
-        self._decoded_history_norm_factors = getattr(metadata, "norm_factors", None)
         self.add_stage_distortion_to_record(stage_reconstructions, record)
         return stage_reconstructions[-1]
 

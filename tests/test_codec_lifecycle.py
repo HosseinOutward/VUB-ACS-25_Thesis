@@ -7,9 +7,18 @@ import torch
 
 from FL_code.FL_core.codec import Access, CompressionRecord, IdentityRoundCodec
 from FL_code.cancer_protocol.cancer_protocol import WZCancerProtocol
+from FL_code.cancer_protocol.history import CompressedReconstructionHistory
 from FL_code.cancer_protocol.round_codecs import F_RoundCodec, T_RoundCodec, _WZRoundCodec
 
 TRAIN_TOKEN = "T|bins_per_plane=2|num_planes=1"
+
+
+def test_protocol_always_uses_compressed_reconstruction_history() -> None:
+    protocol = WZCancerProtocol()
+
+    assert isinstance(protocol._recons_history, CompressedReconstructionHistory)
+    assert protocol.config_snapshot()["history"]["implementation"].endswith(
+        "CompressedReconstructionHistory")
 
 
 def test_set_schedule_places_training_token_then_freezes_forever() -> None:
@@ -111,7 +120,7 @@ def test_training_then_frozen_round_reuses_the_exact_codec(
     reused = protocol.create_round_codec(start_round + 1, 0)
     assert reused is codec
     assert reused.round_name_full == "F"
-    assert torch.equal(reused.quantizer.side_info_list_used[-1], latest)
+    assert torch.equal(reused.quantizer.side_info_list_used[-1].materialize(), latest)
 
     reused.pre_encode_training_steps(delta)
     assert training_calls == 1, "a frozen round must not retrain the quantizer"
@@ -186,5 +195,7 @@ def test_two_selected_workers_keep_distinct_frozen_codecs_and_si(
     }
     assert reused[0] is codecs[0] and reused[1] is codecs[1]
     assert training_calls == {0: 1, 1: 1}, "reuse on frozen rounds must not retrain either client"
-    assert torch.equal(reused[0].quantizer.side_info_list_used[-1], torch.full((4,), 10.0))
-    assert torch.equal(reused[1].quantizer.side_info_list_used[-1], torch.full((4,), 11.0))
+    assert torch.equal(
+        reused[0].quantizer.side_info_list_used[-1].materialize(), torch.full((4,), 10.0))
+    assert torch.equal(
+        reused[1].quantizer.side_info_list_used[-1].materialize(), torch.full((4,), 11.0))

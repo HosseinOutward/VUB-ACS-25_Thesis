@@ -353,6 +353,7 @@ def main() -> None:
     from FL_code.FL_core.utils import set_global_seed
 
     from ..prior_code import PriorCalculator
+    from ..history import HistoryVector
     from ..wz_quantizer import DedupedWZQuantizerCancer, WZcfgQuant
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -398,13 +399,13 @@ def main() -> None:
     )
     train_target, train_si = source(args.size)
     quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
-    quantizer.train_model(train_target, [train_si])
+    quantizer.train_model(train_target, [HistoryVector(train_si)])
 
     target, si = source(args.size)
-    quantizer.side_info_list_used = [si]
+    quantizer.side_info_list_used = [HistoryVector(si)]
     bins, soft_codes, metadata = quantizer.encoding_process(target)
     assert soft_codes is not None
-    side_info = quantizer.normalize_side_info_tensor(metadata, [si])
+    side_info = quantizer.normalize_side_info_tensor(metadata, [HistoryVector(si)])
     prior_model = PriorCalculator.make_trained_prior_model(
         bins.long(), soft_codes, side_info,
         quantizer_config.model_copy(update={"marginal_loss": False}))

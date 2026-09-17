@@ -22,7 +22,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
 from FL_code.FL_core.utils import StateDictManager, set_global_seed
-from FL_code.cancer_protocol.cancer_protocol import ReconstructionHistory, WZCancerProtocol
+from FL_code.cancer_protocol.cancer_protocol import WZCancerProtocol
+from FL_code.cancer_protocol.history import ReconstructionHistory
 
 
 CodecName = Literal["O", "T"]

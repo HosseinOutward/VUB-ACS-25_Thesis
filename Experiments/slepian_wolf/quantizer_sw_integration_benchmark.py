@@ -29,6 +29,7 @@ from Experiments.slepian_wolf.oracle_index_mapping_mixin import (
     OracleValueOrderedIndexMixin,
 )
 from FL_code.cancer_protocol.prior_code import PriorCalculator
+from FL_code.cancer_protocol.history import HistoryVector
 from FL_code.cancer_protocol.round_codecs import Oracle_RoundCodec
 from FL_code.cancer_protocol.bin_coder.sw_coder import SWCoderConfig, SlepianWolfCodec
 from FL_code.cancer_protocol.wz_quantizer import (
@@ -158,7 +159,7 @@ def _codec(
     codec.c_cfg = config
     codec.quantizer = quantizer
     codec._send_quantizer_state = False
-    codec.refresh_side_information([side_information])
+    codec.refresh_side_information([HistoryVector(side_information)])
     return codec
 
 
@@ -216,7 +217,7 @@ def run_quantizer_sw_comparison(
         cache_dir=cache_dir,
     )
     quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
-    quantizer.train_model(training_target, [training_side_information])
+    quantizer.train_model(training_target, [HistoryVector(training_side_information)])
 
     sw_config = SWCoderConfig(block_length=block_length, code_seed=seed)
     baseline = _codec(
