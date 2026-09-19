@@ -27,6 +27,7 @@
 /Experiments/Protocol_test/final_experiment_reports/**/results/archive/
 /Experiments/Protocol_test/final_experiment_reports/**/results/records/
 /Experiments/Protocol_test/final_experiment_reports/**/results/*/records/
+/Experiments/Protocol_test/final_experiment_reports/**/runs/
 
 # Intentionally local source and test files
 Experiments/statistical_relation_boosting/results/history/*/logs/*

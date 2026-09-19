@@ -6,6 +6,15 @@ Naming: `YYYY-MM_topic/`.
 
 ---
 
+### 2026-09 — Sparse initial side information
+`2026-09_sparse_initial_si/`
+
+**How do O and T behave when their five-round initial SI is raw versus classically quantized?** Runs
+30-client ResNet-18/SVHN windows starting at rounds 5, 10, and 20 with three learned binary planes
+and the schedule `(codec, F×6)`.
+
+---
+
 ### 2026-08 — Cross-worker side information
 `2026-08_cross_worker_side_information/`
 

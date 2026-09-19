@@ -1,8 +1,8 @@
-"""Plot staged RD and reuse drift from completed cases, with each rate definition kept explicit.
+"""Plot averaged staged RD views from complete or explicitly incomplete sparse-replay cases.
 
-Reads one completed sparse-replay output root through `records.read_completed_case` (the shared
-runner/analysis completion contract) and renders staged rate-distortion figures plus a comparison
-gap table. Never guesses provenance a completed case did not record.
+Reads declared cases from one sparse-replay output root and renders overall, per-start, and
+per-training-cycle RD figures plus comparison and timing tables. Unfinished cases contribute only
+their validated record prefix, with `INCOMPLETE` embedded in every plot filename and title.
 """
 
 from __future__ import annotations
@@ -23,7 +23,11 @@ from Experiments.Protocol_test import records
 from Experiments.Protocol_test.rd_metrics import GAP_METRIC_NAME, rd_curve_gap
 
 RATE_FIELDS = ("prior_stage_rates", "coder_stage_rates", "final_bytes")
-RATE_LABELS = ("Estimated conditional rate", "Entropy-coder rate", "Serialized payload rate (final-stage point)")
+RATE_LABELS = (
+    "Cumulative estimated conditional rate",
+    "Cumulative entropy-coder rate",
+    "Serialized payload rate (final-stage point)",
+)
 # Only staged rate sources give a multi-point curve; `final_bytes` is one point, not a curve.
 _CURVE_RATE_FIELDS = RATE_FIELDS[:2]
 
@@ -37,23 +41,33 @@ def numeric_list(value: object, field: str, records_path: Path) -> NDArray[np.fl
     return values
 
 
-def load_completed_records(output_root: Path) -> pd.DataFrame:
-    """Read every finished case under one output root via D's shared completion contract.
-
-    Globs `cases/<codec_id>/<case_id>/` directly beneath `output_root`; a matched directory with
-    no `complete.json` is unfinished output and fails loudly through `read_completed_case` rather
-    than silently vanishing from the plot.
-    """
-    case_dirs = sorted(path for path in output_root.glob("cases/*/*") if path.is_dir())
-    assert case_dirs, f"No case directories under {output_root}."
-    frames = []
-    for case_dir in case_dirs:
-        frame = records.read_completed_case(case_dir)
-        frame["records_path"] = str(case_dir / "compression_records.csv")
-        frames.append(frame)
+def load_available_records(output_root: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read every available valid case prefix and report coverage of the declared plan."""
+    manifest = json.loads((output_root / "test_config.json").read_text())["identity"]
+    frames, coverage = [], []
+    for case in manifest["cases"]:
+        case_dir = output_root / "cases" / case["codec_id"] / case["case_id"]
+        records_path, completion = case_dir / "compression_records.csv", case_dir / "complete.json"
+        expected_rows = len(case["client_ids"]) * len(case["round_codecs"])
+        if records_path.is_file():
+            identity = {"trace": manifest["trace"], "case": case}
+            frame = (records.read_completed_case(case_dir) if completion.is_file()
+                     else records.read_available_case(case_dir, identity))
+            frame["records_path"] = str(records_path)
+            frames.append(frame)
+            row_count = len(frame)
+        else:
+            row_count = 0
+        coverage.append({
+            "codec_id": case["codec_id"], "initial_si": case["initial_si"],
+            "case_id": case["case_id"],
+            "rows": row_count, "expected_rows": expected_rows,
+            "complete": completion.is_file() and row_count == expected_rows,
+        })
+    assert frames, f"No case records under {output_root}."
     combined = pd.concat(frames, ignore_index=True)
     combined["experiment"] = output_root.name
-    return combined
+    return combined, pd.DataFrame(coverage)
 
 
 def round_curve(rows: pd.DataFrame, records_path: Path, rate_field: str) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
@@ -86,8 +100,8 @@ def stage_points(case_records: pd.DataFrame) -> pd.DataFrame:
     worker sets). Availability is decided per case: a rate source absent from the whole case is
     unavailable for that codec, while one missing from only some rounds fails in `round_curve`.
     """
-    keys = ["experiment", "codec_id", "case_id", "start_round", "round_id"]
-    meta_keys = ["relative_round", "phase", "client_ids", "trace_identity_digest"]
+    keys = ["experiment", "codec_id", "initial_si", "case_id", "start_round", "round_id"]
+    meta_keys = ["relative_round", "cycle", "phase", "client_ids", "trace_identity_digest"]
     points = []
     for _, case_rows in case_records.groupby(["experiment", "codec_id", "case_id"], sort=True):
         fields = [field for field in RATE_FIELDS if field in case_rows.columns and case_rows[field].notna().any()]
@@ -102,45 +116,93 @@ def stage_points(case_records: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(points)
 
 
-def plot_results(points: pd.DataFrame, output: Path) -> None:
-    """Plot each rate source separately; lines connect quantizer stages within one round only."""
+def averaged_curves(points: pd.DataFrame, group_keys: tuple[str, ...] = ()) -> pd.DataFrame:
+    """Average staged curves over rows, converting WMAPE to dB only after aggregation."""
+    curves = points[points.rate_field.isin(_CURVE_RATE_FIELDS)].copy()
+    curves["wmape"] = 100 * 10 ** (curves.wmape_db / 20)
+    keys = ["codec_id", "initial_si", *group_keys, "rate_field", "stage"]
+    averaged = curves.groupby(keys, as_index=False).agg(rate=("rate", "mean"), wmape=("wmape", "mean"))
+    averaged["wmape_db"] = 20 * np.log10(averaged.pop("wmape") / 100)
+    return averaged
+
+
+def _tone(color: tuple[float, ...], index: int, count: int) -> tuple[float, ...]:
+    """Fade one protocol color toward white by start-point order."""
+    fade = 0 if count == 1 else .45 * index / (count - 1)
+    rgb = np.asarray(color[:3]) * (1 - fade) + fade
+    return (*rgb, 1.0)
+
+
+def _plot_view(points: pd.DataFrame, output: Path, name: str, title: str,
+               group_keys: tuple[str, ...], suffix: str = "") -> None:
+    """Render one averaged RD view with shared protocol/start styling."""
+    curves = averaged_curves(points, group_keys)
+    assert not curves.empty, f"No staged curves available for {name}."
+    fields = [field for field in _CURVE_RATE_FIELDS if field in set(curves.rate_field)]
+    labels = dict(zip(RATE_FIELDS, RATE_LABELS, strict=True))
+    codecs = sorted(curves.codec_id.unique())
+    base_colors = dict(zip(codecs, matplotlib.colormaps["tab10"].resampled(len(codecs)).colors, strict=True))
+    starts = sorted(curves.start_round.unique()) if "start_round" in group_keys else [None]
+    figure, axes = plt.subplots(1, len(fields), figsize=(6 * len(fields), 4.5), squeeze=False,
+                                layout="constrained")
+    for axis, field in zip(axes[0], fields, strict=True):
+        subset = curves[curves.rate_field == field]
+        line_keys = ["codec_id", "initial_si", *group_keys]
+        for identity, stages in subset.groupby(line_keys, sort=True):
+            identity = identity if isinstance(identity, tuple) else (identity,)
+            codec = identity[0]
+            initial_si = identity[1]
+            start = identity[line_keys.index("start_round")] if "start_round" in line_keys else None
+            start_index = starts.index(start)
+            color = _tone(base_colors[codec], start_index, len(starts))
+            label = f"{codec} · {initial_si}" + ("" if start is None else f" · start {start}")
+            stages = stages.sort_values("stage")
+            axis.plot(
+                stages.rate, stages.wmape_db, color=color, alpha=.95 - .25 * start_index / max(len(starts) - 1, 1),
+                marker="o" if initial_si == "raw" else "s", markeredgecolor=base_colors[codec],
+                markerfacecolor="none" if initial_si == "raw" else color,
+                markeredgewidth=.9, linewidth=1.8,
+                linestyle="-" if initial_si == "raw" else "--", label=label,
+            )
+        axis.set(xlabel=f"{labels[field]} (bits/coordinate)",
+                 ylabel="Mean WMAPE (dB rel. 100%)", title=title)
+        axis.ticklabel_format(axis="x", style="plain", useOffset=False)
+        axis.grid(alpha=.25)
+        axis.spines[["top", "right"]].set_visible(False)
+        axis.legend(fontsize=8)
+    figure.savefig(output / f"rd_{name}{suffix}.png", dpi=180)
+    plt.close(figure)
+
+
+def plot_results(points: pd.DataFrame, output: Path, *, incomplete: bool = False) -> None:
+    """Write stage data and the overall, per-start, and per-cycle averaged RD views."""
     assert not points.empty, "Records contain no stage RD metrics."
     output.mkdir(parents=True, exist_ok=True)
+    for stale_plot in output.glob("rd_*.png"):
+        stale_plot.unlink()
     points.to_csv(output / "stage_points.csv", index=False)
-    experiments = list(points.experiment.unique())
-    codecs = list(points.codec_id.unique())
-    colors = dict(zip(codecs, matplotlib.colormaps["tab10"].resampled(len(codecs)).colors, strict=True))
-    figure, axes = plt.subplots(len(experiments), 3, figsize=(15, 4 * len(experiments)), squeeze=False, layout="constrained")
-    drift, drift_axes = plt.subplots(len(experiments), 3, figsize=(15, 4 * len(experiments)), squeeze=False, layout="constrained")
-    for row, experiment in enumerate(experiments):
-        experiment_points = points[points.experiment == experiment]
-        experiment_codecs = sorted(experiment_points.codec_id.unique())
-        for column, (field, label) in enumerate(zip(RATE_FIELDS, RATE_LABELS, strict=True)):
-            axis, drift_axis = axes[row, column], drift_axes[row, column]
-            subset = experiment_points[experiment_points.rate_field == field]
-            missing = sorted(set(experiment_codecs) - set(subset.codec_id.unique()))
-            title = experiment if not missing else f"{experiment}\n(unavailable for {', '.join(missing)})"
-            for (codec, case, start), window in subset.groupby(["codec_id", "case_id", "start_round"]):
-                for _, stages in window.groupby("round_id"):
-                    stages = stages.sort_values("stage")
-                    marker = "o" if stages.phase.iloc[0] == "trained" else "x"
-                    axis.plot(stages.rate, stages.wmape_db, color=colors[codec], alpha=.65, marker=marker, linewidth=.8)
-                last_stages = window.sort_values("stage").groupby("round_id").tail(1).sort_values("round_id")
-                drift_axis.plot(last_stages.round_id, last_stages.rate, color=colors[codec], marker=".", label=f"{codec}: {case}")
-            axis.set(xlabel=f"{label} (bits/coordinate)", ylabel="Mean worker WMAPE (dB rel. 100%)", title=title)
-            drift_axis.set(xlabel="Absolute FL round", ylabel=f"{label} (bits/coordinate)", title=title)
-            for ax in (axis, drift_axis):
-                ax.grid(alpha=.25)
-                ax.spines[["top", "right"]].set_visible(False)
-            handles = [plt.Line2D([], [], color=colors[c], marker="o", label=c) for c in subset.codec_id.unique()]
-            if handles:
-                axis.legend(handles=handles, fontsize=7)
-                drift_axis.legend(fontsize=6)
-    figure.suptitle("Circle: trained-round quantizer; cross: frozen-round reuse. Oracle priors remain oracle assumptions.")
-    figure.savefig(output / "rate_distortion.png", dpi=150)
-    drift.savefig(output / "rates_by_round.png", dpi=150)
-    plt.close(figure)
-    plt.close(drift)
+    suffix = "_INCOMPLETE" if incomplete else ""
+    title_suffix = " (incomplete run)" if incomplete else ""
+    _plot_view(points, output, "overall", f"Overall protocol average{title_suffix}", (), suffix)
+    _plot_view(points, output, "by_start", f"Average by sparse start{title_suffix}", ("start_round",), suffix)
+    cycles = sorted(points.cycle.unique())
+    if len(cycles) > 1:
+        for cycle in cycles:
+            _plot_view(
+                points[points.cycle == cycle], output, f"cycle_{cycle + 1}",
+                f"Training cycle {cycle + 1}: trained round and frozen rounds{title_suffix}",
+                ("start_round",), suffix,
+            )
+
+
+def timing_summary(case_records: pd.DataFrame) -> pd.DataFrame:
+    """Summarize runtime separately for costly trained tokens and cheaper frozen reuse."""
+    assert "total_seconds" in case_records and case_records.total_seconds.notna().all()
+    timed = case_records.assign(round_token=case_records.round_name_full.str.split("|").str[0])
+    return timed.groupby(["codec_id", "round_token", "phase"], as_index=False).agg(
+        rows=("total_seconds", "size"), mean_seconds=("total_seconds", "mean"),
+        median_seconds=("total_seconds", "median"), total_hours=("total_seconds", lambda values: values.sum() / 3600),
+    )
 
 
 def comparison_gaps(case_records: pd.DataFrame, comparisons: tuple[tuple[str, str], ...]) -> pd.DataFrame:
@@ -185,15 +247,18 @@ def comparison_gaps(case_records: pd.DataFrame, comparisons: tuple[tuple[str, st
 
 
 def main() -> None:
-    """Render one completed sparse-replay output root through the shared analysis path."""
+    """Render the available validated rows from one sparse-replay output root."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("records", type=Path, help="Output root holding cases/ and test_config.json.")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     assert args.records.is_dir(), f"Expected a sparse-replay output root directory: {args.records}."
-    case_records = load_completed_records(args.records)
+    case_records, coverage = load_available_records(args.records)
     output = args.out or args.records / "analysis"
-    plot_results(stage_points(case_records), output)
+    incomplete = not coverage.complete.all()
+    plot_results(stage_points(case_records), output, incomplete=incomplete)
+    coverage.to_csv(output / "coverage.csv", index=False)
+    timing_summary(case_records).to_csv(output / "timing_summary.csv", index=False)
     manifest = json.loads((args.records / "test_config.json").read_text())
     comparisons = tuple(map(tuple, manifest["identity"]["comparisons"]))
     gaps = comparison_gaps(case_records, comparisons)
@@ -202,7 +267,8 @@ def main() -> None:
         gaps_path.unlink(missing_ok=True)
     else:
         gaps.to_csv(gaps_path, index=False)
-    print(f"Wrote {output}; unavailable gaps (single_stage/non_overlapping/non_monotone) are rows, not omissions.")
+    print(f"Wrote {output} ({'INCOMPLETE' if incomplete else 'complete'}); unavailable gaps "
+          "(single_stage/non_overlapping/non_monotone) are rows, not omissions.")
 
 
 if __name__ == "__main__":

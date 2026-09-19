@@ -7,12 +7,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from Experiments.Protocol_test import records as record_io
 from Experiments.Protocol_test.plot import (
+    averaged_curves,
     comparison_gaps,
-    load_completed_records,
+    load_available_records,
     numeric_list,
     round_curve,
     stage_points,
+    timing_summary,
 )
 
 
@@ -38,7 +41,7 @@ def _write_case(
             "trace": trace or {"trace_version": 1, "fl_config": {"num_clients": 3}},
             "case": {
                 "protocol": "wz_cancer", "start_round": start_round,
-                "client_ids": client_ids, "round_codecs": round_codecs,
+                "initial_si": "raw", "client_ids": client_ids, "round_codecs": round_codecs,
             },
         },
         "provenance": {},
@@ -66,8 +69,10 @@ def _records() -> pd.DataFrame:
     `round_curve`/`stage_points` tests that don't need to go through a case directory."""
     return pd.DataFrame({
         "experiment": ["data"] * 2, "codec_id": ["T"] * 2, "case_id": ["start5"] * 2,
+        "initial_si": ["raw"] * 2,
         "start_round": [5] * 2, "round_id": [5] * 2, "relative_round": [0] * 2,
-        "phase": ["trained"] * 2, "client_ids": [(0, 2)] * 2, "trace_identity_digest": ["abc"] * 2,
+        "cycle": [0] * 2, "phase": ["trained"] * 2,
+        "client_ids": [(0, 2)] * 2, "trace_identity_digest": ["abc"] * 2,
         "model_size": [100, 100],
         "stage_wmapes": ["[10, 5]", "[30, 10]"], "prior_stage_rates": ["[1, 1]", "[2, 2]"],
         "coder_stage_rates": ["[2, 2]", "[3, 3]"], "final_bytes": [0.01, 0.02],
@@ -75,9 +80,10 @@ def _records() -> pd.DataFrame:
     })
 
 
-def test_round_curve_uses_equal_worker_mean_and_keeps_rates_separate() -> None:
+def test_round_curve_uses_equal_worker_mean_and_cumulative_stage_rates() -> None:
     records = _records()
     rate, distortion = round_curve(records, Path("records.csv"), "prior_stage_rates")
+    # Mean incremental rates are [1.5, 1.5], so the plotted stage positions are cumulative.
     np.testing.assert_allclose(rate, [1.5, 3.])
     # Equal-worker mean WMAPE per stage: [(10+30)/2, (5+10)/2] = [20, 7.5], then dB.
     np.testing.assert_allclose(distortion, 20 * np.log10(np.array([20., 7.5]) / 100))
@@ -89,6 +95,40 @@ def test_round_curve_uses_equal_worker_mean_and_keeps_rates_separate() -> None:
     assert payload.wmape_db.iloc[0] == pytest.approx(distortion[-1])
     assert payload.is_final_payload.iloc[0]
     assert not points[points.rate_field != "final_bytes"].is_final_payload.any()
+
+
+def test_curve_averaging_happens_in_linear_wmape_space() -> None:
+    points = stage_points(_records())
+    later = points.assign(round_id=6, wmape_db=20 * np.log10(40 / 100))
+    averaged = averaged_curves(pd.concat([points, later]))
+    prior_stage_one = averaged[
+        (averaged.rate_field == "prior_stage_rates") & (averaged.stage == 1)
+    ].iloc[0]
+    expected_wmape = (20 + 40) / 2
+    assert prior_stage_one.wmape_db == pytest.approx(20 * np.log10(expected_wmape / 100))
+
+
+def test_curve_averaging_can_preserve_sparse_starts() -> None:
+    points = stage_points(_records())
+    other_start = points.assign(start_round=10, case_id="start10")
+    averaged = averaged_curves(pd.concat([points, other_start]), ("start_round",))
+    assert set(averaged.start_round) == {5, 10}
+
+
+def test_runtime_summary_does_not_extrapolate_trained_rows_over_frozen_rows() -> None:
+    # Runtime forecasts must use these protocol-wide strata separately: T/O fits are expensive,
+    # while F reuses are cheaper, so early trained rows cannot represent the full schedule.
+    # Initial uncached 3-plane estimates (2026-09-18): O ~= 760 s/row, T ~= 145 s/row, F ~= 61
+    # s/row. These are provisional until timing_summary.csv contains complete strata.
+    records = pd.DataFrame({
+        "codec_id": ["T"] * 4,
+        "round_name_full": ["T|training_seed=43", "T|training_seed=43", "F", "F"],
+        "phase": ["trained", "trained", "frozen", "frozen"],
+        "total_seconds": [100.0, 120.0, 10.0, 20.0],
+    })
+    summary = timing_summary(records).set_index("round_token")
+    assert summary.loc["T", "mean_seconds"] == 110
+    assert summary.loc["F", "mean_seconds"] == 15
 
 
 def test_partial_coder_rates_do_not_fall_back_to_prior() -> None:
@@ -116,43 +156,43 @@ def test_csv_list_parser_does_not_execute_code(tmp_path: Path) -> None:
         numeric_list("__import__('pathlib').Path('unexpected').touch()", "stage_wmapes", tmp_path)
 
 
-def test_sparse_worker_ids_are_preserved_in_points(tmp_path: Path) -> None:
-    _write_case(
-        tmp_path, "T", "start5", start_round=5, client_ids=[0, 2], round_codecs=["T"],
-        rows=_rows(5, "T", {0: "[10]", 2: "[30]"}, model_size=[100, 100]),
-    )
-    case_records = load_completed_records(tmp_path)
-    assert set(case_records.client_id) == {0, 2}
-    assert case_records.client_ids.iloc[0] == (0, 2)
+def test_available_records_include_unfinished_prefix_and_report_missing_cases(tmp_path: Path) -> None:
+    case = {
+        "protocol": "wz_cancer", "case_id": "start5", "codec_id": "O", "start_round": 5,
+        "initial_si": "raw", "client_ids": [0, 2], "round_codecs": ["O", "F"],
+    }
+    missing = case | {"case_id": "start10", "start_round": 10}
+    manifest = {"identity": {"trace": {"trace_version": 1}, "cases": [case, missing]}}
+    (tmp_path / "test_config.json").write_text(json.dumps(manifest))
+    directory = tmp_path / "cases" / "O" / "start5"
+    directory.mkdir(parents=True)
+    pd.DataFrame(_rows(5, "O", {0: "[10]"}, model_size=[100])).to_csv(
+        directory / "compression_records.csv", index=False)
 
+    case_records, coverage = load_available_records(tmp_path)
 
-def test_duplicate_row_case_fails_loudly(tmp_path: Path) -> None:
-    _write_case(
-        tmp_path, "T", "start5", start_round=5, client_ids=[0, 2], round_codecs=["T"],
-        rows=_rows(5, "T", {0: "[10]", 2: "[30]"}, model_size=[100, 100]) * 2,  # duplicated rows
-    )
-    with pytest.raises(AssertionError, match="Incomplete, duplicated, or reordered"):
-        load_completed_records(tmp_path)
-
-
-def test_case_dir_without_complete_json_fails_loudly(tmp_path: Path) -> None:
-    _write_case(
-        tmp_path, "T", "start5", start_round=5, client_ids=[0], round_codecs=["T"],
-        rows=_rows(5, "T", {0: "[10]"}, model_size=[100]),
-    )
-    (tmp_path / "cases" / "T" / "start5" / "complete.json").unlink()
-    with pytest.raises(AssertionError, match="unfinished output"):
-        load_completed_records(tmp_path)
+    assert case_records.client_id.tolist() == [0]
+    assert case_records.case_complete.tolist() == [False]
+    assert coverage[["rows", "expected_rows", "complete"]].values.tolist() == [
+        [1, 4, False], [0, 4, False]]
 
 
 def test_mismatched_trace_identity_in_declared_comparison_fails_loudly(tmp_path: Path) -> None:
     rows = _rows(5, "X", {0: "[10]", 2: "[30]"}, model_size=[100, 100],
                   prior_stage_rates=["[1]", "[2]"], coder_stage_rates=["[1]", "[2]"])
-    _write_case(tmp_path, "T", "start5", start_round=5, client_ids=[0, 2], round_codecs=["X"],
-                rows=rows, trace={"trace_version": 1})
-    _write_case(tmp_path, "O", "start5", start_round=5, client_ids=[0, 2], round_codecs=["X"],
-                rows=rows, trace={"trace_version": 2})  # different trace identity
-    case_records = load_completed_records(tmp_path)
+    case_dirs = [
+        _write_case(tmp_path, "T", "start5", start_round=5, client_ids=[0, 2], round_codecs=["X"],
+                    rows=rows, trace={"trace_version": 1}),
+        _write_case(tmp_path, "O", "start5", start_round=5, client_ids=[0, 2], round_codecs=["X"],
+                    rows=rows, trace={"trace_version": 2}),  # different trace identity
+    ]
+    frames = []
+    for case_dir in case_dirs:
+        frame = record_io.read_completed_case(case_dir)
+        frame["records_path"] = str(case_dir / "compression_records.csv")
+        frames.append(frame)
+    case_records = pd.concat(frames, ignore_index=True)
+    case_records["experiment"] = "test"
     with pytest.raises(AssertionError, match="mismatched trace identity"):
         comparison_gaps(case_records, (("T", "O"),))
 
