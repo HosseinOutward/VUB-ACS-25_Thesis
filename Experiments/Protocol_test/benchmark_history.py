@@ -8,6 +8,7 @@ reported separately from communication rate.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from collections.abc import Sequence
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from FL_code.FL_core.codec import Access, CompressionRecord
 from FL_code.cancer_protocol.history import (
+    CompressedHistoryVector,
     CompressedReconstructionHistory,
     ReconstructionHistory,
 )
@@ -92,13 +94,22 @@ def _benchmark_representation(
     denominator = float(final.abs().sum())
     wmape = 0.0 if denominator == 0.0 else float((final - restored).abs().sum()) / denominator * 100.0
     retained_bytes = sum(payload.resident_nbytes for payload in payloads)
-    return {
+    result: dict[str, Any] = {
         "representation": f"{history_type.__module__}.{history_type.__qualname__}",
+        "commit_seconds": commit_seconds,
         "mean_commit_seconds": sum(commit_seconds) / len(commit_seconds),
         "materialize_seconds": float(median(materialize_seconds)),
         "retained_bytes_per_value": retained_bytes / (len(payloads) * delta.numel()),
         "storage_wmape_percent": wmape,
     }
+    compressed = [payload for payload in payloads if isinstance(payload, CompressedHistoryVector)]
+    if compressed:
+        chunks = [chunk for payload in compressed for chunk in payload._iter_encoded_chunks()]
+        result["chunk_layouts"] = dict(Counter(chunk.layout for chunk in chunks))
+        result["packed_code_bits"] = dict(Counter(
+            chunk.code_bits for chunk in chunks if chunk.layout == "packed"
+        ))
+    return result
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
@@ -110,7 +121,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "source": source,
         "vector_elements": delta.numel(),
         "commits": args.commits,
-        "representations": [_benchmark_representation(item, delta, args.commits) for item in representations],
+        "representations": [
+            _benchmark_representation(item, delta, args.commits) for item in representations
+        ],
     }
 
 
@@ -124,6 +137,8 @@ def _print_results(result: dict[str, Any]) -> None:
             f"{row['materialize_seconds']:>14.5f} {row['retained_bytes_per_value']:>13.4f} "
             f"{row['storage_wmape_percent']:>9.5f}"
         )
+        if "chunk_layouts" in row:
+            print(f"  layouts={row['chunk_layouts']} packed_code_bits={row['packed_code_bits']}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:

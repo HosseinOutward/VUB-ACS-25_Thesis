@@ -5,7 +5,7 @@ import pytest
 from torch import nn
 
 from FL_code.FL_core.cache import model_training_hash
-from FL_code.cancer_protocol.history import CompressedHistoryVector, HistoryVector
+from FL_code.cancer_protocol.history import _CHUNK_ELEMENTS, CompressedHistoryVector, HistoryVector
 from FL_code.cancer_protocol.wz_quantizer import (
     SideInfoMatrix,
     WZQuantizerCancer,
@@ -72,34 +72,82 @@ def test_side_information_matrix_decodes_compressed_rows_and_normalizes() -> Non
     rows = torch.tensor([19, 0, 7, 3])
     assert torch.equal(matrix[rows], expected[rows])
     assert torch.equal(matrix[4:12], expected[4:12])
-    assert matrix._columns[0].codes[0].dtype is torch.uint8
-    assert matrix._columns[0].codes[0].device == matrix.device
+    chunks = matrix._columns[0].chunks
+    assert chunks is not None and chunks[0].layout == "raw"
+    assert chunks[0].values.device == matrix.device
     assert matrix.device.type == device.type
 
 
 def test_side_information_matrix_gathers_uint16_codes_on_accelerator() -> None:
-    distinct = 257
+    distinct = 65_536
     patterns = (
         torch.arange(distinct, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
     ).to(torch.int32)
-    compressed = CompressedHistoryVector(patterns.view(torch.float32))
+    values = patterns.repeat(4).view(torch.float32)
+    compressed = CompressedHistoryVector(values)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matrix = SideInfoMatrix(
-        [compressed], distinct, torch.tensor([[1.0, 0.0]]),
-        (slice(0, distinct),), device,
+        [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
+        (slice(0, values.numel()),), device,
     )
-    rows = torch.tensor([256, 0, 128], device=device)
+    rows = torch.tensor([65_535, 0, 128], device=device)
 
-    assert matrix._columns[0].codes[0].dtype is torch.uint16
+    chunks = matrix._columns[0].chunks
+    assert chunks is not None and chunks[0].codes is not None
+    assert chunks[0].layout == "direct" and chunks[0].codes.dtype is torch.uint16
     assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
     assert matrix.code_rows(rows).shape == (3, 1)
 
 
+def test_side_information_matrix_gathers_packed_codes_on_accelerator() -> None:
+    distinct = 16_384
+    patterns = (
+        torch.arange(distinct, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
+    ).to(torch.int32)
+    values = patterns.repeat(16).view(torch.float32)
+    compressed = CompressedHistoryVector(values)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    matrix = SideInfoMatrix(
+        [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
+        (slice(0, values.numel()),), device,
+    )
+    rows = torch.tensor([0, 1, 255, 256, 16_383, values.numel() - 1], device=device)
+
+    chunks = matrix._columns[0].chunks
+    assert chunks is not None and chunks[0].layout == "packed"
+    assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
+    assert torch.unique(matrix.code_rows(rows)).numel() == rows.numel() - 1
+
+
+def test_side_information_matrix_decodes_across_adaptive_chunk_layouts() -> None:
+    patterns = (
+        torch.arange(16_384, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
+    ).to(torch.int32)
+    packed = patterns.repeat(_CHUNK_ELEMENTS // patterns.numel())
+    raw = patterns[:100]
+    values = torch.cat((packed, raw)).view(torch.float32)
+    compressed = CompressedHistoryVector(values)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    matrix = SideInfoMatrix(
+        [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
+        (slice(0, values.numel()),), device,
+    )
+    rows = torch.tensor(
+        [0, _CHUNK_ELEMENTS - 1, _CHUNK_ELEMENTS, values.numel() - 1], device=device
+    )
+
+    chunks = matrix._columns[0].chunks
+    assert chunks is not None and [chunk.layout for chunk in chunks] == ["packed", "raw"]
+    assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
+    assert torch.unique(matrix.code_rows(rows)).numel() == rows.numel()
+
+
 def test_unique_row_groups_uses_compact_codes_and_normalization_slice() -> None:
     values = torch.zeros(4)
+    slices = (slice(0, 2), slice(2, 4))
     matrix = SideInfoMatrix(
         [CompressedHistoryVector(values)], 4, torch.tensor([[2.0, 1.0], [3.0, 1.0]]),
-        (slice(0, 2), slice(2, 4)), torch.device("cpu"),
+        slices, torch.device("cpu"),
     )
     _, inverse, collisions = unique_row_groups((matrix,), 1)
     assert torch.equal(inverse, torch.tensor([0, 0, 1, 1]))

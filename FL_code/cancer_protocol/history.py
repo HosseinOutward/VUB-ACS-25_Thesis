@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 from typing import Any
 
 import numpy as np
@@ -15,6 +17,9 @@ from FL_code.FL_core.codec import Access, CompressionRecord
 
 _PREFIX_BITS = 18
 _CHUNK_ELEMENTS = 1 << 20
+_COMPRESSION_WORKERS = min(4, os.cpu_count() or 1)
+_MIN_PACKING_SAVINGS = 0.1
+_STORAGE_FORMAT = "adaptive_split_packed_v1"
 
 
 def float_prefix(values: torch.Tensor, match_bits: int = _PREFIX_BITS) -> torch.Tensor:
@@ -70,38 +75,162 @@ class HistoryVector:
 
 @dataclass(frozen=True, slots=True)
 class _CompressedHistoryChunk:
-    """One compressed coordinate range, exposed for on-device lazy decoding."""
+    """One raw or dictionary-coded coordinate range with device-side row access."""
 
     start: int
     stop: int
-    dictionary: torch.Tensor
-    codes: torch.Tensor
+    values: torch.Tensor
+    codes: torch.Tensor | None = None
+    packed_high: torch.Tensor | None = None
+    code_bits: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the selected physical layout's tensor contract."""
+        assert self.start <= self.stop and self.values.dtype is torch.float32 and self.values.ndim == 1
+        if self.codes is None:
+            assert self.packed_high is None and self.code_bits is None
+            assert self.values.numel() == self.stop - self.start
+            return
+        assert self.codes.ndim == 1 and self.codes.numel() == self.stop - self.start
+        assert self.codes.dtype in (torch.uint8, torch.uint16, torch.uint32)
+        assert self.codes.device == self.values.device
+        assert self.code_bits is not None and 1 <= self.code_bits <= _PREFIX_BITS
+        assert self.packed_high is None or (
+            self.codes.dtype is torch.uint8
+            and self.packed_high.dtype is torch.uint8
+            and self.packed_high.ndim == 1
+            and self.packed_high.device == self.values.device
+            and self.code_bits > 8
+        )
+
+    @property
+    def layout(self) -> str:
+        """Return the physical layout selected for this chunk."""
+        if self.codes is None:
+            return "raw"
+        return "packed" if self.packed_high is not None else "direct"
+
+    @property
+    def dictionary(self) -> torch.Tensor | None:
+        """Return dictionary values, or ``None`` for a raw prefixed chunk."""
+        return None if self.codes is None else self.values
 
     @property
     def nbytes(self) -> int:
-        """Return bytes retained by this dictionary-coded chunk."""
-        return self.dictionary.numel() * self.dictionary.element_size() + self.codes.numel() * self.codes.element_size()
+        """Return bytes retained by this chunk's tensor payloads."""
+        tensors = (self.values, self.codes, self.packed_high)
+        return sum(item.numel() * item.element_size() for item in tensors if item is not None)
+
+    def to(self, device: torch.device) -> _CompressedHistoryChunk:
+        """Copy this immutable chunk representation to ``device``."""
+        return _CompressedHistoryChunk(
+            self.start,
+            self.stop,
+            self.values.to(device),
+            None if self.codes is None else self.codes.to(device),
+            None if self.packed_high is None else self.packed_high.to(device),
+            self.code_bits,
+        )
+
+    def ranks(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return dictionary ranks at local chunk coordinates."""
+        assert self.codes is not None and self.code_bits is not None
+        if self.packed_high is None:
+            return self.codes.to(torch.int32)[indices]
+
+        high_bits = self.code_bits - 8
+        if indices.is_cuda:
+            from .packed_history_cuda import packed_ranks
+            return packed_ranks(self.codes, self.packed_high, indices, high_bits)
+
+        offsets = indices * high_bits
+        byte_indices, shifts = offsets >> 3, offsets & 7
+        words = self.packed_high[byte_indices].to(torch.int32)
+        words |= self.packed_high[byte_indices + 1].to(torch.int32) << 8
+        if high_bits > 9:
+            words |= self.packed_high[byte_indices + 2].to(torch.int32) << 16
+        high = (words >> shifts) & ((1 << high_bits) - 1)
+        return self.codes[indices].to(torch.int32) | (high << 8)
+
+    def local_keys(self, indices: torch.Tensor) -> torch.Tensor:
+        """Return stable unsigned local keys without decoding float values."""
+        if self.codes is not None:
+            return self.ranks(indices).to(torch.int64)
+        bits = self.values[indices].view(torch.int32).to(torch.int64)
+        return bits & 0xFFFF_FFFF
+
+    def decode_rows(self, indices: torch.Tensor) -> torch.Tensor:
+        """Decode float32 values at local chunk coordinates."""
+        if self.codes is None:
+            return self.values[indices]
+        if self.packed_high is not None and indices.is_cuda:
+            from .packed_history_cuda import packed_values
+            assert self.code_bits is not None
+            return packed_values(
+                self.codes, self.packed_high, self.values, indices, self.code_bits - 8
+            )
+        return self.values[self.ranks(indices).long()]
+
+    def decode_all(self) -> torch.Tensor:
+        """Decode this complete CPU chunk."""
+        if self.codes is None:
+            return self.values.clone()
+        if self.packed_high is None:
+            return self.values[self.codes.to(torch.int64)]
+
+        assert self.code_bits is not None
+        high_bits = self.code_bits - 8
+        packed = self.packed_high[:-2].numpy()
+        bit_rows = np.unpackbits(
+            packed, count=self.codes.numel() * high_bits, bitorder="little"
+        ).reshape(self.codes.numel(), high_bits)
+        high = bit_rows.astype(np.uint32) @ (np.uint32(1) << np.arange(high_bits, dtype=np.uint32))
+        ranks = self.codes.numpy().astype(np.uint32) | (high << 8)
+        return self.values[torch.from_numpy(ranks.astype(np.int64))]
+
+
+def _pack_high_codes(codes: np.ndarray, code_bits: int) -> torch.Tensor:
+    """Pack rank bits above the directly indexable low byte."""
+    high_bits = code_bits - 8
+    high = codes.astype(np.uint32, copy=False) >> 8
+    shifts = np.arange(high_bits, dtype=np.uint32)
+    bit_rows = ((high[:, None] >> shifts) & 1).astype(np.uint8)
+    # Two sentinels let arbitrary-row decoding load a three-byte window without a boundary branch.
+    packed = np.concatenate((np.packbits(bit_rows.reshape(-1), bitorder="little"), np.zeros(2, dtype=np.uint8)))
+    return torch.from_numpy(packed)
 
 
 def _compress_chunk(value: torch.Tensor, start: int, stop: int) -> _CompressedHistoryChunk:
-    """Prefix, deduplicate, and index one physical history chunk."""
+    """Prefix one chunk and choose its smallest worthwhile random-access layout."""
     prefixed = float_prefix(value[start:stop])
     bits = prefixed.view(torch.int32).numpy()
-    unique, inverse, counts = np.unique(bits, return_inverse=True, return_counts=True)
-    order = np.argsort(-counts, kind="stable")
+    unique, inverse = np.unique(bits, return_inverse=True)
+    code_bits = max(1, (unique.size - 1).bit_length())
+    code_dtype = np.uint8 if code_bits <= 8 else np.uint16 if code_bits <= 16 else np.uint32
+    direct_nbytes = unique.nbytes + inverse.size * np.dtype(code_dtype).itemsize
+    packed_nbytes = (
+        unique.nbytes + inverse.size + (inverse.size * (code_bits - 8) + 7) // 8 + 2
+        if code_bits > 8 else None
+    )
+    raw_nbytes = prefixed.numel() * prefixed.element_size()
+    use_packed = packed_nbytes is not None and packed_nbytes <= direct_nbytes * (1 - _MIN_PACKING_SAVINGS)
 
-    ranks = np.empty(unique.size, dtype=np.int64)
-    ranks[order] = np.arange(unique.size, dtype=np.int64)
-    dictionary_bits = unique[order].astype(np.int32, copy=True)
-    code_values = ranks[inverse]
-    code_dtype = np.uint8 if unique.size <= 1 << 8 else np.uint16 if unique.size <= 1 << 16 else np.uint32
-    dictionary = torch.from_numpy(dictionary_bits).view(torch.float32)
-    codes = torch.from_numpy(code_values.astype(code_dtype, copy=True))
-    return _CompressedHistoryChunk(start, stop, dictionary, codes)
+    if raw_nbytes <= min(direct_nbytes, packed_nbytes if use_packed else direct_nbytes):
+        return _CompressedHistoryChunk(start, stop, prefixed)
+
+    dictionary = torch.from_numpy(unique.astype(np.int32, copy=True)).view(torch.float32)
+    if use_packed:
+        low_codes = torch.from_numpy((inverse & 0xFF).astype(np.uint8))
+        return _CompressedHistoryChunk(
+            start, stop, dictionary, low_codes, _pack_high_codes(inverse, code_bits), code_bits
+        )
+
+    codes = torch.from_numpy(inverse.astype(code_dtype, copy=True))
+    return _CompressedHistoryChunk(start, stop, dictionary, codes, code_bits=code_bits)
 
 
 class CompressedHistoryVector(HistoryVector):
-    """Prefix-truncated, dictionary-coded CPU history with the HistoryVector read contract."""
+    """Layer-normalized, adaptively packed CPU history with the HistoryVector read contract."""
 
     def __init__(self, value: torch.Tensor) -> None:
         assert (
@@ -112,31 +241,48 @@ class CompressedHistoryVector(HistoryVector):
         ), "History value must be a one-dimensional CPU float32 tensor."
         source = value.detach().contiguous()
         self._logical_size: int = source.numel()
-        self._chunks: tuple[_CompressedHistoryChunk, ...] = tuple(
-            _compress_chunk(source, start, min(start + _CHUNK_ELEMENTS, source.numel()))
+        bounds = tuple(
+            (source, start, min(start + _CHUNK_ELEMENTS, source.numel()))
             for start in range(0, source.numel(), _CHUNK_ELEMENTS)
         )
+        if len(bounds) <= 1 or _COMPRESSION_WORKERS == 1:
+            self._chunks = tuple(_compress_chunk(*bound) for bound in bounds)
+        else:
+            with ThreadPoolExecutor(max_workers=min(_COMPRESSION_WORKERS, len(bounds))) as executor:
+                self._chunks = tuple(executor.map(lambda bound: _compress_chunk(*bound), bounds))
 
     def __getstate__(self) -> dict[str, Any]:
-        """Serialize unsigned codes through same-width signed views supported by torch.save."""
-        chunks = tuple((
-            chunk.start,
-            chunk.stop,
-            chunk.dictionary,
-            chunk.codes.view(torch.int16) if chunk.codes.dtype is torch.uint16
-            else chunk.codes.view(torch.int32) if chunk.codes.dtype is torch.uint32
-            else chunk.codes,
-            str(chunk.codes.dtype),
-        ) for chunk in self._chunks)
-        return {"logical_size": self._logical_size, "chunks": chunks}
+        """Serialize unsigned direct codes through same-width signed torch dtypes."""
+        chunks = tuple({
+            "start": chunk.start,
+            "stop": chunk.stop,
+            "values": chunk.values,
+            "codes": (
+                chunk.codes.view(torch.int16) if chunk.codes is not None and chunk.codes.dtype is torch.uint16
+                else chunk.codes.view(torch.int32) if chunk.codes is not None and chunk.codes.dtype is torch.uint32
+                else chunk.codes
+            ),
+            "codes_dtype": None if chunk.codes is None else str(chunk.codes.dtype),
+            "packed_high": chunk.packed_high,
+            "code_bits": chunk.code_bits,
+        } for chunk in self._chunks)
+        return {"format": _STORAGE_FORMAT, "logical_size": self._logical_size, "chunks": chunks}
 
     def __setstate__(self, state: dict[str, Any]) -> None:
-        """Restore the narrow unsigned code dtype after torch deserialization."""
+        """Restore adaptive chunks and narrow unsigned direct-code dtypes."""
+        assert state["format"] == _STORAGE_FORMAT, f"Unknown compressed-history format: {state['format']!r}."
         dtypes = {"torch.uint8": torch.uint8, "torch.uint16": torch.uint16, "torch.uint32": torch.uint32}
         self._logical_size = state["logical_size"]
         self._chunks = tuple(
-            _CompressedHistoryChunk(start, stop, dictionary, codes.view(dtypes[dtype]))
-            for start, stop, dictionary, codes, dtype in state["chunks"]
+            _CompressedHistoryChunk(
+                item["start"],
+                item["stop"],
+                item["values"],
+                None if item["codes"] is None else item["codes"].view(dtypes[item["codes_dtype"]]),
+                item["packed_high"],
+                item["code_bits"],
+            )
+            for item in state["chunks"]
         )
 
     @property
@@ -150,17 +296,21 @@ class CompressedHistoryVector(HistoryVector):
 
     @property
     def resident_nbytes(self) -> int:
-        """Return bytes occupied by dictionaries and narrow integer code arrays."""
+        """Return bytes occupied by raw values, dictionaries, and code arrays."""
         return sum(chunk.nbytes for chunk in self._chunks)
 
     def iter_chunks(self) -> Iterator[tuple[slice, torch.Tensor]]:
         """Decode and yield compressed chunks in their original coordinate order."""
         for chunk in self._chunks:
-            yield slice(chunk.start, chunk.stop), chunk.dictionary[chunk.codes.to(torch.int64)]
+            yield slice(chunk.start, chunk.stop), chunk.decode_all()
 
     def materialize(self) -> torch.Tensor:
         """Explicitly decode the complete vector, including prefix quantization."""
-        chunks = [values for _, values in self.iter_chunks()]
+        if len(self._chunks) <= 1 or _COMPRESSION_WORKERS == 1:
+            chunks = [chunk.decode_all() for chunk in self._chunks]
+        else:
+            with ThreadPoolExecutor(max_workers=min(_COMPRESSION_WORKERS, len(self._chunks))) as executor:
+                chunks = list(executor.map(_CompressedHistoryChunk.decode_all, self._chunks))
         return torch.cat(chunks) if chunks else torch.empty(0, dtype=torch.float32)
 
 
@@ -192,6 +342,7 @@ class ReconstructionHistory:
             "max_per_client": self.max_per_client,
             "prefix_bits": _PREFIX_BITS if isinstance(self, CompressedReconstructionHistory) else 32,
             "chunk_elements": _CHUNK_ELEMENTS,
+            "storage_format": _STORAGE_FORMAT if isinstance(self, CompressedReconstructionHistory) else "float32",
         }
 
     def copy(self) -> ReconstructionHistory:

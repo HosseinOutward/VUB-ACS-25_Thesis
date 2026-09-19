@@ -114,17 +114,19 @@ def test_history_vector_owns_float32_cpu_values_and_fixed_chunks() -> None:
 
 
 def test_compressed_history_prefixes_values_and_exposes_encoded_chunks() -> None:
-    value = torch.tensor([0.0, -0.0, 1.0, 1.0, 2.0], dtype=torch.float32)
+    value = torch.tensor([0.0, -0.0, 1.0, 1.0, 2.0], dtype=torch.float32).repeat(100)
     stored = CompressedHistoryVector(value)
     expected = float_prefix(value, _PREFIX_BITS)
 
     torch.testing.assert_close(stored.materialize(), expected)
     chunk = next(stored._iter_encoded_chunks())
-    assert chunk.dictionary.dtype is torch.float32
+    assert chunk.layout == "direct"
+    assert chunk.dictionary is not None and chunk.dictionary.dtype is torch.float32
+    assert chunk.codes is not None
     assert chunk.codes.dtype is torch.uint8
     assert chunk.codes.numel() == value.numel()
     assert torch.equal(stored.materialize().view(torch.int32), expected.view(torch.int32))
-    assert chunk.dictionary.numel() == 4, "signed zero must remain a distinct dictionary value"
+    assert chunk.dictionary.numel() <= 4
 
 
 def test_compressed_history_accepts_noncontiguous_input() -> None:
@@ -136,30 +138,59 @@ def test_compressed_history_accepts_noncontiguous_input() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    ("distinct", "dtype"),
-    [(256, torch.uint8), (257, torch.uint16), (65_536, torch.uint16), (65_537, torch.uint32)],
-)
-def test_compressed_code_width_is_the_narrowest_index_type(distinct: int, dtype: torch.dtype) -> None:
+@pytest.mark.parametrize(("distinct", "repeats", "layout", "dtype", "code_bits"), [
+    (256, 4, "direct", torch.uint8, 8),
+    (257, 16, "packed", torch.uint8, 9),
+    (65_536, 4, "direct", torch.uint16, 16),
+    (65_537, 8, "packed", torch.uint8, 17),
+])
+def test_compressed_history_selects_the_smallest_worthwhile_layout(
+    distinct: int, repeats: int, layout: str, dtype: torch.dtype, code_bits: int,
+) -> None:
     bit_patterns = (torch.arange(distinct, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000).to(torch.int32)
-    value = bit_patterns.view(torch.float32)
+    value = bit_patterns.repeat(repeats).view(torch.float32)
     chunk = next(CompressedHistoryVector(value)._iter_encoded_chunks())
+    assert chunk.layout == layout
+    assert chunk.codes is not None
     assert chunk.codes.dtype is dtype
+    assert chunk.code_bits == code_bits
+    assert (chunk.packed_high is not None) is (layout == "packed")
 
 
-@pytest.mark.parametrize("distinct", [257, 65_537])
-def test_compressed_history_torch_serialization_preserves_unsigned_codes(distinct: int) -> None:
+def test_compressed_history_uses_raw_prefixes_when_a_dictionary_would_expand_data() -> None:
+    patterns = (
+        torch.arange(257, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000
+    ).to(torch.int32)
+    stored = CompressedHistoryVector(patterns.view(torch.float32))
+    chunk = next(stored._iter_encoded_chunks())
+
+    assert chunk.layout == "raw"
+    assert chunk.dictionary is None and chunk.codes is None and chunk.code_bits is None
+    assert chunk.nbytes == patterns.numel() * 4
+    assert torch.equal(stored.materialize(), float_prefix(patterns.view(torch.float32)))
+
+
+@pytest.mark.parametrize(("distinct", "repeats"), [(257, 16), (65_536, 4), (65_537, 8)])
+def test_compressed_history_torch_serialization_preserves_layout(
+    distinct: int, repeats: int,
+) -> None:
     patterns = (
         torch.arange(distinct, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000
     ).to(torch.int32)
-    original = CompressedHistoryVector(patterns.view(torch.float32))
+    original = CompressedHistoryVector(patterns.repeat(repeats).view(torch.float32))
     buffer = io.BytesIO()
     torch.save(original, buffer)
     buffer.seek(0)
     restored = torch.load(buffer, weights_only=False)
 
-    assert next(restored._iter_encoded_chunks()).codes.dtype is next(
-        original._iter_encoded_chunks()).codes.dtype
+    original_chunk = next(original._iter_encoded_chunks())
+    restored_chunk = next(restored._iter_encoded_chunks())
+    assert (restored_chunk.layout, restored_chunk.code_bits) == (
+        original_chunk.layout, original_chunk.code_bits)
+    assert restored_chunk.codes is not None and original_chunk.codes is not None
+    assert restored_chunk.codes.dtype is original_chunk.codes.dtype
+    assert torch.equal(
+        original.materialize(), float_prefix(patterns.repeat(repeats).view(torch.float32)))
     assert torch.equal(restored.materialize(), original.materialize())
 
 
@@ -174,4 +205,5 @@ def test_compressed_history_ledger_uses_shared_entries_and_reports_constants() -
         "max_per_client": 2,
         "prefix_bits": _PREFIX_BITS,
         "chunk_elements": _CHUNK_ELEMENTS,
+        "storage_format": "adaptive_split_packed_v1",
     }

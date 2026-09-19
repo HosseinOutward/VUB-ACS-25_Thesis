@@ -23,7 +23,7 @@ from FL_code.FL_core.utils import (
 )
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .history import CompressedHistoryVector, HistoryVector
+from .history import _CompressedHistoryChunk, CompressedHistoryVector, HistoryVector
 from .prior_code import INFERENCE_BATCH, DedupedPriorCalculator, PriorCalculator
 
 
@@ -35,18 +35,16 @@ TRAINING_DEDUPLICATION_MIN_FRACTION = 0.1
 class _SideInfoColumn:
     """One decoder-side-information column retained in its compact device representation."""
 
-    dictionaries: tuple[torch.Tensor, ...] | None
-    codes: tuple[torch.Tensor, ...] | None
+    chunks: tuple[_CompressedHistoryChunk, ...] | None
     dense: torch.Tensor | None
-    chunk_ranges: tuple[tuple[int, int], ...] | None
 
 
 class SideInfoMatrix:
     """GPU-resident compressed side information with batched row decoding.
 
-    A matrix stores one history vector per column. Compressed vectors keep their dictionaries and
-    codes on the selected device and decode only requested rows; dense ``HistoryVector`` values
-    use a device tensor directly. Normalization factors belong to the target and are applied to
+    A matrix stores one history vector per column. Compressed vectors keep their adaptive chunks
+    on the selected device and decode only requested rows; dense ``HistoryVector`` values use a
+    device tensor directly. Normalization factors belong to the target and are applied to
     gathered rows on the device.
     """
 
@@ -102,10 +100,8 @@ class SideInfoMatrix:
         if target == self._device:
             return self
         self._columns = tuple(_SideInfoColumn(
-            None if column.dictionaries is None else tuple(item.to(target) for item in column.dictionaries),
-            None if column.codes is None else tuple(item.to(target) for item in column.codes),
+            None if column.chunks is None else tuple(item.to(target) for item in column.chunks),
             None if column.dense is None else column.dense.to(target),
-            column.chunk_ranges,
         ) for column in self._columns)
         self._norm_factors = self._norm_factors.to(target)
         self._slice_ids = self._slice_ids.to(target)
@@ -115,62 +111,46 @@ class SideInfoMatrix:
     @staticmethod
     def _encode_column(value: HistoryVector, vector_size: int, device: torch.device) -> _SideInfoColumn:
         if isinstance(value, CompressedHistoryVector):
-            chunks = tuple(value._iter_encoded_chunks())
-            dictionaries: list[torch.Tensor] = []
-            codes: list[torch.Tensor] = []
-            ranges: list[tuple[int, int]] = []
-            for chunk in chunks:
-                dictionaries.append(chunk.dictionary.to(device))
-                codes.append(chunk.codes.to(device))
-                ranges.append((chunk.start, chunk.stop))
+            chunks = tuple(chunk.to(device) for chunk in value._iter_encoded_chunks())
             if chunks:
-                return _SideInfoColumn(tuple(dictionaries), tuple(codes), None, tuple(ranges))
+                return _SideInfoColumn(chunks, None)
         values = value.materialize()
         assert values.numel() == vector_size
-        return _SideInfoColumn(None, None, values.to(device=device, dtype=torch.float32), None)
+        return _SideInfoColumn(None, values.to(device=device, dtype=torch.float32))
 
     def _decode_column(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
         if column.dense is not None:
             return column.dense[rows]
-        assert column.dictionaries is not None and column.codes is not None and column.chunk_ranges is not None
+        assert column.chunks is not None
         decoded = torch.empty(rows.shape, device=rows.device, dtype=torch.float32)
-        for dictionary, codes, (start, stop) in zip(
-            column.dictionaries, column.codes, column.chunk_ranges, strict=True
-        ):
-            selected = (rows >= start) & (rows < stop)
+        for chunk in column.chunks:
+            selected = (rows >= chunk.start) & (rows < chunk.stop)
             if selected.any():
-                indices = rows[selected] - start
-                # CUDA cannot advanced-index uint16/uint32 tensors. Keep the resident history
-                # compact and widen only the current transient gather.
-                gathered = codes.to(torch.int32)[indices] if codes.dtype in (torch.uint16, torch.uint32) else codes[indices]
-                decoded[selected] = dictionary[gathered.long()].float()
+                decoded[selected] = chunk.decode_rows(rows[selected] - chunk.start)
         return decoded
 
-    def _decode_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
-        if column.codes is None:
+    def _decode_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return unsigned local keys and physical chunk ids for selected rows."""
+        if column.chunks is None:
             assert column.dense is not None
-            return column.dense[rows].view(torch.int32).to(torch.int64)
-        assert column.dictionaries is not None and column.chunk_ranges is not None
-        # A transient offset gives each chunk-local code a distinct key. It is only used while
-        # grouping a batch and does not widen the resident uint8/uint16/uint32 code arrays.
-        offsets = tuple(sum(dictionary.numel() for dictionary in column.dictionaries[:index])
-                        for index in range(len(column.dictionaries)))
+            keys = column.dense[rows].view(torch.int32).to(torch.int64) & 0xFFFF_FFFF
+            return keys, torch.zeros(rows.shape, dtype=torch.int64, device=rows.device)
+
         keys = torch.empty(rows.shape, device=rows.device, dtype=torch.int64)
-        for index, (codes, (start, stop)) in enumerate(zip(column.codes, column.chunk_ranges, strict=True)):
-            selected = (rows >= start) & (rows < stop)
+        chunk_ids = torch.empty_like(keys)
+        for index, chunk in enumerate(column.chunks):
+            selected = (rows >= chunk.start) & (rows < chunk.stop)
             if selected.any():
-                indices = rows[selected] - start
-                gathered = codes.to(torch.int32)[indices] if codes.dtype in (torch.uint16, torch.uint32) else codes[indices]
-                keys[selected] = gathered.long() + offsets[index]
-        return keys
+                keys[selected] = chunk.local_keys(rows[selected] - chunk.start)
+                chunk_ids[selected] = index
+        return keys, chunk_ids
 
     def _group_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
         """Add target-normalization slice identity to compact codes used for row grouping."""
-        codes = self._decode_codes(column, rows)
-        # Dense bit patterns are signed int32 while compressed codes are non-negative. Shift the
-        # former into the same unsigned 32-bit range, then reserve one 32-bit lane per layer.
-        codes = codes + (1 << 31)
-        return self._slice_ids[rows].to(torch.int64) * (1 << 32) + codes
+        codes, chunk_ids = self._decode_codes(column, rows)
+        chunk_count = 1 if column.chunks is None else len(column.chunks)
+        region_ids = self._slice_ids[rows].to(torch.int64) * chunk_count + chunk_ids
+        return region_ids * (1 << 32) + codes
 
     def __getitem__(self, rows: slice | torch.Tensor | Sequence[int] | int) -> torch.Tensor:
         """Decode selected rows as a float32 ``(rows, columns)`` tensor."""
