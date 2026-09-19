@@ -71,3 +71,15 @@ Rest:
 5. Installed dependency?      → use it
 6. Fit in one line?           → one line
 7. Only then: the minimum that works
+
+---
+
+## 4. Code Review Goals
+
+- Logic and behavior are important review concerns and must be checked carefully.
+- Optimize for code that human researchers can quickly read, understand, and modify without reconstructing hidden intent.
+- Keep a clear structure with proper separation of concerns and tasks. A file, class, or function's place and boundaries should make its responsibility apparent.
+- Prefer a direct data flow and descriptive names over extra branches, hidden state changes, duplicate logic, or speculative flexibility.
+- Add functions and abstractions when they clarify a distinct task, protect a meaningful boundary, or remove real duplication; avoid both monolithic code and needless one-use indirection.
+- Keep research assumptions and important state transitions explicit in the closest relevant code, using concise comments or docstrings where the structure alone cannot explain them.
+- Recheck criticism against the surrounding code and tests before reporting it, separating demonstrated problems from optional style preferences.
