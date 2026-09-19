@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import os
@@ -13,13 +13,15 @@ import numpy as np
 import torch
 
 from FL_code.FL_core.codec import Access, CompressionRecord
+from FL_code.FL_core.utils import normalization_params
 
 
 _PREFIX_BITS = 18
 _CHUNK_ELEMENTS = 1 << 20
 _COMPRESSION_WORKERS = min(4, os.cpu_count() or 1)
 _MIN_PACKING_SAVINGS = 0.1
-_STORAGE_FORMAT = "adaptive_split_packed_v1"
+_NORMALIZATION_REFRESH_ROUNDS = 5
+_STORAGE_FORMAT = "normalized_adaptive_split_packed_v2"
 
 
 def float_prefix(values: torch.Tensor, match_bits: int = _PREFIX_BITS) -> torch.Tensor:
@@ -29,6 +31,61 @@ def float_prefix(values: torch.Tensor, match_bits: int = _PREFIX_BITS) -> torch.
     if match_bits == 32:
         return values
     return (values.view(torch.int32) & -(1 << (32 - match_bits))).view(torch.float32)
+
+
+def _normalization_ranges(size: int, slices: Sequence[slice] | None) -> tuple[tuple[int, int], ...]:
+    """Resolve contiguous layer slices covering one complete history vector."""
+    if size == 0:
+        return ()
+    resolved = ((0, size, 1),) if slices is None else tuple(value.indices(size) for value in slices)
+    assert all(step == 1 and start < stop for start, stop, step in resolved), (
+        "History normalization slices must be non-empty contiguous ranges."
+    )
+    ranges = tuple((start, stop) for start, stop, _ in resolved)
+    assert ranges and ranges[0][0] == 0 and ranges[-1][1] == size
+    assert all(left[1] == right[0] for left, right in zip(ranges, ranges[1:])), (
+        "History normalization slices must cover the vector exactly once and in order."
+    )
+    return ranges
+
+
+def _normalize_history(
+    value: torch.Tensor,
+    ranges: tuple[tuple[int, int], ...],
+    supplied_factors: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize each layer using supplied factors or freshly estimated scale and center."""
+    if not ranges:
+        return value.clone(), torch.empty((0, 2), dtype=torch.float32)
+    if supplied_factors is None:
+        def estimate(bounds: tuple[int, int]) -> tuple[float, float]:
+            """Estimate one layer independently so refresh work can run concurrently."""
+            start, stop = bounds
+            layer = value[start:stop]
+            minimum, maximum = torch.aminmax(layer)
+            if minimum == maximum:
+                return 1.0, float(minimum)
+            magnitude = max(abs(float(minimum)), abs(float(maximum)))
+            scale, center = normalization_params(layer / magnitude)
+            return scale * magnitude, center * magnitude
+
+        if len(ranges) <= 1 or _COMPRESSION_WORKERS == 1:
+            factors = tuple(map(estimate, ranges))
+        else:
+            with ThreadPoolExecutor(max_workers=min(_COMPRESSION_WORKERS, len(ranges))) as executor:
+                factors = tuple(executor.map(estimate, ranges))
+        resolved = torch.tensor(factors, dtype=torch.float32)
+    else:
+        assert supplied_factors.shape == (len(ranges), 2)
+        resolved = supplied_factors.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
+    assert bool(torch.isfinite(resolved).all()) and bool((resolved[:, 0] != 0).all()), (
+        "History normalization factors must contain finite, non-zero scales and finite centers."
+    )
+
+    normalized = value.clone()
+    for (start, stop), (scale, center) in zip(ranges, resolved, strict=True):
+        normalized[start:stop].sub_(center).div_(scale)
+    return normalized, resolved
 
 
 class HistoryVector:
@@ -232,7 +289,12 @@ def _compress_chunk(value: torch.Tensor, start: int, stop: int) -> _CompressedHi
 class CompressedHistoryVector(HistoryVector):
     """Layer-normalized, adaptively packed CPU history with the HistoryVector read contract."""
 
-    def __init__(self, value: torch.Tensor) -> None:
+    def __init__(
+        self,
+        value: torch.Tensor,
+        norm_slices: Sequence[slice] | None = None,
+        normalization_factors: torch.Tensor | None = None,
+    ) -> None:
         assert (
             isinstance(value, torch.Tensor)
             and value.dtype is torch.float32
@@ -241,6 +303,10 @@ class CompressedHistoryVector(HistoryVector):
         ), "History value must be a one-dimensional CPU float32 tensor."
         source = value.detach().contiguous()
         self._logical_size: int = source.numel()
+        self._normalization_ranges = _normalization_ranges(source.numel(), norm_slices)
+        source, self._normalization_factors = _normalize_history(
+            source, self._normalization_ranges, normalization_factors
+        )
         bounds = tuple(
             (source, start, min(start + _CHUNK_ELEMENTS, source.numel()))
             for start in range(0, source.numel(), _CHUNK_ELEMENTS)
@@ -266,13 +332,21 @@ class CompressedHistoryVector(HistoryVector):
             "packed_high": chunk.packed_high,
             "code_bits": chunk.code_bits,
         } for chunk in self._chunks)
-        return {"format": _STORAGE_FORMAT, "logical_size": self._logical_size, "chunks": chunks}
+        return {
+            "format": _STORAGE_FORMAT,
+            "logical_size": self._logical_size,
+            "normalization_ranges": self._normalization_ranges,
+            "normalization_factors": self._normalization_factors,
+            "chunks": chunks,
+        }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore adaptive chunks and narrow unsigned direct-code dtypes."""
         assert state["format"] == _STORAGE_FORMAT, f"Unknown compressed-history format: {state['format']!r}."
         dtypes = {"torch.uint8": torch.uint8, "torch.uint16": torch.uint16, "torch.uint32": torch.uint32}
         self._logical_size = state["logical_size"]
+        self._normalization_ranges = state["normalization_ranges"]
+        self._normalization_factors = state["normalization_factors"]
         self._chunks = tuple(
             _CompressedHistoryChunk(
                 item["start"],
@@ -295,14 +369,39 @@ class CompressedHistoryVector(HistoryVector):
         yield from self._chunks
 
     @property
+    def normalization_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Return the layer ranges used by storage normalization."""
+        return self._normalization_ranges
+
+    @property
+    def normalization_factors(self) -> torch.Tensor:
+        """Return an owned copy of per-layer ``(scale, center)`` storage factors."""
+        return self._normalization_factors.clone()
+
+    @property
     def resident_nbytes(self) -> int:
         """Return bytes occupied by raw values, dictionaries, and code arrays."""
-        return sum(chunk.nbytes for chunk in self._chunks)
+        return self._normalization_factors.numel() * self._normalization_factors.element_size() + sum(
+            chunk.nbytes for chunk in self._chunks
+        )
+
+    def _restore_normalization(self, values: torch.Tensor, start: int) -> torch.Tensor:
+        """Invert every stored layer transform overlapping one decoded range."""
+        stop = start + values.numel()
+        for (layer_start, layer_stop), (scale, center) in zip(
+            self._normalization_ranges, self._normalization_factors, strict=True
+        ):
+            overlap_start, overlap_stop = max(start, layer_start), min(stop, layer_stop)
+            if overlap_start < overlap_stop:
+                values[overlap_start - start:overlap_stop - start].mul_(scale).add_(center)
+        return values
 
     def iter_chunks(self) -> Iterator[tuple[slice, torch.Tensor]]:
         """Decode and yield compressed chunks in their original coordinate order."""
         for chunk in self._chunks:
-            yield slice(chunk.start, chunk.stop), chunk.decode_all()
+            yield slice(chunk.start, chunk.stop), self._restore_normalization(
+                chunk.decode_all(), chunk.start
+            )
 
     def materialize(self) -> torch.Tensor:
         """Explicitly decode the complete vector, including prefix quantization."""
@@ -311,7 +410,8 @@ class CompressedHistoryVector(HistoryVector):
         else:
             with ThreadPoolExecutor(max_workers=min(_COMPRESSION_WORKERS, len(self._chunks))) as executor:
                 chunks = list(executor.map(_CompressedHistoryChunk.decode_all, self._chunks))
-        return torch.cat(chunks) if chunks else torch.empty(0, dtype=torch.float32)
+        normalized = torch.cat(chunks) if chunks else torch.empty(0, dtype=torch.float32)
+        return self._restore_normalization(normalized, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,12 +437,21 @@ class ReconstructionHistory:
 
     def config_snapshot(self) -> dict[str, Any]:
         """Describe the history implementation and fixed storage constants."""
+        normalization_slices = (
+            tuple((value.start, value.stop, value.step) for value in self._norm_slices)
+            if isinstance(self, CompressedReconstructionHistory) and self._norm_slices is not None
+            else None
+        )
         return {
             "implementation": f"{type(self).__module__}.{type(self).__qualname__}",
             "max_per_client": self.max_per_client,
             "prefix_bits": _PREFIX_BITS if isinstance(self, CompressedReconstructionHistory) else 32,
             "chunk_elements": _CHUNK_ELEMENTS,
             "storage_format": _STORAGE_FORMAT if isinstance(self, CompressedReconstructionHistory) else "float32",
+            "normalization_refresh_rounds": (
+                _NORMALIZATION_REFRESH_ROUNDS if isinstance(self, CompressedReconstructionHistory) else None
+            ),
+            "normalization_slices": normalization_slices,
         }
 
     def copy(self) -> ReconstructionHistory:
@@ -352,7 +461,7 @@ class ReconstructionHistory:
         copied._temporal = {client_id: entries.copy() for client_id, entries in self._temporal.items()}
         return copied
 
-    def _retain(self, value: torch.Tensor) -> HistoryVector:
+    def _retain(self, value: torch.Tensor, round_id: int, client_id: int) -> HistoryVector:
         """Retain one committed reconstruction in the reference representation."""
         return HistoryVector(value)
 
@@ -363,7 +472,7 @@ class ReconstructionHistory:
         if access is Access.NONE:
             return
         entry = HistoryEntry(
-            value=self._retain(reconst),
+            value=self._retain(reconst, record.round_id, record.client_id),
             round_id=record.round_id,
             client_id=record.client_id,
             access=access,
@@ -383,7 +492,7 @@ class ReconstructionHistory:
         )
         previous = server_ledger[-1]
         replacement = HistoryEntry(
-            value=self._retain(reconst),
+            value=self._retain(reconst, round_id, client_id),
             round_id=previous.round_id,
             client_id=previous.client_id,
             access=previous.access,
@@ -415,9 +524,30 @@ class ReconstructionHistory:
 class CompressedReconstructionHistory(ReconstructionHistory):
     """ReconstructionHistory variant retaining every value in compressed chunk storage."""
 
-    def _retain(self, value: torch.Tensor) -> HistoryVector:
-        """Retain a decoded reconstruction as a CompressedHistoryVector."""
-        return CompressedHistoryVector(value)
+    def __init__(self, max_per_client: int | None, norm_slices: Sequence[slice] | None = None) -> None:
+        super().__init__(max_per_client)
+        self._norm_slices = None if norm_slices is None else tuple(norm_slices)
+        self._normalization_cache: dict[int, tuple[int, torch.Tensor]] = {}
+
+    def copy(self) -> CompressedReconstructionHistory:
+        """Copy ledger and normalization-cache mappings while sharing immutable payloads."""
+        copied = super().copy()
+        assert isinstance(copied, CompressedReconstructionHistory)
+        copied._normalization_cache = self._normalization_cache.copy()
+        return copied
+
+    def _retain(self, value: torch.Tensor, round_id: int, client_id: int) -> HistoryVector:
+        """Normalize with a periodically refreshed client factor set, then retain compactly."""
+        cached = self._normalization_cache.get(client_id)
+        refresh = cached is None or round_id < cached[0] or round_id - cached[0] >= _NORMALIZATION_REFRESH_ROUNDS
+        stored = CompressedHistoryVector(
+            value,
+            self._norm_slices,
+            None if refresh else cached[1],
+        )
+        if refresh:
+            self._normalization_cache[client_id] = (round_id, stored.normalization_factors)
+        return stored
 
 
 __all__ = [

@@ -37,6 +37,7 @@ class _SideInfoColumn:
 
     chunks: tuple[_CompressedHistoryChunk, ...] | None
     dense: torch.Tensor | None
+    source_norm_factors: torch.Tensor | None
 
 
 class SideInfoMatrix:
@@ -44,8 +45,8 @@ class SideInfoMatrix:
 
     A matrix stores one history vector per column. Compressed vectors keep their adaptive chunks
     on the selected device and decode only requested rows; dense ``HistoryVector`` values use a
-    device tensor directly. Normalization factors belong to the target and are applied to
-    gathered rows on the device.
+    device tensor directly. Gathered compressed values are restored with their stored source
+    factors, then normalized with the current target factors on the device.
     """
 
     def __init__(
@@ -102,32 +103,44 @@ class SideInfoMatrix:
         self._columns = tuple(_SideInfoColumn(
             None if column.chunks is None else tuple(item.to(target) for item in column.chunks),
             None if column.dense is None else column.dense.to(target),
+            None if column.source_norm_factors is None else column.source_norm_factors.to(target),
         ) for column in self._columns)
         self._norm_factors = self._norm_factors.to(target)
         self._slice_ids = self._slice_ids.to(target)
         self._device = target
         return self
 
-    @staticmethod
-    def _encode_column(value: HistoryVector, vector_size: int, device: torch.device) -> _SideInfoColumn:
+    def _encode_column(
+        self, value: HistoryVector, vector_size: int, device: torch.device
+    ) -> _SideInfoColumn:
         if isinstance(value, CompressedHistoryVector):
+            expected_ranges = tuple((item.start, item.stop) for item in self._norm_slices)
+            assert value.normalization_ranges == expected_ranges, (
+                "Stored history normalization slices differ from the current model slices."
+            )
             chunks = tuple(chunk.to(device) for chunk in value._iter_encoded_chunks())
             if chunks:
-                return _SideInfoColumn(chunks, None)
+                return _SideInfoColumn(chunks, None, value.normalization_factors.to(device))
         values = value.materialize()
         assert values.numel() == vector_size
-        return _SideInfoColumn(None, values.to(device=device, dtype=torch.float32))
+        return _SideInfoColumn(None, values.to(device=device, dtype=torch.float32), None)
 
     def _decode_column(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
         if column.dense is not None:
-            return column.dense[rows]
-        assert column.chunks is not None
-        decoded = torch.empty(rows.shape, device=rows.device, dtype=torch.float32)
-        for chunk in column.chunks:
-            selected = (rows >= chunk.start) & (rows < chunk.stop)
-            if selected.any():
-                decoded[selected] = chunk.decode_rows(rows[selected] - chunk.start)
-        return decoded
+            decoded = column.dense[rows]
+        else:
+            assert column.chunks is not None
+            decoded = torch.empty(rows.shape, device=rows.device, dtype=torch.float32)
+            for chunk in column.chunks:
+                selected = (rows >= chunk.start) & (rows < chunk.stop)
+                if selected.any():
+                    decoded[selected] = chunk.decode_rows(rows[selected] - chunk.start)
+        slice_ids = self._slice_ids[rows].long()
+        if column.source_norm_factors is not None:
+            source_factors = column.source_norm_factors[slice_ids]
+            decoded.mul_(source_factors[:, 0]).add_(source_factors[:, 1])
+        target_factors = self._norm_factors[slice_ids]
+        return decoded.sub_(target_factors[:, 1]).div_(target_factors[:, 0])
 
     def _decode_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return unsigned local keys and physical chunk ids for selected rows."""
@@ -166,14 +179,7 @@ class SideInfoMatrix:
             f"SideInfoMatrix row indices must be in [0, {self._shape[0]}).")
         if not self._columns:
             return torch.zeros((row_indices.numel(), 1), device=self._device, dtype=self._dtype)
-        decoded = torch.stack([self._decode_column(column, row_indices) for column in self._columns], dim=1)
-        if self._norm_factors.numel():
-            for vector_slice, (scale, center) in zip(
-                self._norm_slices, self._norm_factors, strict=True
-            ):
-                positions = (row_indices >= vector_slice.start) & (row_indices < vector_slice.stop)
-                decoded[positions] = (decoded[positions] - center) / scale
-        return decoded
+        return torch.stack([self._decode_column(column, row_indices) for column in self._columns], dim=1)
 
     def iter_code_columns(self) -> Iterator[torch.Tensor]:
         """Yield compact row keys for deduplication without decoding compressed columns."""

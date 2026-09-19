@@ -61,7 +61,9 @@ def test_training_decodes_sampled_side_information_once_per_epoch() -> None:
 
 def test_side_information_matrix_decodes_compressed_rows_and_normalizes() -> None:
     values = torch.arange(20, dtype=torch.float32) / 10
-    compressed = CompressedHistoryVector(values)
+    compressed = CompressedHistoryVector(
+        values, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matrix = SideInfoMatrix(
         [compressed, HistoryVector(values + 1)], 20, torch.tensor([[2.0, 1.0]]),
@@ -84,7 +86,9 @@ def test_side_information_matrix_gathers_uint16_codes_on_accelerator() -> None:
         torch.arange(distinct, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
     ).to(torch.int32)
     values = patterns.repeat(4).view(torch.float32)
-    compressed = CompressedHistoryVector(values)
+    compressed = CompressedHistoryVector(
+        values, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matrix = SideInfoMatrix(
         [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
@@ -105,7 +109,9 @@ def test_side_information_matrix_gathers_packed_codes_on_accelerator() -> None:
         torch.arange(distinct, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
     ).to(torch.int32)
     values = patterns.repeat(16).view(torch.float32)
-    compressed = CompressedHistoryVector(values)
+    compressed = CompressedHistoryVector(
+        values, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matrix = SideInfoMatrix(
         [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
@@ -126,7 +132,9 @@ def test_side_information_matrix_decodes_across_adaptive_chunk_layouts() -> None
     packed = patterns.repeat(_CHUNK_ELEMENTS // patterns.numel())
     raw = patterns[:100]
     values = torch.cat((packed, raw)).view(torch.float32)
-    compressed = CompressedHistoryVector(values)
+    compressed = CompressedHistoryVector(
+        values, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matrix = SideInfoMatrix(
         [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
@@ -146,7 +154,7 @@ def test_unique_row_groups_uses_compact_codes_and_normalization_slice() -> None:
     values = torch.zeros(4)
     slices = (slice(0, 2), slice(2, 4))
     matrix = SideInfoMatrix(
-        [CompressedHistoryVector(values)], 4, torch.tensor([[2.0, 1.0], [3.0, 1.0]]),
+        [CompressedHistoryVector(values, slices)], 4, torch.tensor([[2.0, 1.0], [3.0, 1.0]]),
         slices, torch.device("cpu"),
     )
     _, inverse, collisions = unique_row_groups((matrix,), 1)

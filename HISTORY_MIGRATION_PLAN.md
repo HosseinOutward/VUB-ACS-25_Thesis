@@ -4,6 +4,12 @@ Builds on commit "history: add optional compressed reconstruction-history storag
 `optimized_history.py` beside the old ledger as an opt-in feature. That opt-in shape is the problem
 this plan removes.
 
+> **Later storage revision:** the implementation now normalizes every model-layer slice before
+> 18-bit prefix truncation. Factors are cached per client for five rounds and retained with each
+> vector for decoder-side inversion. Chunks then choose raw prefixes, byte-aligned direct codes, or
+> split-packed codes according to retained size. The older decisions below document the migration
+> that preceded this revision and are not the current storage contract.
+
 ## 1. Goal
 
 A researcher reading `FL_code/cancer_protocol/` should see one ledger with one storage format, and

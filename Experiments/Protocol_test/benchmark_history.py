@@ -38,6 +38,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commits", type=int, default=2)
     parser.add_argument("--elements", type=int, default=100_000)
+    parser.add_argument("--layers", type=int, default=1, help="Number of equal-sized normalization layers.")
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--trace-delta", type=Path, help="Path to a flat float32 trace delta .pt file.")
     parser.add_argument("--output", type=Path)
@@ -70,9 +71,13 @@ def _load_delta(args: argparse.Namespace) -> tuple[torch.Tensor, str]:
 
 def _benchmark_representation(
     history_type: type[ReconstructionHistory], delta: torch.Tensor, commits: int,
+    norm_slices: tuple[slice, ...],
 ) -> dict[str, Any]:
     """Measure commit/materialization time, retained bytes per value, and storage WMAPE."""
-    history = history_type(commits)
+    history = (
+        CompressedReconstructionHistory(commits, norm_slices)
+        if history_type is CompressedReconstructionHistory else history_type(commits)
+    )
     commit_seconds: list[float] = []
     for round_id in range(commits):
         value = delta * (1 + round_id / 1_000)
@@ -114,22 +119,32 @@ def _benchmark_representation(
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     """Run both history representations against one synthetic or trace delta."""
-    assert args.commits > 0
+    assert args.commits > 0 and args.layers > 0
     delta, source = _load_delta(args)
+    assert args.layers <= delta.numel()
+    norm_slices = tuple(
+        slice(index * delta.numel() // args.layers, (index + 1) * delta.numel() // args.layers)
+        for index in range(args.layers)
+    )
     representations = (ReconstructionHistory, CompressedReconstructionHistory)
     return {
         "source": source,
         "vector_elements": delta.numel(),
+        "normalization_layers": args.layers,
         "commits": args.commits,
         "representations": [
-            _benchmark_representation(item, delta, args.commits) for item in representations
+            _benchmark_representation(item, delta, args.commits, norm_slices)
+            for item in representations
         ],
     }
 
 
 def _print_results(result: dict[str, Any]) -> None:
     """Print a compact human-readable benchmark table."""
-    print(f"source={result['source']} elements={result['vector_elements']:,} commits={result['commits']}")
+    print(
+        f"source={result['source']} elements={result['vector_elements']:,} "
+        f"layers={result['normalization_layers']} commits={result['commits']}"
+    )
     print("\nRepresentation                         commit s   materialize s   bytes/value   WMAPE %")
     for row in result["representations"]:
         print(

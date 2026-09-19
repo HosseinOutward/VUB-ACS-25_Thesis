@@ -21,6 +21,21 @@ def _record(round_id: int, client_id: int, round_name: str = "T") -> Compression
     return CompressionRecord(round_id, client_id, round_name)
 
 
+def _storage_expected(value: torch.Tensor, stored: CompressedHistoryVector) -> torch.Tensor:
+    """Apply the stored normalization, prefix truncation, and inverse transform explicitly."""
+    normalized = value.contiguous().clone()
+    for (start, stop), (scale, center) in zip(
+        stored.normalization_ranges, stored.normalization_factors, strict=True
+    ):
+        normalized[start:stop].sub_(center).div_(scale)
+    normalized = float_prefix(normalized)
+    for (start, stop), (scale, center) in zip(
+        stored.normalization_ranges, stored.normalization_factors, strict=True
+    ):
+        normalized[start:stop].mul_(scale).add_(center)
+    return normalized
+
+
 @pytest.mark.parametrize("history_type", [ReconstructionHistory, CompressedReconstructionHistory])
 def test_commit_stores_a_copy_not_an_alias_of_the_caller_tensor(
     history_type: type[ReconstructionHistory],
@@ -116,7 +131,7 @@ def test_history_vector_owns_float32_cpu_values_and_fixed_chunks() -> None:
 def test_compressed_history_prefixes_values_and_exposes_encoded_chunks() -> None:
     value = torch.tensor([0.0, -0.0, 1.0, 1.0, 2.0], dtype=torch.float32).repeat(100)
     stored = CompressedHistoryVector(value)
-    expected = float_prefix(value, _PREFIX_BITS)
+    expected = _storage_expected(value, stored)
 
     torch.testing.assert_close(stored.materialize(), expected)
     chunk = next(stored._iter_encoded_chunks())
@@ -133,8 +148,41 @@ def test_compressed_history_accepts_noncontiguous_input() -> None:
     value = torch.arange(20, dtype=torch.float32)[::2]
     assert not value.is_contiguous()
 
-    assert torch.equal(
-        CompressedHistoryVector(value).materialize(), float_prefix(value.contiguous())
+    stored = CompressedHistoryVector(value)
+    assert torch.equal(stored.materialize(), _storage_expected(value, stored))
+
+
+def test_compressed_history_normalizes_each_layer_before_prefixing() -> None:
+    slices = (slice(0, 4), slice(4, 8))
+    value = torch.tensor([-2.0, -1.0, 1.0, 2.0, -2e6, -1e6, 1e6, 2e6])
+    stored = CompressedHistoryVector(value, slices)
+
+    assert stored.normalization_ranges == ((0, 4), (4, 8))
+    assert not torch.equal(stored.normalization_factors[0], stored.normalization_factors[1])
+    assert torch.equal(stored.materialize(), _storage_expected(value, stored))
+
+
+def test_compressed_history_reuses_client_factors_then_refreshes_them() -> None:
+    slices = (slice(0, 4), slice(4, 8))
+    history = CompressedReconstructionHistory(4, slices)
+    first = torch.tensor([-2.0, -1.0, 1.0, 2.0, -20.0, -10.0, 10.0, 20.0])
+    changed = first * 100
+
+    history.commit(first, _record(0, 3), Access.SERVER_ONLY)
+    history.commit(changed, _record(1, 3), Access.SERVER_ONLY)
+    history.commit(changed, _record(1, 4), Access.SERVER_ONLY)
+    history.commit(changed, _record(5, 3), Access.SERVER_ONLY)
+
+    client_entries = history.view(Access.SERVER_ONLY, 0)[3]
+    assert all(isinstance(entry.value, CompressedHistoryVector) for entry in client_entries)
+    factors = [entry.value.normalization_factors for entry in client_entries]
+    assert torch.equal(factors[0], factors[1])
+    assert not torch.equal(factors[1], factors[2])
+    other_client = history.view(Access.SERVER_ONLY, 0)[4][0].value
+    assert isinstance(other_client, CompressedHistoryVector)
+    assert torch.equal(other_client.normalization_factors, factors[2])
+    assert history.config_snapshot()["normalization_slices"] == (
+        (0, 4, None), (4, 8, None)
     )
 
 
@@ -149,7 +197,9 @@ def test_compressed_history_selects_the_smallest_worthwhile_layout(
 ) -> None:
     bit_patterns = (torch.arange(distinct, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000).to(torch.int32)
     value = bit_patterns.repeat(repeats).view(torch.float32)
-    chunk = next(CompressedHistoryVector(value)._iter_encoded_chunks())
+    chunk = next(CompressedHistoryVector(
+        value, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )._iter_encoded_chunks())
     assert chunk.layout == layout
     assert chunk.codes is not None
     assert chunk.codes.dtype is dtype
@@ -161,13 +211,15 @@ def test_compressed_history_uses_raw_prefixes_when_a_dictionary_would_expand_dat
     patterns = (
         torch.arange(257, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000
     ).to(torch.int32)
-    stored = CompressedHistoryVector(patterns.view(torch.float32))
+    stored = CompressedHistoryVector(
+        patterns.view(torch.float32), normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
     chunk = next(stored._iter_encoded_chunks())
 
     assert chunk.layout == "raw"
     assert chunk.dictionary is None and chunk.codes is None and chunk.code_bits is None
     assert chunk.nbytes == patterns.numel() * 4
-    assert torch.equal(stored.materialize(), float_prefix(patterns.view(torch.float32)))
+    assert torch.equal(stored.materialize(), _storage_expected(patterns.view(torch.float32), stored))
 
 
 @pytest.mark.parametrize(("distinct", "repeats"), [(257, 16), (65_536, 4), (65_537, 8)])
@@ -177,7 +229,10 @@ def test_compressed_history_torch_serialization_preserves_layout(
     patterns = (
         torch.arange(distinct, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000
     ).to(torch.int32)
-    original = CompressedHistoryVector(patterns.repeat(repeats).view(torch.float32))
+    original = CompressedHistoryVector(
+        patterns.repeat(repeats).view(torch.float32),
+        normalization_factors=torch.tensor([[1.0, 0.0]]),
+    )
     buffer = io.BytesIO()
     torch.save(original, buffer)
     buffer.seek(0)
@@ -189,8 +244,8 @@ def test_compressed_history_torch_serialization_preserves_layout(
         original_chunk.layout, original_chunk.code_bits)
     assert restored_chunk.codes is not None and original_chunk.codes is not None
     assert restored_chunk.codes.dtype is original_chunk.codes.dtype
-    assert torch.equal(
-        original.materialize(), float_prefix(patterns.repeat(repeats).view(torch.float32)))
+    expected = _storage_expected(patterns.repeat(repeats).view(torch.float32), original)
+    assert torch.equal(original.materialize(), expected)
     assert torch.equal(restored.materialize(), original.materialize())
 
 
@@ -205,5 +260,7 @@ def test_compressed_history_ledger_uses_shared_entries_and_reports_constants() -
         "max_per_client": 2,
         "prefix_bits": _PREFIX_BITS,
         "chunk_elements": _CHUNK_ELEMENTS,
-        "storage_format": "adaptive_split_packed_v1",
+        "storage_format": "normalized_adaptive_split_packed_v2",
+        "normalization_refresh_rounds": 5,
+        "normalization_slices": None,
     }

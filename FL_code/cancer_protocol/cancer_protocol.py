@@ -57,7 +57,9 @@ class _WZProtocol(BaseProtocol):
             cache_overwrite,
         )
         self.last_trained_codec = {}
-        self._recons_history = CompressedReconstructionHistory(self.max_per_client_recons_history)
+        self._recons_history = CompressedReconstructionHistory(
+            self.max_per_client_recons_history, self.sd_slices
+        )
         self.histories = (self._recons_history,)
         self.allocate_training_histories()
 
