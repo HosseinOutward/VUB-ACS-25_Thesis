@@ -9,7 +9,6 @@ import multiprocessing
 import subprocess
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Literal
 
@@ -82,6 +81,7 @@ class ReplayPlan(BaseModel):
     comparisons: tuple[tuple[str, str], ...] = ()
     seed: int = Field(default=43, ge=0)
     gpu_ids: tuple[int, ...] = ()
+    max_parallel_cases: int = Field(default=1, ge=1)
 
     @model_validator(mode="after")
     def validate_cases(self) -> ReplayPlan:
@@ -90,6 +90,9 @@ class ReplayPlan(BaseModel):
         identities = [(case.codec_id, case.case_id) for case in self.cases]
         assert len(set(identities)) == len(identities), "Cases must have unique (codec_id, case_id) identities."
         assert len(set(self.gpu_ids)) == len(self.gpu_ids) and all(gpu >= 0 for gpu in self.gpu_ids)
+        assert self.max_parallel_cases <= max(1, len(self.gpu_ids)), (
+            "max_parallel_cases cannot exceed the number of configured GPUs."
+        )
         codecs = {case.codec_id for case in self.cases}
         for candidate, reference in self.comparisons:
             assert candidate != reference and {candidate, reference} <= codecs, "Invalid comparison."
@@ -212,7 +215,8 @@ def _load_initial_history_cache(
     expected = _initial_history_identity(plan, case, trace_identity, protocol)
     assert json.loads(completion.read_text()) == expected, (
         f"Initial-history cache identity differs at {completion}.")
-    histories = torch.load(cache_dir / "histories.pt", map_location="cpu", weights_only=False)
+    histories = torch.load(
+        cache_dir / "histories.pt", map_location="cpu", weights_only=False, mmap=True)
     assert isinstance(histories, tuple)
     protocol.install_histories(histories)
 
@@ -298,6 +302,7 @@ def _provenance(plan: ReplayPlan, plan_path: Path) -> dict[str, Any]:
         "output_root": str(plan.output_root),
         "history_cache_root": str(plan.history_cache_root),
         "gpu_ids": list(plan.gpu_ids),
+        "max_parallel_cases": plan.max_parallel_cases,
         "model_training_cache": "disabled",
         "plan": json.loads(plan_path.read_text()),
     }
@@ -356,20 +361,29 @@ def _run_gpu_case(
 
 
 def _run_gpu_cases(plan: ReplayPlan, provenance: Mapping[str, Any]) -> tuple[Path, ...]:
-    """Run a serial disposable-worker queue per GPU, preserving plan order in the result."""
+    """Run memory-bounded batches whose cases each get a disposable GPU worker."""
     assert plan.gpu_ids
     context = multiprocessing.get_context("spawn")
-    with ExitStack() as stack:
-        pools = tuple(stack.enter_context(ProcessPoolExecutor(
-            max_workers=1, mp_context=context, max_tasks_per_child=1,
-        )) for _ in plan.gpu_ids)
-        futures = [
-            pools[index % len(pools)].submit(
-                _run_gpu_case, plan, plan.gpu_ids[index % len(pools)], case, provenance,
-            )
-            for index, case in enumerate(plan.cases)
-        ]
-        return tuple(future.result() for future in futures)
+    results: list[Path] = []
+    with ProcessPoolExecutor(
+        max_workers=plan.max_parallel_cases,
+        mp_context=context,
+        max_tasks_per_child=1,
+    ) as pool:
+        for start in range(0, len(plan.cases), plan.max_parallel_cases):
+            batch = plan.cases[start : start + plan.max_parallel_cases]
+            futures = [
+                pool.submit(
+                    _run_gpu_case,
+                    plan,
+                    plan.gpu_ids[(start + offset) % len(plan.gpu_ids)],
+                    case,
+                    provenance,
+                )
+                for offset, case in enumerate(batch)
+            ]
+            results.extend(future.result() for future in futures)
+    return tuple(results)
 
 
 def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:

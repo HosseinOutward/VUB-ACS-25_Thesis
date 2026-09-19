@@ -15,6 +15,12 @@ class TRansRoundCodec(RansRoundMixin, T_RoundCodec):
     round_name: ClassVar[str] = "TR"
 
 
+class OracleRansRoundCodec(RansRoundMixin, Oracle_RoundCodec):
+    """Oracle WZ quantization followed by lossless conditional rANS."""
+
+    round_name: ClassVar[str] = "OR"
+
+
 class TRansOraclePriorRoundCodec(RansRoundMixin, T_RoundCodec):
     """rANS using a source-fitted oracle prior and the quantizer's decoder SI.
 
@@ -44,6 +50,7 @@ class OracleSWOraclePriorRoundCodec(OracleSWRoundMixin, Oracle_RoundCodec):
 
 
 __all__ = [
+    "OracleRansRoundCodec",
     "OracleSWOraclePriorRoundCodec",
     "OracleSWRoundCodec",
     "TRansOraclePriorRoundCodec",

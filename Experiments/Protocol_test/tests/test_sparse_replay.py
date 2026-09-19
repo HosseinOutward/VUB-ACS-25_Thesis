@@ -164,7 +164,7 @@ def test_plan_rejects_duplicate_cases_and_unknown_comparisons(tmp_path: Path) ->
         sparse_replay.load_plan(_write_plan(tmp_path, (case,), comparisons=[["T", "missing"]]))
 
 
-def test_gpu_cases_use_one_serial_disposable_worker_queue_per_gpu(
+def test_gpu_cases_run_memory_bounded_batches_in_disposable_workers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class RecordingPool:
@@ -191,18 +191,50 @@ def test_gpu_cases_use_one_serial_disposable_worker_queue_per_gpu(
     monkeypatch.setattr(sparse_replay, "ProcessPoolExecutor", RecordingPool)
     plan = SimpleNamespace(
         gpu_ids=(2, 5),
+        max_parallel_cases=2,
         cases=tuple(SimpleNamespace(case_id=f"case{index}") for index in range(5)),
     )
 
     results = sparse_replay._run_gpu_cases(plan, {})
 
-    assert [pool.options["max_workers"] for pool in RecordingPool.instances] == [1, 1]
-    assert [pool.options["max_tasks_per_child"] for pool in RecordingPool.instances] == [1, 1]
-    assert [pool.submissions for pool in RecordingPool.instances] == [
-        [(2, "case0"), (2, "case2"), (2, "case4")],
-        [(5, "case1"), (5, "case3")],
+    assert [pool.options["max_workers"] for pool in RecordingPool.instances] == [2]
+    assert [pool.options["max_tasks_per_child"] for pool in RecordingPool.instances] == [1]
+    assert RecordingPool.instances[0].submissions == [
+        (2, "case0"), (5, "case1"), (2, "case2"), (5, "case3"), (2, "case4")
     ]
     assert results == tuple(Path(f"case{index}") for index in range(5))
+
+
+def test_gpu_cases_can_serialize_across_configured_devices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submissions: list[tuple[int, str]] = []
+
+    class RecordingPool:
+        def __init__(self, **options: Any) -> None:
+            assert options["max_workers"] == 1 and options["max_tasks_per_child"] == 1
+
+        def __enter__(self) -> RecordingPool:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def submit(
+            self, _function: Any, _plan: object, gpu_id: int, case: object, _provenance: object,
+        ) -> object:
+            submissions.append((gpu_id, case.case_id))
+            return SimpleNamespace(result=lambda: Path(case.case_id))
+
+    monkeypatch.setattr(sparse_replay, "ProcessPoolExecutor", RecordingPool)
+    plan = SimpleNamespace(
+        gpu_ids=(2, 5), max_parallel_cases=1,
+        cases=tuple(SimpleNamespace(case_id=f"case{index}") for index in range(3)),
+    )
+
+    sparse_replay._run_gpu_cases(plan, {})
+
+    assert submissions == [(2, "case0"), (5, "case1"), (2, "case2")]
 
 
 def test_run_sparse_plan_rejects_client_id_out_of_range_before_trace_ensure(

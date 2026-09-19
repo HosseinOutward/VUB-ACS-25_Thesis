@@ -8,11 +8,14 @@ import pytest
 import torch
 
 from FL_code.FL_core.utils import compress_data_list, decompress_data_list
-from FL_code.cancer_protocol.bin_coder.coded_rounds import TRansOraclePriorRoundCodec
+from FL_code.cancer_protocol.bin_coder.coded_rounds import (
+    OracleRansRoundCodec,
+    TRansOraclePriorRoundCodec,
+)
 from FL_code.cancer_protocol.bin_coder.rans_coder import HEADER, RansConfig
 from FL_code.cancer_protocol.bin_coder.rans_mixin import RansRoundMixin
 from FL_code.cancer_protocol.history import HistoryVector
-from FL_code.cancer_protocol.round_codecs import CancerRecord, T_RoundCodec
+from FL_code.cancer_protocol.round_codecs import CancerRecord, Oracle_RoundCodec, T_RoundCodec
 
 
 class _PriorCalculator:
@@ -90,6 +93,17 @@ def _rans_problem(positions: int = 257) -> tuple[torch.Tensor, torch.Tensor]:
     first = side_info[:, 0] ^ (torch.rand(positions, generator=generator) < 0.1).long()
     second = first ^ (torch.rand(positions, generator=generator) < 0.1).long()
     return torch.stack((first, second)), side_info
+
+
+def test_oracle_rans_round_combines_oracle_quantization_with_accelerated_rans() -> None:
+    """OR must retain O's training policy while exposing the ordinary rANS transport facts."""
+    assert issubclass(OracleRansRoundCodec, Oracle_RoundCodec)
+    facts = OracleRansRoundCodec.codec_provenance(
+        bins_per_plane=2, num_planes=3, rans_lanes=2048)
+    assert facts["quantizer_training_access"] == "oracle"
+    assert facts["transport"] == "rans"
+    assert facts["resolved_transport_settings"]["rans_lanes"] == 2048
+    assert facts["coder_prior_si"] == "quantizer_decoder_si"
 
 
 def test_rans_transport_accounts_for_header_and_flush_and_decodes_separately() -> None:

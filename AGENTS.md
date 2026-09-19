@@ -72,6 +72,11 @@ Rest:
 6. Fit in one line?           → one line
 7. Only then: the minimum that works
 
+## Long experiments
+
+- Run multi-hour jobs through the detached experiment supervisor, never an interactive tool session. It records health at 1, 5, and 30 minutes, then every 90 minutes; rely on those checks instead of babysitting with repeated sleeps. Bound parallel cases by measured host RAM so the job survives chat/session loss.
+- Keep its live plotter enabled: it refreshes changed results in disposable processes, survives plot-code edits without replacing the last good plots, and exits with the experiment.
+
 ---
 
 ## 4. Code Review Goals
