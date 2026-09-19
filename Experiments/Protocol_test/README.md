@@ -1,7 +1,7 @@
 # Sparse protocol replay
 
-This experiment measures short protocol windows (one trained round, then several frozen-reuse
-rounds) placed at selected points in one deterministic, uncompressed FL trajectory. It does not
+This experiment measures explicit protocol windows (including optional retraining within a window)
+placed at selected points in one deterministic, uncompressed FL trajectory. It does not
 run compressed FL: the full client population always trains and advances the trajectory,
 independent of which clients are measured for compression.
 
@@ -11,8 +11,8 @@ independent of which clients are measured for compression.
    client deltas for every round any case needs, on one explicitly selected device. Generation
    happens once per run, before any case executes.
 2. **Cases.** `sparse_replay.py` seeds each case's preceding raw history, then replays its window:
-   every client's raw delta advances the decoder-visible history in normal server order; only the
-   case's selected clients are actually encoded/decoded. Records land under
+   every selected client's decoded reconstruction advances decoder-visible history in normal
+   server order, while unselected clients advance it with raw deltas. Records land under
    `<output_root>/cases/<codec_id>/<case_id>/`.
 3. **Records.** `records.py` is the shared completion contract: `validate_case_records` checks a
    case's CSV holds exactly its scheduled rows, and `read_completed_case` reads a finished case's
@@ -57,8 +57,10 @@ Run a plan with:
 .venv/bin/python -m Experiments.Protocol_test.plot Experiments/Protocol_test/exp_records/refactor_smoke
 ```
 
-The second `sparse_replay` invocation must reuse every completed case (identity match) without
-retraining any quantizer. Reruns reproduce trained weights, symbols, rates, and WMAPE exactly, but
+The second `sparse_replay` invocation reuses every completed case (identity match) without
+recompression. Quantizer and conditional-prior training are deliberately uncached; a case that has
+not reached `complete.json` starts cleanly in a new output directory. Seeded reruns reproduce
+trained weights, symbols, rates, and WMAPE exactly, but
 `encoder_size`, `decoder_size`, and `final_bytes` jitter by ~0.1%: they are gzip'd pickles, and
 pickling bitwise-equal torch tensors does not yield identical bytes.
 
@@ -75,28 +77,27 @@ parts:
   case and the differing top-level keys - it never silently retrains or overwrites.
 - **`provenance`**: git `HEAD`, a fingerprint (and file list) of relevant uncommitted source under
   `FL_code/` and `Experiments/Protocol_test/`, torch/CUDA versions, the GPU names actually used,
-  the plan path, output root, cache root, `gpu_ids`, `cache_overwrite`, and the original plan JSON.
-  This half is never compared for reuse: changing `gpu_ids`, the output root, the cache root, or
-  `cache_overwrite` - or a source-only documentation commit - must not force retraining.
+  the plan path, output root, compressed-history cache root, `gpu_ids`, the explicit disabled model-
+  training-cache policy, and the original plan JSON. This half is never compared for reuse: changing
+  `gpu_ids`, output location, or compressed-history cache location does not alter codec semantics.
 
 ## Oracle assumptions
 
 Every case records `oracle_assumptions` explicitly, rather than inferring them from a codec's
 display label:
 
-- `history_source = "raw_updates"`: every client's own raw delta is available to seed and advance
-  history - a worker's own raw history is locally available.
-- `history_replacement = "raw_after_measurement"`: a selected client's measured reconstruction is
-  replaced by its raw delta immediately after compression is simulated, so later rounds see exact
-  raw history rather than a lossy reconstruction.
+- `initial_history_source`: the five-round seed history is either raw updates or the declared
+  n-split reconstruction; a worker's own seeded history remains locally available.
+- `history_replacement = "decoded_updates_after_start"`: history begins with raw deltas before the
+  sparse start, then selected clients retain their decoded reconstruction so later rounds see the
+  protocol trajectory being measured.
 - `client_order = "normal"`: clients are processed in ascending id order each round; a client sees
   its own preceding rounds and earlier clients' current-round updates, never a later client's or
   its own future update.
 - `frozen_si_refresh`: whether a frozen round's side information is refreshed from advancing raw
   history (`protocol.refresh_frozen_si`); the quantizer's parameters stay frozen either way.
-- `server_history = "exact_raw_granted"`: the server-visible ledger holds exact raw history for
-  this study - not generally available after lossy transmission - which is why it is recorded as
-  an explicit oracle grant rather than assumed.
+- `server_history = "decoder_visible_reconstructions"`: after the raw prefix, the server-visible
+  ledger holds the decoded values the protocol actually produced.
 
 Quantizer-training oracle access, source-fitted prior grants, and SW oracle search are per-token
 facts and already live in `protocol_snapshot`'s `round_codecs[token]["codec_provenance"]`

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import torch
+import pytest
+from torch import nn
 
 from FL_code.FL_core.cache import model_training_hash
 from FL_code.cancer_protocol.history import CompressedHistoryVector, HistoryVector
@@ -9,7 +11,52 @@ from FL_code.cancer_protocol.wz_quantizer import (
     WZQuantizerCancer,
     WZcfgQuant,
     unique_row_groups,
+    wz_model_training_loop,
 )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="training loop requires CUDA")
+def test_training_decodes_sampled_side_information_once_per_epoch() -> None:
+    class CountingSideInfo:
+        def __init__(self, values: torch.Tensor) -> None:
+            self.values = values
+            self.shape = values.shape
+            self.calls = 0
+
+        def to(self, device: torch.device | str) -> CountingSideInfo:
+            self.values = self.values.to(device)
+            return self
+
+        def __getitem__(self, rows: torch.Tensor) -> torch.Tensor:
+            self.calls += 1
+            return self.values[rows]
+
+    model = nn.Linear(1, 1)
+    model.num_planes = 1  # type: ignore[attr-defined]
+    side_info = CountingSideInfo(torch.arange(12, dtype=torch.float32).unsqueeze(1))
+    config = WZcfgQuant(
+        bins_per_plane=2, num_planes=1, train_epochs=2, train_sample_size=8,
+        train_batch_size=2, deduplicate_training=False,
+    )
+
+    def loss(
+        candidate: nn.Module,
+        training_inputs: tuple[torch.Tensor],
+        si_batch: torch.Tensor,
+        _epoch: int,
+        _config: WZcfgQuant,
+        *,
+        sample_weights: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert sample_weights is None
+        return (candidate(training_inputs[0]) - si_batch).square().mean()
+
+    wz_model_training_loop(
+        loss, model, model.parameters(), (torch.ones(12, 1),), side_info, config,
+        batch_size=config.train_batch_size,
+    )
+
+    assert side_info.calls == config.train_epochs
 
 
 def test_side_information_matrix_decodes_compressed_rows_and_normalizes() -> None:
@@ -30,6 +77,24 @@ def test_side_information_matrix_decodes_compressed_rows_and_normalizes() -> Non
     assert matrix.device.type == device.type
 
 
+def test_side_information_matrix_gathers_uint16_codes_on_accelerator() -> None:
+    distinct = 257
+    patterns = (
+        torch.arange(distinct, dtype=torch.int64) * (1 << (32 - 18)) + 0x10000000
+    ).to(torch.int32)
+    compressed = CompressedHistoryVector(patterns.view(torch.float32))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    matrix = SideInfoMatrix(
+        [compressed], distinct, torch.tensor([[1.0, 0.0]]),
+        (slice(0, distinct),), device,
+    )
+    rows = torch.tensor([256, 0, 128], device=device)
+
+    assert matrix._columns[0].codes[0].dtype is torch.uint16
+    assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
+    assert matrix.code_rows(rows).shape == (3, 1)
+
+
 def test_unique_row_groups_uses_compact_codes_and_normalization_slice() -> None:
     values = torch.zeros(4)
     matrix = SideInfoMatrix(
@@ -46,6 +111,18 @@ def test_unique_row_groups_accepts_empty_side_information_matrix() -> None:
     _, inverse, collisions = unique_row_groups((matrix,), 1)
     assert torch.equal(inverse, torch.zeros(4, dtype=torch.long))
     assert collisions.numel() == 0
+
+
+def test_unique_row_groups_flattens_multi_dimensional_training_inputs() -> None:
+    block = torch.tensor([
+        [[0.0, 1.0], [1.0, 0.0]],
+        [[0.0, 1.0], [1.0, 0.0]],
+        [[1.0, 0.0], [0.0, 1.0]],
+    ])
+
+    actual = unique_row_groups((block,), 32)
+    expected = unique_row_groups((block.flatten(start_dim=1),), 32)
+    assert all(torch.equal(left, right) for left, right in zip(actual, expected, strict=True))
 
 
 def test_normalize_side_info_matches_preprocessed_history() -> None:

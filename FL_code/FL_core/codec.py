@@ -289,25 +289,17 @@ class BaseProtocol:
         """Hand one decoded reconstruction back to the protocol; stateless schedules ignore it."""
 
     def set_schedule(self, start_round: int, round_codecs: tuple[str, ...]) -> None:
-        """Place one training round at `start_round`, then reuse it as frozen forever after.
-
-        Called once on a fresh protocol. The training token is the last warmup entry; routine is
-        the single `"F"` because cycling the caller's whole tuple would periodically retrain.
-        """
+        """Place an explicit finite codec window at `start_round`, then freeze forever after."""
         assert not self._schedule_placed, (
             "set_schedule may be installed only once on a fresh protocol.")
         assert isinstance(start_round, int) and start_round >= 0
         assert isinstance(round_codecs, tuple) and all(
             isinstance(round_codec, str) and round_codec for round_codec in round_codecs
         )
-        assert len(round_codecs) >= 2, (
-            "round_codecs must supply a training token followed by at least one 'F' round.")
+        assert len(round_codecs) >= 2, "round_codecs must contain at least two rounds."
         assert round_codecs[0] != "F", "The first schedule token must train a codec, not 'F'."
-        assert round_codecs[1:] == ("F",) * (len(round_codecs) - 1), (
-            f"Every round after the training token must be the literal frozen marker 'F'; "
-            f"got {round_codecs[1:]!r}."
-        )
-        self.warmup_round_codecs = ("I",) * start_round + (round_codecs[0],)
+        assert "F" in round_codecs, "round_codecs must contain at least one frozen round."
+        self.warmup_round_codecs = ("I",) * start_round + round_codecs
         self.routine_round_codecs = ("F",)
         self._round_codec_classes = self._validate_round_codecs()
         self._schedule_placed = True

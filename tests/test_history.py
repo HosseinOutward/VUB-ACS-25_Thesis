@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 import pytest
 import torch
 
@@ -143,6 +145,22 @@ def test_compressed_code_width_is_the_narrowest_index_type(distinct: int, dtype:
     value = bit_patterns.view(torch.float32)
     chunk = next(CompressedHistoryVector(value)._iter_encoded_chunks())
     assert chunk.codes.dtype is dtype
+
+
+@pytest.mark.parametrize("distinct", [257, 65_537])
+def test_compressed_history_torch_serialization_preserves_unsigned_codes(distinct: int) -> None:
+    patterns = (
+        torch.arange(distinct, dtype=torch.int64) * (1 << (32 - _PREFIX_BITS)) + 0x10000000
+    ).to(torch.int32)
+    original = CompressedHistoryVector(patterns.view(torch.float32))
+    buffer = io.BytesIO()
+    torch.save(original, buffer)
+    buffer.seek(0)
+    restored = torch.load(buffer, weights_only=False)
+
+    assert next(restored._iter_encoded_chunks()).codes.dtype is next(
+        original._iter_encoded_chunks()).codes.dtype
+    assert torch.equal(restored.materialize(), original.materialize())
 
 
 def test_compressed_history_ledger_uses_shared_entries_and_reports_constants() -> None:

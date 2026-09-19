@@ -177,6 +177,15 @@ def test_extending_to_a_later_window_does_not_retrain_earlier_rounds(
     assert calls == [(3, client_id) for client_id in range(cfg.num_clients)]
 
 
+def test_requested_case_starts_create_preceding_server_checkpoints(tmp_path: Path) -> None:
+    device, cfg = torch.device("cpu"), _cfg(num_classes=None)
+    tr = Trace(tmp_path / "trace", cfg, dataset_revision="rev1")
+    tr.ensure(range(5), device, checkpoint_rounds=(2, 4))
+
+    assert {path.name for path in tr.checkpoint_dir.iterdir()} >= {
+        "round_1.pt", "round_3.pt", "round_4.pt"}
+
+
 def test_regenerating_a_missing_round_resumes_from_the_checkpoint_strictly_before_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

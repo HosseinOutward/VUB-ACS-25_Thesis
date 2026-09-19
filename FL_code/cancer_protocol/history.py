@@ -117,6 +117,28 @@ class CompressedHistoryVector(HistoryVector):
             for start in range(0, source.numel(), _CHUNK_ELEMENTS)
         )
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Serialize unsigned codes through same-width signed views supported by torch.save."""
+        chunks = tuple((
+            chunk.start,
+            chunk.stop,
+            chunk.dictionary,
+            chunk.codes.view(torch.int16) if chunk.codes.dtype is torch.uint16
+            else chunk.codes.view(torch.int32) if chunk.codes.dtype is torch.uint32
+            else chunk.codes,
+            str(chunk.codes.dtype),
+        ) for chunk in self._chunks)
+        return {"logical_size": self._logical_size, "chunks": chunks}
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore the narrow unsigned code dtype after torch deserialization."""
+        dtypes = {"torch.uint8": torch.uint8, "torch.uint16": torch.uint16, "torch.uint32": torch.uint32}
+        self._logical_size = state["logical_size"]
+        self._chunks = tuple(
+            _CompressedHistoryChunk(start, stop, dictionary, codes.view(dtypes[dtype]))
+            for start, stop, dictionary, codes, dtype in state["chunks"]
+        )
+
     @property
     def logical_size(self) -> int:
         """Return the number of values represented by this vector."""

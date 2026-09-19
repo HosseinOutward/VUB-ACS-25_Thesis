@@ -151,6 +151,7 @@ class _WZRoundCodec(BaseRoundCodec):
     dump_element_metrics: bool = False
     _original_delta_vec: torch.Tensor | None = None
     _prior_side_information: list[HistoryVector] | None = None
+    _retrained_prior_model: EncoderDecoderLayeredRNN | None
 
     def options_to_config(
         self,
@@ -164,6 +165,7 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> None:
         """Separate round diagnostics from options that configure the learned quantizer."""
         self.dump_element_metrics = dump_element_metrics
+        self._retrained_prior_model = None
         self.c_cfg = self.config_class(
             bins_per_plane=bins_per_plane,
             num_planes=num_planes,
@@ -213,6 +215,7 @@ class _WZRoundCodec(BaseRoundCodec):
             # policy recorded alongside this in config_snapshot; transport mixins override this
             # when they instead fix the coder prior to the exact decoder-legal SI.
             "prior_stage_rates_si": "protocol_retrained_prior_uses_server_si_policy",
+            "retrained_prior_policy": "fit_on_trained_round_reuse_on_frozen_rounds",
             "rate_fields_available": {
                 "prior_stage_rates": True,
                 "marginal_stage_rates": True,
@@ -311,10 +314,18 @@ class _WZRoundCodec(BaseRoundCodec):
         side_info: SideInfoMatrix | torch.Tensor,
         c_cfg: WZcfgQuant,
     ) -> tuple[torch.Tensor, EncoderDecoderLayeredRNN]:
-        """Train the entropy prior on decoder SI and return each realized symbol's length."""
+        """Fit the retrained prior once, then evaluate that frozen model on refreshed F-round SI."""
         prior_cfg = c_cfg.model_copy(update={"marginal_loss": False})
-        prior_model = PriorCalculator.make_trained_prior_model(
-            bins.long(), soft_codes, side_info, prior_cfg)
+        if self.round_name_full == "F":
+            assert self._retrained_prior_model is not None, (
+                "A frozen round requires the retrained prior fitted by its training round.")
+            prior_model = self._retrained_prior_model
+        else:
+            assert self._retrained_prior_model is None, (
+                "A trained round may fit its retrained prior only once.")
+            prior_model = PriorCalculator.make_trained_prior_model(
+                bins.long(), soft_codes, side_info, prior_cfg)
+            self._retrained_prior_model = prior_model
         prior = quantizer.prior_calculator.compute_prior_from_network(
             prior_model, bins, side_info)
         return (

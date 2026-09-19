@@ -3,7 +3,7 @@
 `validate_case_records` checks that a case's CSV holds exactly its scheduled rows in order.
 `read_completed_case` reads one finished case's `complete.json`, optionally checks its identity
 against an expected value, validates its rows, and enriches them with placement metadata (codec,
-case, start round, relative round, phase, worker set, trace identity digest) so neither the runner
+case, initial-SI mode, start round, relative round, phase, worker set, trace identity digest) so neither the runner
 nor the plotter re-derives it. No imports from the runner or the plotter: both import this module,
 not each other.
 """
@@ -22,6 +22,15 @@ from FL_code.FL_core.cache import content_hash
 _ROW_COLUMNS = ("round_id", "client_id", "round_name_full")
 
 
+def _expected_rows(case_metadata: Mapping[str, Any]) -> list[tuple[int, int, str]]:
+    """Return the scheduled round/client/token row order for one case."""
+    return [
+        (round_id, client_id, token)
+        for round_id, token in enumerate(case_metadata["round_codecs"], case_metadata["start_round"])
+        for client_id in case_metadata["client_ids"]
+    ]
+
+
 def identity_mismatches(expected: Mapping[str, Any], stored: Mapping[str, Any]) -> list[str]:
     """Return the top-level identity keys whose values differ or exist on only one side."""
     return sorted(key for key in expected.keys() | stored.keys() if expected.get(key) != stored.get(key))
@@ -38,13 +47,9 @@ def validate_case_records(path: Path, case_metadata: Mapping[str, Any]) -> pd.Da
     records = pd.read_csv(path)
     assert set(_ROW_COLUMNS) <= set(records.columns), (
         f"Case records at {path} are missing required columns {_ROW_COLUMNS}.")
-    expected = [
-        (round_id, client_id, token)
-        for round_id, token in enumerate(case_metadata["round_codecs"], case_metadata["start_round"])
-        for client_id in case_metadata["client_ids"]
-    ]
     actual = list(records[list(_ROW_COLUMNS)].itertuples(index=False, name=None))
-    assert actual == expected, f"Incomplete, duplicated, or reordered case records: {path}."
+    assert actual == _expected_rows(case_metadata), (
+        f"Incomplete, duplicated, or reordered case records: {path}.")
     return records
 
 
@@ -66,13 +71,46 @@ def read_completed_case(case_dir: Path, expected_identity: Mapping[str, Any] | N
 
     case_metadata = identity["case"]
     records = validate_case_records(case_dir / "compression_records.csv", case_metadata).copy()
+    return _enrich(records, case_dir, identity, complete=True)
+
+
+def read_available_case(case_dir: Path, identity: Mapping[str, Any]) -> pd.DataFrame:
+    """Read the valid ordered prefix of an unfinished case for explicitly incomplete previews."""
+    path = case_dir / "compression_records.csv"
+    assert path.is_file(), f"Missing case records: {path}."
+    case_metadata = identity["case"]
+    case_records = pd.read_csv(path)
+    assert set(_ROW_COLUMNS) <= set(case_records.columns), (
+        f"Case records at {path} are missing required columns {_ROW_COLUMNS}.")
+    actual = list(case_records[list(_ROW_COLUMNS)].itertuples(index=False, name=None))
+    expected = _expected_rows(case_metadata)
+    assert actual == expected[:len(actual)], f"Invalid unfinished case record prefix: {path}."
+    return _enrich(case_records.copy(), case_dir, identity, complete=False)
+
+
+def _enrich(
+    case_records: pd.DataFrame, case_dir: Path, identity: Mapping[str, Any], *, complete: bool,
+) -> pd.DataFrame:
+    """Attach case placement and completion metadata to validated record rows."""
+    case_metadata = identity["case"]
     start_round = case_metadata["start_round"]
-    records.insert(0, "phase", ["trained" if round_id == start_round else "frozen"
-                                 for round_id in records["round_id"]])
-    records.insert(0, "relative_round", records["round_id"] - start_round)
-    records.insert(0, "client_ids", [tuple(case_metadata["client_ids"])] * len(records))
-    records.insert(0, "start_round", start_round)
-    records.insert(0, "case_id", case_dir.name)
-    records.insert(0, "codec_id", case_dir.parent.name)
-    records["trace_identity_digest"] = content_hash((identity["trace"],), {})[:16]
-    return records
+    phases = {
+        round_id: "frozen" if token == "F" else "trained"
+        for round_id, token in enumerate(case_metadata["round_codecs"], start_round)
+    }
+    cycles: dict[int, int] = {}
+    cycle = -1
+    for round_id, token in enumerate(case_metadata["round_codecs"], start_round):
+        cycle += token != "F"
+        cycles[round_id] = cycle
+    case_records.insert(0, "case_complete", complete)
+    case_records.insert(0, "phase", [phases[round_id] for round_id in case_records["round_id"]])
+    case_records.insert(0, "cycle", [cycles[round_id] for round_id in case_records["round_id"]])
+    case_records.insert(0, "relative_round", case_records["round_id"] - start_round)
+    case_records.insert(0, "client_ids", [tuple(case_metadata["client_ids"])] * len(case_records))
+    case_records.insert(0, "start_round", start_round)
+    case_records.insert(0, "initial_si", case_metadata["initial_si"])
+    case_records.insert(0, "case_id", case_dir.name)
+    case_records.insert(0, "codec_id", case_dir.parent.name)
+    case_records["trace_identity_digest"] = content_hash((identity["trace"],), {})[:16]
+    return case_records

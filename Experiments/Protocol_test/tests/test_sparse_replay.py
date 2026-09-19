@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ from torch import nn
 from Experiments.Protocol_test import records, sparse_replay
 from FL_code.FL_core.codec import Access, CompressionRecord
 from FL_code.cancer_protocol.history import ReconstructionHistory
+from temp_nsplit import nsplit_quantize
 
 SEED = 43
 TRAIN_TOKEN = f"T|training_seed={SEED}"
@@ -32,8 +34,11 @@ class _FakeTrace:
     def __init__(self, directory: Path, cfg: Any, *, dataset_revision: str) -> None:
         self.directory, self.cfg, self.dataset_revision = directory, cfg, dataset_revision
 
-    def ensure(self, rounds: Any, device: torch.device) -> None:
+    def ensure(
+        self, rounds: Any, device: torch.device, *, checkpoint_rounds: Any = (),
+    ) -> None:
         assert isinstance(device, torch.device)
+        assert all(round_id > 0 for round_id in checkpoint_rounds)
         type(self)._ensured_dirs.add(str(self.directory))
 
     def identity(self) -> dict[str, Any]:
@@ -61,12 +66,16 @@ class _FakeProtocol:
             "history": self.histories[0].config_snapshot(),
         }
 
+    def install_histories(self, histories: tuple[ReconstructionHistory, ...]) -> None:
+        assert len(histories) == 1
+        self.histories = histories
+
 
 def _write_plan(tmp_path: Path, cases: tuple[sparse_replay.ReplayCase, ...], **overrides: Any) -> Path:
     (tmp_path / "fl.json").write_text(json.dumps({"protocol": "identity", "num_clients": 3, "num_classes": 2}))
     payload: dict[str, Any] = {
         "name": "test", "fl_config": "fl.json", "trace": "trace", "dataset_revision": "rev-1",
-        "trace_device": "cpu", "output_root": "output", "cache_root": "cache",
+        "trace_device": "cpu", "output_root": "output", "history_cache_root": "history_cache",
         "gpu_ids": [], "seed": SEED,
         "cases": [json.loads(case.model_dump_json()) for case in cases],
     }
@@ -125,13 +134,20 @@ def _recording_simulate(seen: list[tuple[int, int, list[float]]]) -> Any:
 # --- Malformed schedules: rejected at model construction, before any expensive work --- #
 
 def test_case_rejects_a_schedule_with_no_frozen_round() -> None:
-    with pytest.raises(ValidationError, match="training token followed by at least one"):
+    with pytest.raises(ValidationError, match="at least two"):
         _case(round_codecs=(TRAIN_TOKEN,))
-
-
-def test_case_rejects_a_non_frozen_token_after_training() -> None:
-    with pytest.raises(ValidationError, match="literal frozen marker"):
+    with pytest.raises(ValidationError, match="frozen round"):
         _case(round_codecs=(TRAIN_TOKEN, TRAIN_TOKEN))
+
+
+def test_case_accepts_a_second_training_cycle() -> None:
+    case = _case(round_codecs=(TRAIN_TOKEN, "F", TRAIN_TOKEN, "F"))
+    assert case.round_codecs[2] == TRAIN_TOKEN
+
+
+def test_nsplit_quantize_uses_quantile_bins_and_bin_means() -> None:
+    values = torch.tensor([-3.0, -2.0, 1.0, 4.0])
+    assert torch.equal(nsplit_quantize(values, 2), torch.tensor([-2.5, -2.5, 2.5, 2.5]))
 
 
 def test_plan_rejects_a_training_seed_that_does_not_match_the_plan_seed(tmp_path: Path) -> None:
@@ -146,6 +162,47 @@ def test_plan_rejects_duplicate_cases_and_unknown_comparisons(tmp_path: Path) ->
         sparse_replay.load_plan(_write_plan(tmp_path, (case, case)))
     with pytest.raises(ValidationError, match="Invalid comparison"):
         sparse_replay.load_plan(_write_plan(tmp_path, (case,), comparisons=[["T", "missing"]]))
+
+
+def test_gpu_cases_use_one_serial_disposable_worker_queue_per_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingPool:
+        instances: list[RecordingPool] = []
+
+        def __init__(self, **options: Any) -> None:
+            self.options = options
+            self.submissions: list[tuple[int, str]] = []
+            type(self).instances.append(self)
+
+        def __enter__(self) -> RecordingPool:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def submit(
+            self, _function: Any, _plan: object, gpu_id: int, case: object, _provenance: object,
+        ) -> object:
+            case_id = case.case_id
+            self.submissions.append((gpu_id, case_id))
+            return SimpleNamespace(result=lambda: Path(case_id))
+
+    monkeypatch.setattr(sparse_replay, "ProcessPoolExecutor", RecordingPool)
+    plan = SimpleNamespace(
+        gpu_ids=(2, 5),
+        cases=tuple(SimpleNamespace(case_id=f"case{index}") for index in range(5)),
+    )
+
+    results = sparse_replay._run_gpu_cases(plan, {})
+
+    assert [pool.options["max_workers"] for pool in RecordingPool.instances] == [1, 1]
+    assert [pool.options["max_tasks_per_child"] for pool in RecordingPool.instances] == [1, 1]
+    assert [pool.submissions for pool in RecordingPool.instances] == [
+        [(2, "case0"), (2, "case2"), (2, "case4")],
+        [(5, "case1"), (5, "case3")],
+    ]
+    assert results == tuple(Path(f"case{index}") for index in range(5))
 
 
 def test_run_sparse_plan_rejects_client_id_out_of_range_before_trace_ensure(
@@ -195,7 +252,21 @@ def test_raw_visibility_matches_the_normal_client_order_for_measured_worker_one(
     assert set(temporal_view) == {1}
 
 
-def test_raw_history_is_replaced_with_raw_after_measurement(
+def test_nsplit_initial_si_is_applied_only_to_the_seed_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(client_ids=(1,)).model_copy(update={"initial_si": "nsplit"})
+    plan_path = _write_plan(tmp_path, (case,), nsplit_bins=2)
+    seen: list[tuple[int, int, list[float]]] = []
+    _install_fakes(monkeypatch, {"start5": _FakeProtocol(depth=2)}, _recording_simulate(seen))
+    monkeypatch.setattr(sparse_replay, "nsplit_quantize", lambda values, _bins: values + 1000)
+
+    sparse_replay.run_sparse_plan(sparse_replay.load_plan(plan_path), plan_path)
+
+    assert seen[0] == (5, 1, [50.0, 1041.0, 1042.0])
+
+
+def test_raw_history_gives_way_to_decoded_updates_after_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = _case(case_id="start5", client_ids=(1,), start_round=5)
@@ -205,12 +276,11 @@ def test_raw_history_is_replaced_with_raw_after_measurement(
 
     sparse_replay.run_sparse_plan(sparse_replay.load_plan(plan_path), plan_path)
 
-    # simulate_compression committed a reconstruction of -1 at round 5; replace_latest must have
-    # overwritten it with the raw round-5 delta (51.0) before round 6 ran. Depth 2 still retains
-    # both rounds 5 and 6 for client 1, so the round-5 entry is index 0, not the latest.
+    # Initial history is raw, but simulate_compression's reconstruction remains in the ledger.
+    # Depth 2 still retains both rounds 5 and 6, so round 5 is index 0, not the latest.
     server_view = protocol.histories[0].view(Access.SERVER_ONLY, 0)
     round5_entry = server_view[1][0]
-    assert round5_entry.round_id == 5 and round5_entry.value.materialize().item() == 51.0
+    assert round5_entry.round_id == 5 and round5_entry.value.materialize().item() == -1.0
     assert round5_entry.access is Access.TEMPORAL_TOO
 
 
@@ -269,7 +339,7 @@ def test_completed_case_is_reused_without_recompressing(
     assert len(calls) == 2, "a completed case must not re-run compression"
 
 
-def test_execution_only_changes_still_reuse_a_completed_case(
+def test_history_cache_location_change_still_reuses_a_completed_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     case = _case()
@@ -279,10 +349,10 @@ def test_execution_only_changes_still_reuse_a_completed_case(
     sparse_replay.run_sparse_plan(sparse_replay.load_plan(plan_path), plan_path)
     assert len(calls) == 2
 
-    changed_path = _write_plan(tmp_path, (case,), gpu_ids=[], cache_root="cache2", cache_overwrite=True)
+    changed_path = _write_plan(tmp_path, (case,), gpu_ids=[], history_cache_root="history_cache2")
     # output_root stays "output" so the same case directory is reused.
     sparse_replay.run_sparse_plan(sparse_replay.load_plan(changed_path), changed_path)
-    assert len(calls) == 2, "gpu_ids/cache_root/cache_overwrite must not force retraining"
+    assert len(calls) == 2, "gpu_ids/history_cache_root must not force recompression"
 
 
 def test_changed_trace_identity_refuses_reuse(
@@ -319,8 +389,27 @@ def test_identity_never_embeds_execution_only_fields(tmp_path: Path) -> None:
     protocol = _FakeProtocol()
     identity = sparse_replay._case_identity(plan, case, {"dataset_revision": "rev-1"}, protocol)
     plan_identity = sparse_replay._plan_identity(plan, {"dataset_revision": "rev-1"})
-    forbidden = {"output_root", "cache_root", "gpu_ids", "cache_overwrite", "plan_path"}
+    forbidden = {"output_root", "history_cache_root", "gpu_ids", "plan_path"}
     assert forbidden.isdisjoint(identity) and forbidden.isdisjoint(plan_identity)
+
+
+def test_initial_history_identity_separates_nsplit_but_preserves_raw_cache(
+    tmp_path: Path,
+) -> None:
+    raw = _case()
+    classical = raw.model_copy(update={"initial_si": "nsplit"})
+    first = sparse_replay.load_plan(_write_plan(tmp_path, (raw,), nsplit_bins=2))
+    second = sparse_replay.load_plan(_write_plan(tmp_path, (raw,), nsplit_bins=3))
+    protocol = _FakeProtocol()
+    trace_identity = {"dataset_revision": "rev-1"}
+    assert (
+        sparse_replay._initial_history_cache_dir(first, raw, trace_identity, protocol)
+        == sparse_replay._initial_history_cache_dir(second, raw, trace_identity, protocol)
+    )
+    assert (
+        sparse_replay._initial_history_cache_dir(first, classical, trace_identity, protocol)
+        != sparse_replay._initial_history_cache_dir(second, classical, trace_identity, protocol)
+    )
 
 
 # --- records.py: the shared completion contract --- #
@@ -350,6 +439,7 @@ def test_read_completed_case_enriches_rows_with_placement_and_phase(tmp_path: Pa
     (case_dir / "compression_records.csv").write_text(
         f"round_id,client_id,round_name_full\n5,1,{TRAIN_TOKEN}\n6,1,F\n")
     identity = {"case": {"protocol": "wz_cancer", "start_round": 5, "client_ids": [1],
+                          "initial_si": "raw",
                           "round_codecs": [TRAIN_TOKEN, "F"]},
                 "trace": {"dataset_revision": "rev-1"}}
     (case_dir / "complete.json").write_text(json.dumps({"identity": identity, "provenance": {}}))
@@ -358,5 +448,24 @@ def test_read_completed_case_enriches_rows_with_placement_and_phase(tmp_path: Pa
     assert frame["codec_id"].tolist() == ["T", "T"]
     assert frame["case_id"].tolist() == ["start5", "start5"]
     assert frame["phase"].tolist() == ["trained", "frozen"]
+    assert frame["cycle"].tolist() == [0, 0]
     assert frame["relative_round"].tolist() == [0, 1]
     assert frame["client_ids"].tolist() == [(1,), (1,)]
+
+
+def test_read_completed_case_marks_every_non_f_token_as_trained(tmp_path: Path) -> None:
+    case_dir = tmp_path / "cases" / "T" / "start5"
+    case_dir.mkdir(parents=True)
+    tokens = [TRAIN_TOKEN, "F", TRAIN_TOKEN, "F"]
+    rows = "\n".join(f"{round_id},1,{token}" for round_id, token in enumerate(tokens, 5))
+    (case_dir / "compression_records.csv").write_text(
+        f"round_id,client_id,round_name_full\n{rows}\n")
+    identity = {"case": {"protocol": "wz_cancer", "start_round": 5, "client_ids": [1],
+                         "initial_si": "raw",
+                         "round_codecs": tokens},
+                "trace": {"dataset_revision": "rev-1"}}
+    (case_dir / "complete.json").write_text(json.dumps({"identity": identity, "provenance": {}}))
+
+    assert records.read_completed_case(case_dir)["phase"].tolist() == [
+        "trained", "frozen", "trained", "frozen"]
+    assert records.read_completed_case(case_dir)["cycle"].tolist() == [0, 0, 1, 1]

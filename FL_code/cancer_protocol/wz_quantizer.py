@@ -139,7 +139,11 @@ class SideInfoMatrix:
         ):
             selected = (rows >= start) & (rows < stop)
             if selected.any():
-                decoded[selected] = dictionary[codes[rows[selected] - start].long()].float()
+                indices = rows[selected] - start
+                # CUDA cannot advanced-index uint16/uint32 tensors. Keep the resident history
+                # compact and widen only the current transient gather.
+                gathered = codes.to(torch.int32)[indices] if codes.dtype in (torch.uint16, torch.uint32) else codes[indices]
+                decoded[selected] = dictionary[gathered.long()].float()
         return decoded
 
     def _decode_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
@@ -155,7 +159,9 @@ class SideInfoMatrix:
         for index, (codes, (start, stop)) in enumerate(zip(column.codes, column.chunk_ranges, strict=True)):
             selected = (rows >= start) & (rows < stop)
             if selected.any():
-                keys[selected] = codes[rows[selected] - start].long() + offsets[index]
+                indices = rows[selected] - start
+                gathered = codes.to(torch.int32)[indices] if codes.dtype in (torch.uint16, torch.uint32) else codes[indices]
+                keys[selected] = gathered.long() + offsets[index]
         return keys
 
     def _group_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
@@ -336,28 +342,35 @@ def wz_model_training_loop(
             if index_sampler is None
             else index_sampler(total_samples)
         )
+        # Decode the sampled SI once per epoch. In O rounds this replaces 32 minibatch passes over
+        # 150 chunked history columns with one pass, while preserving the exact sampled rows and
+        # per-minibatch duplicate weighting below.
+        epoch_inputs = tuple(value[indices] for value in training_inputs)
+        epoch_side_info = side_info[indices]
+        epoch_row_groups = None if row_groups is None else row_groups[indices]
         epoch_loss = 0.0
         epoch_model_samples = 0
         for start in range(0, total_samples, batch_size):
-            batch_indices = indices[start:start + batch_size]
+            batch_slice = slice(start, start + batch_size)
+            input_batch = tuple(value[batch_slice] for value in epoch_inputs)
+            si_batch = epoch_side_info[batch_slice]
             sample_weights = None
-            if row_groups is not None:
+            if epoch_row_groups is not None:
                 _, inverse, counts = torch.unique(
-                    row_groups[batch_indices], return_inverse=True, return_counts=True
+                    epoch_row_groups[batch_slice], return_inverse=True, return_counts=True
                 )
-                if counts.numel() < batch_indices.numel():
-                    representatives = torch.full_like(counts, batch_indices.numel())
+                if counts.numel() < input_batch[0].shape[0]:
+                    representatives = torch.full_like(counts, input_batch[0].shape[0])
                     representatives.scatter_reduce_(
                         0,
                         inverse,
-                        torch.arange(batch_indices.numel(), device=inverse.device),
+                        torch.arange(input_batch[0].shape[0], device=inverse.device),
                         reduce="amin",
                     )
-                    batch_indices = batch_indices[representatives]
+                    input_batch = tuple(value[representatives] for value in input_batch)
+                    si_batch = si_batch[representatives]
                     sample_weights = counts.to(training_inputs[0].dtype)
-            input_batch = tuple(value[batch_indices] for value in training_inputs)
-            si_batch = side_info[batch_indices]
-            epoch_model_samples += batch_indices.numel()
+            epoch_model_samples += input_batch[0].shape[0]
 
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
@@ -1004,15 +1017,16 @@ def unique_row_groups(
     assert blocks
     device = blocks[0].device
     size = blocks[0].shape[0]
-    assert all(block.shape[0] == size and (isinstance(block, SideInfoMatrix) or block.ndim == 2) for block in blocks)
+    assert all(block.shape[0] == size and (isinstance(block, SideInfoMatrix) or block.ndim >= 2) for block in blocks)
 
     def columns() -> Iterator[torch.Tensor]:
         for block in blocks:
             if isinstance(block, SideInfoMatrix):
                 yield from block.iter_code_columns()
                 continue
-            for index in range(block.shape[1]):
-                column = block[:, index].contiguous()
+            flattened = block.flatten(start_dim=1)
+            for index in range(flattened.shape[1]):
+                column = flattened[:, index].contiguous()
                 yield (
                     float_prefix(column, match_bits) if column.dtype == torch.float32
                     else column.to(torch.float64)
@@ -1020,7 +1034,10 @@ def unique_row_groups(
 
     generator = torch.Generator(device=device).manual_seed(0)
     projection = torch.randn(
-        sum(block.shape[1] for block in blocks), generator=generator, device=device, dtype=torch.float64)
+        sum(block.shape[1] if isinstance(block, SideInfoMatrix) else block.flatten(start_dim=1).shape[1]
+            for block in blocks),
+        generator=generator, device=device, dtype=torch.float64,
+    )
 
     key = torch.zeros(size, device=device, dtype=torch.float64)
     for weight, column in zip(projection, columns(), strict=True):

@@ -6,7 +6,7 @@
   "trace_device": "cuda:0",
   "dataset_revision": "torchvision-cifar-10-python.tar.gz-md5:c58f30108f718f92721af3b95e74349a",
   "output_root": "../exp_records/frozen_schedule",
-  "cache_root": "../../../_/data/protocol_cache/r56_cifar10_30c_frozen_v2",
+  "history_cache_root": "../../../_/data/protocol_cache/r56_cifar10_30c_frozen_v2/initial_history",
   "gpu_ids": [
     0,
     1

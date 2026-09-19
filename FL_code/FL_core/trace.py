@@ -160,10 +160,15 @@ class Trace:
         )
         self.cfg = stored
 
-    def ensure(self, rounds: Iterable[int], device: torch.device) -> None:
-        """Generate every missing full-client requested round, resuming from a boundary checkpoint."""
+    def ensure(
+        self, rounds: Iterable[int], device: torch.device, *, checkpoint_rounds: Iterable[int] = (),
+    ) -> None:
+        """Generate missing full-client rounds and checkpoint immediately before case starts."""
         requested = tuple(sorted(set(rounds)))
+        boundaries = set(checkpoint_rounds)
         assert requested and requested[0] >= 0, "Trace rounds must contain non-negative integers."
+        assert all(round_id > 0 for round_id in boundaries), (
+            "checkpoint_rounds identify positive rounds whose initial server state is cached.")
         if device.type == "cuda":
             assert torch.cuda.is_available(), f"Requested {device} but CUDA is not available."
             assert device.index is not None, f"Trace needs an explicit CUDA device index; got {device}."
@@ -195,6 +200,7 @@ class Trace:
         self._generate(
             requested=set(requested), device=device, start_round=checkpoint_round + 1,
             final_round=max(missing), checkpoint=checkpoints.get(checkpoint_round),
+            checkpoint_rounds=boundaries,
         )
 
     def identity(self) -> dict[str, Any]:
@@ -235,7 +241,7 @@ class Trace:
 
     def _generate(
         self, *, requested: set[int], device: torch.device, start_round: int,
-        final_round: int, checkpoint: Path | None,
+        final_round: int, checkpoint: Path | None, checkpoint_rounds: set[int],
     ) -> None:
         with _seeded(self.cfg.seed, device):
             features, labels, groups = precompute_dataset_to_shared(
@@ -310,7 +316,7 @@ class Trace:
                     model, [manager.unflatten(delta) for delta in deltas],
                     [len(loader.dataset) for loader in loaders], manager, server_opt,
                 )
-                if round_id in ends or round_id == final_round:
+                if round_id + 1 in checkpoint_rounds or round_id in ends or round_id == final_round:
                     self._save_checkpoint(round_id, model, manager, buffers, optimizers,
                                           scalers, loaders, server_opt)
 

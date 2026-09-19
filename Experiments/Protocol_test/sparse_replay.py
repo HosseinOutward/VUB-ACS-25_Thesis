@@ -9,8 +9,9 @@ import multiprocessing
 import subprocess
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -23,11 +24,13 @@ from FL_code.FL_core.trace import Trace
 from FL_code.FL_core.utils import StateDictManager, parse_configurable_name, set_global_seed
 from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
 from FL_code.run_fl import FLConfig
+from temp_nsplit import nsplit_quantize
 
 # Bump whenever this module's execution semantics change in a way that could produce different
 # records for an unchanged plan/trace, so a completed case cannot be silently reused as if it
 # still matched.
-_EXPERIMENT_SEMANTICS_VERSION = 4
+_EXPERIMENT_SEMANTICS_VERSION = 9
+_INITIAL_HISTORY_CACHE_VERSION = 1
 _CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,6 +43,7 @@ class ReplayCase(BaseModel):
     codec_id: str
     protocol: str = "wz_cancer"
     start_round: int = Field(ge=0)
+    initial_si: Literal["raw", "nsplit"] = "raw"
     client_ids: tuple[int, ...]
     round_codecs: tuple[str, ...]
 
@@ -52,20 +56,12 @@ class ReplayCase(BaseModel):
 
     @model_validator(mode="after")
     def validate_window(self) -> ReplayCase:
-        """Require an ordered client subset and a training token followed only by literal 'F's.
-
-        A also asserts this placement when `set_schedule` runs; this is the cheap JSON-shape
-        check that lets a malformed plan fail before any protocol, cache, or GPU work starts.
-        """
+        """Require an ordered client subset and an explicit train/freeze protocol window."""
         assert self.client_ids and tuple(sorted(set(self.client_ids))) == self.client_ids
         assert min(self.client_ids) >= 0
-        assert len(self.round_codecs) >= 2, (
-            "round_codecs must supply a training token followed by at least one 'F' round.")
+        assert len(self.round_codecs) >= 2, "round_codecs must contain at least two rounds."
         assert self.round_codecs[0] != "F", "The first schedule token must train a codec, not 'F'."
-        assert self.round_codecs[1:] == ("F",) * (len(self.round_codecs) - 1), (
-            f"Every round after the training token must be the literal frozen marker 'F'; "
-            f"got {self.round_codecs[1:]!r}."
-        )
+        assert "F" in self.round_codecs, "round_codecs must contain at least one frozen round."
         return self
 
 
@@ -80,12 +76,12 @@ class ReplayPlan(BaseModel):
     trace_device: str = "cuda:0"
     dataset_revision: str
     output_root: Path
-    cache_root: Path
+    history_cache_root: Path
+    nsplit_bins: int = Field(default=2, ge=2, le=256)
     cases: tuple[ReplayCase, ...]
     comparisons: tuple[tuple[str, str], ...] = ()
     seed: int = Field(default=43, ge=0)
     gpu_ids: tuple[int, ...] = ()
-    cache_overwrite: bool = False
 
     @model_validator(mode="after")
     def validate_cases(self) -> ReplayPlan:
@@ -98,18 +94,21 @@ class ReplayPlan(BaseModel):
         for candidate, reference in self.comparisons:
             assert candidate != reference and {candidate, reference} <= codecs, "Invalid comparison."
         for case in self.cases:
-            options = parse_configurable_name(case.round_codecs[0], "round codec").options or {}
-            assert options.get("training_seed") == self.seed, (
-                f"Case {case.codec_id}/{case.case_id} training token must carry "
-                f"training_seed={self.seed}; got {options.get('training_seed')!r}."
-            )
+            for token in case.round_codecs:
+                if token == "F":
+                    continue
+                options = parse_configurable_name(token, "round codec").options or {}
+                assert options.get("training_seed") == self.seed, (
+                    f"Case {case.codec_id}/{case.case_id} training token must carry "
+                    f"training_seed={self.seed}; got {options.get('training_seed')!r}."
+                )
         return self
 
 
 def load_plan(path: Path) -> ReplayPlan:
     """Read one plan, resolving its paths relative to the JSON file."""
     payload = json.loads(path.read_text())
-    for field in ("fl_config", "trace", "output_root", "cache_root"):
+    for field in ("fl_config", "trace", "output_root", "history_cache_root"):
         payload[field] = (path.parent / payload[field]).resolve()
     return ReplayPlan.model_validate(payload)
 
@@ -128,8 +127,7 @@ def case_protocol(plan: ReplayPlan, case: ReplayCase, manager: StateDictManager 
     protocol = create_protocol(
         case.protocol,
         None if manager is None else manager.get_slices(),
-        plan.cache_root,
-        plan.cache_overwrite,
+        cache_dir=None,
     )
     assert isinstance(protocol, _WZProtocol), "Sparse history experiments require a WZ protocol."
     protocol.set_schedule(case.start_round, case.round_codecs)
@@ -141,9 +139,82 @@ def _case_dir(plan: ReplayPlan, case: ReplayCase) -> Path:
 
 
 def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> int:
-    """Derive a per-client-round codec seed, so a diagnostic fit or cache hit for one client-round
-    cannot change another's stochastic training."""
+    """Derive a per-client-round seed so one fit cannot change another's stochastic training."""
     return int(content_hash((seed, start_round, round_id, client_id), {})[:8], 16)
+
+
+def _initial_history_identity(
+    plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any], protocol: _WZProtocol,
+) -> dict[str, Any]:
+    """Describe one reusable initial-SI cache independently of O/T training policy."""
+    return {
+        "version": _INITIAL_HISTORY_CACHE_VERSION,
+        "trace": trace_identity,
+        "start_round": case.start_round,
+        **({"initial_si": "nsplit", "nsplit_bins": plan.nsplit_bins}
+           if case.initial_si == "nsplit" else {}),
+        "history": [history.config_snapshot() for history in protocol.histories],
+    }
+
+
+def _initial_history_cache_dir(
+    plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any], protocol: _WZProtocol,
+) -> Path:
+    identity = _initial_history_identity(plan, case, trace_identity, protocol)
+    return plan.history_cache_root / content_hash((identity,), {})
+
+
+def _ensure_initial_history_cache(
+    plan: ReplayPlan, case: ReplayCase, trace: Trace, protocol: _WZProtocol,
+) -> Path:
+    """Persist the configured trace prefix in the protocol's compact history representation."""
+    identity = _initial_history_identity(plan, case, trace.identity(), protocol)
+    cache_dir = _initial_history_cache_dir(plan, case, trace.identity(), protocol)
+    state_path, completion = cache_dir / "histories.pt", cache_dir / "complete.json"
+    if completion.exists():
+        assert state_path.is_file(), f"Initial-history cache is missing {state_path}."
+        assert json.loads(completion.read_text()) == identity, (
+            f"Initial-history cache identity differs at {completion}.")
+        return state_path
+    assert not cache_dir.exists(), (
+        f"Incomplete initial-history cache: {cache_dir}. Remove it before retrying.")
+    cache_dir.mkdir(parents=True)
+    depth = protocol.max_per_client_recons_history
+    assert depth is not None
+    for round_id in range(case.start_round - depth, case.start_round):
+        for client_id in range(trace.cfg.num_clients):
+            delta = trace.load_delta(round_id, client_id)
+            if case.initial_si == "nsplit":
+                delta = nsplit_quantize(delta, plan.nsplit_bins)
+            for history in protocol.histories:
+                history.commit(
+                    delta,
+                    CompressionRecord(
+                        round_id, client_id,
+                        "raw_history" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_history",
+                    ),
+                    Access.TEMPORAL_TOO,
+                )
+    temporary = state_path.with_suffix(".tmp")
+    torch.save(protocol.histories, temporary)
+    temporary.replace(state_path)
+    completion.write_text(json.dumps(identity, indent=2))
+    return state_path
+
+
+def _load_initial_history_cache(
+    plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any], protocol: _WZProtocol,
+) -> None:
+    """Load one compact raw-prefix ledger and bind it as the case's mutable history."""
+    cache_dir = _initial_history_cache_dir(plan, case, trace_identity, protocol)
+    completion = cache_dir / "complete.json"
+    assert completion.is_file(), f"Missing initial-history cache marker: {completion}."
+    expected = _initial_history_identity(plan, case, trace_identity, protocol)
+    assert json.loads(completion.read_text()) == expected, (
+        f"Initial-history cache identity differs at {completion}.")
+    histories = torch.load(cache_dir / "histories.pt", map_location="cpu", weights_only=False)
+    assert isinstance(histories, tuple)
+    protocol.install_histories(histories)
 
 
 def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any],
@@ -155,18 +226,21 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "trace": trace_identity,
         "seed": plan.seed,
         "codec_seed_policy": _CODEC_SEED_POLICY,
+        "model_training_cache": "disabled",
         "case": {
             "protocol": case.protocol, "start_round": case.start_round,
-            "client_ids": list(case.client_ids), "round_codecs": list(case.round_codecs),
+            "initial_si": case.initial_si, "client_ids": list(case.client_ids),
+            "round_codecs": list(case.round_codecs),
         },
         "protocol_snapshot": protocol_snapshot,
         "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
-            "history_source": "raw_updates",
-            "history_replacement": "raw_source_prefix_compressed_after_measurement",
+            "initial_history_source": (
+                "raw_updates" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_updates"),
+            "history_replacement": "decoded_updates_after_start",
             "client_order": "normal",
             "frozen_si_refresh": protocol.refresh_frozen_si,
-            "server_history": "decoder_visible_prefix_compressed_values",
+            "server_history": "decoder_visible_reconstructions",
         },
     }
 
@@ -178,10 +252,13 @@ def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[
         "name": plan.name,
         "seed": plan.seed,
         "dataset_revision": plan.dataset_revision,
+        "nsplit_bins": plan.nsplit_bins,
+        "model_training_cache": "disabled",
         "trace": trace_identity,
         "cases": [
             {"case_id": case.case_id, "codec_id": case.codec_id, "protocol": case.protocol,
-             "start_round": case.start_round, "client_ids": list(case.client_ids),
+             "start_round": case.start_round, "initial_si": case.initial_si,
+             "client_ids": list(case.client_ids),
              "round_codecs": list(case.round_codecs)}
             for case in plan.cases
         ],
@@ -219,15 +296,15 @@ def _provenance(plan: ReplayPlan, plan_path: Path) -> dict[str, Any]:
         "gpu_names": [torch.cuda.get_device_name(gpu) for gpu in plan.gpu_ids] if torch.cuda.is_available() else [],
         "plan_path": str(plan_path),
         "output_root": str(plan.output_root),
-        "cache_root": str(plan.cache_root),
+        "history_cache_root": str(plan.history_cache_root),
         "gpu_ids": list(plan.gpu_ids),
-        "cache_overwrite": plan.cache_overwrite,
+        "model_training_cache": "disabled",
         "plan": json.loads(plan_path.read_text()),
     }
 
 
 def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) -> Path:
-    """Evaluate selected clients while every client's raw delta advances the history in order."""
+    """Evaluate selected clients while decoded and unselected raw updates advance history."""
     # Reopen the trace `run_sparse_plan` already ensured; `trace.cfg` is its resolved config
     # (num_classes included), so this never re-reads or re-derives a second copy of it.
     trace = Trace(plan.trace, load_fl_config(plan.fl_config), dataset_revision=plan.dataset_revision)
@@ -239,6 +316,7 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
     assert depth is not None and case.start_round >= depth > 0, (
         f"Case {case.case_id} needs {depth} preceding raw rounds.")
     assert max(case.client_ids) < cfg.num_clients
+    _load_initial_history_cache(plan, case, trace_identity, protocol)
 
     case_dir = _case_dir(plan, case)
     records_path = case_dir / "compression_records.csv"
@@ -251,12 +329,6 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
         f"Incomplete case output: {case_dir}. Use a new output root or remove that case before retrying.")
     case_dir.mkdir(parents=True)
 
-    for round_id in range(case.start_round - depth, case.start_round):
-        for client_id in range(cfg.num_clients):
-            delta = trace.load_delta(round_id, client_id)
-            for history in protocol.histories:
-                history.commit(delta, CompressionRecord(round_id, client_id, "raw_history"), Access.TEMPORAL_TOO)
-
     for round_id in range(case.start_round, case.start_round + len(case.round_codecs)):
         for client_id in range(cfg.num_clients):
             delta = trace.load_delta(round_id, client_id)
@@ -264,8 +336,6 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
             if client_id in case.client_ids:
                 set_global_seed(_codec_seed(plan.seed, case.start_round, round_id, client_id))
                 simulate_compression(protocol, delta, client_id, round_id, manager, case_dir, {}, (), ())
-                for history in protocol.histories:
-                    history.replace_latest(delta, round_id, client_id)
             else:
                 for history in protocol.histories:
                     history.commit(delta, CompressionRecord(round_id, client_id, "raw_history"), Access.TEMPORAL_TOO)
@@ -277,10 +347,29 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any]) 
     return records_path
 
 
-def _run_gpu_cases(plan: ReplayPlan, gpu_id: int, cases: tuple[ReplayCase, ...],
-                    provenance: Mapping[str, Any]) -> tuple[Path, ...]:
+def _run_gpu_case(
+    plan: ReplayPlan, gpu_id: int, case: ReplayCase, provenance: Mapping[str, Any],
+) -> Path:
+    """Run one case in a disposable GPU worker so allocator growth cannot cross case boundaries."""
     torch.cuda.set_device(gpu_id)
-    return tuple(run_case(plan, case, provenance) for case in cases)
+    return run_case(plan, case, provenance)
+
+
+def _run_gpu_cases(plan: ReplayPlan, provenance: Mapping[str, Any]) -> tuple[Path, ...]:
+    """Run a serial disposable-worker queue per GPU, preserving plan order in the result."""
+    assert plan.gpu_ids
+    context = multiprocessing.get_context("spawn")
+    with ExitStack() as stack:
+        pools = tuple(stack.enter_context(ProcessPoolExecutor(
+            max_workers=1, mp_context=context, max_tasks_per_child=1,
+        )) for _ in plan.gpu_ids)
+        futures = [
+            pools[index % len(pools)].submit(
+                _run_gpu_case, plan, plan.gpu_ids[index % len(pools)], case, provenance,
+            )
+            for index, case in enumerate(plan.cases)
+        ]
+        return tuple(future.result() for future in futures)
 
 
 def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
@@ -296,8 +385,18 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
         needed.update(range(case.start_round - depth, case.start_round + len(case.round_codecs)))
 
     trace = Trace(plan.trace, cfg, dataset_revision=plan.dataset_revision)
-    trace.ensure(sorted(needed), torch.device(plan.trace_device))
+    trace.ensure(
+        sorted(needed), torch.device(plan.trace_device),
+        checkpoint_rounds={case.start_round for case in plan.cases},
+    )
     trace_identity = trace.identity()
+    history_caches: set[Path] = set()
+    for case, protocol in zip(plan.cases, protocols, strict=True):
+        cache_dir = _initial_history_cache_dir(plan, case, trace_identity, protocol)
+        if cache_dir not in history_caches:
+            _ensure_initial_history_cache(plan, case, trace, protocol)
+            history_caches.add(cache_dir)
+    del protocols
     provenance = _provenance(plan, plan_path)
 
     identity = _plan_identity(plan, trace_identity)
@@ -313,14 +412,11 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
         temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
         temporary.replace(manifest_path)
 
-    if plan.gpu_ids:
-        with ProcessPoolExecutor(max_workers=len(plan.gpu_ids), mp_context=multiprocessing.get_context("spawn")) as pool:
-            futures = [pool.submit(_run_gpu_cases, plan, gpu, plan.cases[index::len(plan.gpu_ids)], provenance)
-                       for index, gpu in enumerate(plan.gpu_ids)]
-            results = [path for future in futures for path in future.result()]
-    else:
-        results = [run_case(plan, case, provenance) for case in plan.cases]
-    return tuple(results)
+    return (
+        _run_gpu_cases(plan, provenance)
+        if plan.gpu_ids
+        else tuple(run_case(plan, case, provenance) for case in plan.cases)
+    )
 
 
 def main() -> None:

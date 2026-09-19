@@ -51,7 +51,7 @@ class StagedIndexTransportMixin:
         return self._oracle_prior if self.code_with_oracle_prior else self.quantizer.coding_model
 
     def conditional_code_lengths(self, *args: Any, **kwargs: Any) -> tuple[Any, EncoderDecoderLayeredRNN]:
-        """Fit the source-fitted prior and record its explicit out-of-band decoder grant."""
+        """Fit or reuse the source-fitted prior and record its out-of-band decoder grant."""
         code_lengths, self._oracle_prior = super().conditional_code_lengths(*args, **kwargs)
         # The grant, not `self._oracle_prior` itself: a separate decoder object must recover this
         # from an explicit hand-off, not from this encoder's retained model instance.
