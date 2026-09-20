@@ -2,11 +2,9 @@
   "name": "or_svhn_30c_f9",
   "description": "OR only: 3 planes at 1 bit, 30 clients, starts 5, 12 and 20, one trained round then nine frozen rounds. Kept apart from the other codec so either can be re-run alone.",
   "fl_config": "svhn_30c_fl_config.json",
-  "trace": "/mnt/nvme1/FL_WZ_Quant/sparse_initial_si/trace",
   "trace_device": "cuda:0",
   "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
   "output_root": "../Runs_exp/or_svhn_30c_f9/runs",
-  "history_cache_root": "/mnt/nvme1/FL_WZ_Quant/sparse_initial_si/protocol_cache/initial_history",
   "gpu_ids": [
     0
   ],

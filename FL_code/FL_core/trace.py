@@ -1,10 +1,10 @@
-"""Checkpointed deterministic raw-client-update traces for sparse FL experiments."""
+"""Deterministic identity-FL client-update streams with resumable server checkpoints."""
 
 from __future__ import annotations
 
 import contextlib
 from contextlib import contextmanager
-import json
+import os
 import platform
 import random
 import re
@@ -20,13 +20,13 @@ from .client import train_client_update
 from .dataset import GROUP_FIELD, create_dataloader, precompute_dataset_to_shared
 from .models import FLModelTemplate, initialize_model
 from .server import aggregate_and_update
-from .utils import StateDictManager, write_fl_config_snapshot
+from .utils import StateDictManager
 
 
-# Bump whenever `_generate`'s algorithm changes in a way that could produce different deltas for
-# the same configuration, so an existing trace on disk cannot be silently reused as if it still
-# matched. Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient current CUDA
-# device rather than the requested one) and added the fixed cudnn determinism policy below.
+# Bump whenever `_run`'s algorithm changes in a way that could produce different deltas for the
+# same configuration, so cached artifacts keyed on trace identity cannot be silently reused as if
+# they still matched. Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
+# current CUDA device rather than the requested one) and added the fixed cudnn determinism policy.
 _TRACE_VERSION = 2
 # `data_folder` is excluded: a path is not data identity, `dataset_revision` is.
 _SEMANTIC_FIELDS = {
@@ -41,12 +41,6 @@ _SEMANTIC_FIELDS = {
 # any RNG seed.
 _CUDNN_DETERMINISTIC = True
 _CUDNN_BENCHMARK = False
-
-
-def _atomic_save(value: Any, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    torch.save(value, temporary)
-    temporary.replace(path)
 
 
 def _restore_optimizer_state(
@@ -102,164 +96,94 @@ def _seeded(seed: int, device: torch.device) -> Iterator[None]:
 
 
 class Trace:
-    """A runner-created FL trace consumed by every sparse replay case.
+    """The one uncompressed FL trajectory every sparse replay case reads its raw updates from.
 
-    The directory owns an identity ``fl_config.json``, a managed marker (generator version,
-    dataset revision, and resolved device signature), requested client deltas, and sparse
-    boundary checkpoints containing all state needed to continue the same trajectory. `ensure`
-    is the only entry point that trains; `load_delta` and `identity` only read what it produced.
+    Nothing about the trajectory is stored except sparse server checkpoints under
+    `checkpoint_dir`: `stream` regenerates the deltas of the rounds it is asked for and yields
+    them, resuming from the newest checkpoint at or before its first round. Client updates are
+    large and quick to recompute, whereas reaching round r means replaying every round before it,
+    so a checkpoint at each case start is the only part worth keeping - and only for one run,
+    since `identity` is what decides whether a cached product of this trace still matches.
     """
 
-    def __init__(self, directory: Path, cfg: FLConfig, *, dataset_revision: str) -> None:
-        """Open or create a trace directory, asserting it matches `cfg` and `dataset_revision`.
+    def __init__(
+        self, checkpoint_dir: Path, cfg: FLConfig, *, dataset_revision: str, device: torch.device,
+    ) -> None:
+        """Bind one FL configuration, dataset fingerprint, and generation device to a scratch dir.
 
         `dataset_revision` is an explicit, caller-supplied fingerprint for the local dataset
         `cfg.data_folder` points at - a folder path alone is not data identity, and this is
         recorded once here rather than re-hashed by every caller on every client-round.
         """
-        self.directory = directory
-        self.config_path = directory / "fl_config.json"
-        self.marker_path = directory / "trace.json"
-        self.checkpoint_dir = directory / "checkpoints"
         assert cfg.protocol == "identity", f"Trace config protocol must be identity, got {cfg.protocol!r}."
         assert cfg.num_loader_workers == 0, (
             f"Trace supports only num_loader_workers=0 (no process-local worker state to "
             f"checkpoint); got {cfg.num_loader_workers}."
         )
-
-        directory.mkdir(parents=True, exist_ok=True)
-        if not self.marker_path.exists():
-            unrelated = tuple(directory.iterdir())
-            assert not unrelated, (
-                f"Trace directory {directory} has files but no managed trace.json marker; use a new directory."
-            )
-            write_fl_config_snapshot(cfg, directory)
-            self._write_marker({"version": _TRACE_VERSION, "device": None, "dataset_revision": dataset_revision})
-        marker = self._read_marker()
-        assert set(marker) == {"version", "device", "dataset_revision"}, (
-            f"Invalid managed trace marker: {self.marker_path}."
+        assert cfg.num_classes is not None, (
+            "Trace needs an explicit num_classes in its FL config: it is part of trace identity, "
+            "which must be known before any round is generated."
         )
-        assert marker["version"] == _TRACE_VERSION, (
-            f"Trace generator version differs at {self.marker_path}: expected {_TRACE_VERSION}, "
-            f"found {marker['version']}."
-        )
-        assert marker["dataset_revision"] == dataset_revision, (
-            f"Trace dataset_revision differs at {self.marker_path}: expected {dataset_revision!r}, "
-            f"found {marker['dataset_revision']!r}."
-        )
-        assert self.config_path.is_file(), f"Managed trace is missing {self.config_path}."
-        stored = FLConfig.model_validate_json(self.config_path.read_text())
-        expected = cfg.model_dump(mode="json", include=_SEMANTIC_FIELDS)
-        actual = stored.model_dump(mode="json", include=_SEMANTIC_FIELDS)
-        assert actual == expected, (
-            f"Trace FL configuration differs at {self.config_path}: expected {expected}, found {actual}."
-        )
-        assert cfg.num_classes in (None, stored.num_classes), (
-            f"Trace num_classes differs at {self.config_path}: expected {cfg.num_classes}, "
-            f"found {stored.num_classes}."
-        )
-        self.cfg = stored
-
-    def ensure(
-        self, rounds: Iterable[int], device: torch.device, *, checkpoint_rounds: Iterable[int] = (),
-    ) -> None:
-        """Generate missing full-client rounds and checkpoint immediately before case starts."""
-        requested = tuple(sorted(set(rounds)))
-        boundaries = set(checkpoint_rounds)
-        assert requested and requested[0] >= 0, "Trace rounds must contain non-negative integers."
-        assert all(round_id > 0 for round_id in boundaries), (
-            "checkpoint_rounds identify positive rounds whose initial server state is cached.")
         if device.type == "cuda":
             assert torch.cuda.is_available(), f"Requested {device} but CUDA is not available."
             assert device.index is not None, f"Trace needs an explicit CUDA device index; got {device}."
             assert device.index < torch.cuda.device_count(), (
                 f"Requested {device} but only {torch.cuda.device_count()} CUDA device(s) are visible."
             )
-        signature = self._device_signature(device)
-        marker = self._read_marker()
-        assert marker["device"] in (None, signature), (
-            f"Trace device differs at {self.marker_path}: expected {marker['device']}, got {signature}."
-        )
-        if marker["device"] is None:
-            self._write_marker(marker | {"device": signature})
-
-        missing = [round_id for round_id in requested if any(
-            not self._delta_path(round_id, client_id).is_file()
-            for client_id in range(self.cfg.num_clients)
-        )]
-        if not missing:
-            return
-        self.checkpoint_dir.mkdir(exist_ok=True)
-        checkpoints = {
-            int(match.group(1)): path
-            for path in self.checkpoint_dir.glob("round_*.pt")
-            if (match := re.fullmatch(r"round_(\d+)\.pt", path.name))
-        }
-        preceding = [round_id for round_id in checkpoints if round_id < missing[0]]
-        checkpoint_round = max(preceding, default=-1)
-        self._generate(
-            requested=set(requested), device=device, start_round=checkpoint_round + 1,
-            final_round=max(missing), checkpoint=checkpoints.get(checkpoint_round),
-            checkpoint_rounds=boundaries,
-        )
+        self.checkpoint_dir = checkpoint_dir
+        self.cfg = cfg
+        self.dataset_revision = dataset_revision
+        self.device = device
 
     def identity(self) -> dict[str, Any]:
-        """Return the finalized, JSON-serializable trace identity; D records it without rebuilding it.
-
-        Only meaningful once `ensure` has resolved `num_classes` and recorded a generation
-        device: raises before that, rather than returning identity that a later `ensure` call
-        could still legitimately change.
-        """
-        marker = self._read_marker()
-        assert self.cfg.num_classes is not None, (
-            "Trace identity requested before ensure() resolved num_classes."
-        )
-        assert marker["device"] is not None, (
-            "Trace identity requested before ensure() recorded a generation device."
-        )
+        """Return the JSON-serializable identity of the trajectory this trace generates."""
         return {
             "trace_version": _TRACE_VERSION,
             "fl_config": self.cfg.model_dump(mode="json", include=_SEMANTIC_FIELDS | {"num_classes"}),
-            "dataset_revision": marker["dataset_revision"],
-            "device": marker["device"],
+            "dataset_revision": self.dataset_revision,
+            "device": self._device_signature(self.device),
         }
 
-    def load_delta(self, round_id: int, client_id: int) -> torch.Tensor:
-        """Load one previously generated raw client delta: flat, float32, on CPU.
+    def checkpoint_path(self, round_id: int) -> Path:
+        """Return the path of the continuation state at the start of `round_id`."""
+        return self.checkpoint_dir / f"round_{round_id}.pt"
 
-        The round/client filename convention lives only here, so callers (e.g. the sparse
-        replay runner) must not keep a second implementation of it.
+    def stream(
+        self, first_round: int, last_round: int, *, checkpoint_rounds: Iterable[int] = (),
+    ) -> Iterator[tuple[int, tuple[torch.Tensor, ...]]]:
+        """Yield `(round_id, per-client deltas)` for `first_round..last_round` inclusive.
+
+        Resumes from the newest checkpoint at or before `first_round`; any round between that
+        checkpoint and `first_round` is retrained but not yielded, because aggregation makes the
+        trajectory sequential. `checkpoint_rounds` name rounds whose *initial* server state is
+        saved as it is passed, so a later stream can start there instead of replaying to it.
         """
-        path = self._delta_path(round_id, client_id)
-        assert path.is_file(), f"Missing trace delta {path}; call ensure() for round {round_id} first."
-        tensor = torch.load(path, map_location="cpu", weights_only=True)
-        assert isinstance(tensor, torch.Tensor) and tensor.ndim == 1 and tensor.dtype == torch.float32, (
-            f"Trace delta at {path} must be a flat float32 tensor; got {type(tensor).__name__} "
-            f"ndim={getattr(tensor, 'ndim', None)} dtype={getattr(tensor, 'dtype', None)}."
-        )
-        return tensor
+        assert 0 <= first_round <= last_round, f"Invalid trace round range {first_round}..{last_round}."
+        boundaries = set(checkpoint_rounds)
+        assert all(round_id > 0 for round_id in boundaries), (
+            "checkpoint_rounds identify positive rounds whose initial server state is cached.")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        start_round = max((round_id for round_id in self._saved_rounds() if round_id <= first_round), default=0)
+        yield from self._run(start_round, first_round, last_round, boundaries)
 
-    def _generate(
-        self, *, requested: set[int], device: torch.device, start_round: int,
-        final_round: int, checkpoint: Path | None, checkpoint_rounds: set[int],
-    ) -> None:
-        with _seeded(self.cfg.seed, device):
+    def _run(
+        self, start_round: int, first_round: int, final_round: int, checkpoint_rounds: set[int],
+    ) -> Iterator[tuple[int, tuple[torch.Tensor, ...]]]:
+        # Setup has to finish before the first yield: a `_seeded` scope may not span one, or the
+        # consumer's own seeding would run inside this trace's forked RNG state and leak into the
+        # rounds after it. Each client-round below is seeded on its own, so nothing else needs to.
+        with _seeded(self.cfg.seed, self.device):
             features, labels, groups = precompute_dataset_to_shared(
                 self.cfg.dataset_name, self.cfg.data_folder, "train", torch.float32,
                 self.cfg.dataset_fraction, self.cfg.seed, self.cfg.image_size,
                 self.cfg.num_clients if self.cfg.dataset_name.upper() in GROUP_FIELD else None,
             )
-            num_classes = int(labels.max()) + 1
-            assert self.cfg.num_classes in (None, num_classes), (
-                f"Trace dataset has {num_classes} classes, config declares {self.cfg.num_classes}."
-            )
-            if self.cfg.num_classes is None:
-                self.cfg.num_classes = num_classes
-                write_fl_config_snapshot(self.cfg, self.directory)
-            model = initialize_model(self.cfg, device)
+            assert self.cfg.num_classes == int(labels.max()) + 1, (
+                f"Trace dataset has {int(labels.max()) + 1} classes, config declares {self.cfg.num_classes}.")
+            model = initialize_model(self.cfg, self.device)
             manager = StateDictManager(model)
             loaders = [create_dataloader(
-                features, labels, self.cfg, device, True, client_id, self.cfg.num_clients, groups
+                features, labels, self.cfg, self.device, True, client_id, self.cfg.num_clients, groups
             ) for client_id in range(self.cfg.num_clients)]
             optimizers = [model.configure_optimizer() for _ in loaders]
             scalers = [torch.amp.GradScaler("cuda", enabled=self.cfg.mixed_precision) for _ in loaders]
@@ -270,55 +194,50 @@ class Trace:
                 lr=self.cfg.server_lr, momentum=self.cfg.server_momentum,
                 nesterov=self.cfg.server_nesterov,
             )
-            if checkpoint is not None:
+            if start_round > 0:
+                checkpoint = self.checkpoint_path(start_round)
                 state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-                assert state["round"] + 1 == start_round, f"Invalid checkpoint round in {checkpoint}."
+                assert state["round"] == start_round, f"Invalid checkpoint round in {checkpoint}."
                 manager.load_trainable_state(model, manager.unflatten(state["server"]))
                 buffers = state["buffers"]
                 for optimizer, saved in zip(optimizers, state["client_optimizers"], strict=True):
-                    _restore_optimizer_state(optimizer, saved, device)
+                    _restore_optimizer_state(optimizer, saved, self.device)
                 for scaler, saved in zip(scalers, state["scalers"], strict=True):
                     scaler.load_state_dict(saved)
                 for loader, saved in zip(loaders, state["loaders"], strict=True):
                     assert loader.generator is not None
                     loader.generator.set_state(saved)
-                _restore_optimizer_state(server_opt, state["server_optimizer"], device)
+                _restore_optimizer_state(server_opt, state["server_optimizer"], self.device)
 
-            starts = {round_id for round_id in requested if round_id - 1 not in requested}
-            ends = {round_id for round_id in requested if round_id + 1 not in requested}
-            for round_id in range(start_round, final_round + 1):
-                if round_id in starts and round_id > start_round:
-                    self._save_checkpoint(round_id - 1, model, manager, buffers, optimizers,
-                                          scalers, loaders, server_opt)
-                server = manager.clone_trainable(model.state_dict())
-                deltas: list[torch.Tensor] = []
-                for client_id, (loader, optimizer, scaler) in enumerate(
-                    zip(loaders, optimizers, scalers, strict=True)
-                ):
-                    manager.load_trainable_state(model, server)
-                    with torch.no_grad():
-                        for name, value in model.named_buffers():
-                            value.copy_(buffers[client_id][name].to(device=value.device))
-                    with _seeded(self.cfg.seed + round_id * self.cfg.num_clients + client_id + 1, device):
-                        delta = train_client_update(
-                            model, loader, optimizer, scaler, manager, self.cfg, round_id, client_id
-                        )
-                    buffers[client_id] = {
-                        name: value.detach().cpu().clone() for name, value in model.named_buffers()
-                    }
-                    deltas.append(delta)
-                    if round_id in requested:
-                        path = self._delta_path(round_id, client_id)
-                        if not path.exists():
-                            _atomic_save(delta, path)
+        for round_id in range(start_round, final_round + 1):
+            server = manager.clone_trainable(model.state_dict())
+            deltas: list[torch.Tensor] = []
+            for client_id, (loader, optimizer, scaler) in enumerate(
+                zip(loaders, optimizers, scalers, strict=True)
+            ):
                 manager.load_trainable_state(model, server)
-                aggregate_and_update(
-                    model, [manager.unflatten(delta) for delta in deltas],
-                    [len(loader.dataset) for loader in loaders], manager, server_opt,
-                )
-                if round_id + 1 in checkpoint_rounds or round_id in ends or round_id == final_round:
-                    self._save_checkpoint(round_id, model, manager, buffers, optimizers,
-                                          scalers, loaders, server_opt)
+                with torch.no_grad():
+                    for name, value in model.named_buffers():
+                        value.copy_(buffers[client_id][name].to(device=value.device))
+                with _seeded(self.cfg.seed + round_id * self.cfg.num_clients + client_id + 1, self.device):
+                    delta = train_client_update(
+                        model, loader, optimizer, scaler, manager, self.cfg, round_id, client_id
+                    )
+                buffers[client_id] = {
+                    name: value.detach().cpu().clone() for name, value in model.named_buffers()
+                }
+                deltas.append(delta)
+            manager.load_trainable_state(model, server)
+            # Aggregation clones what it reads, so the yielded deltas stay the raw updates.
+            aggregate_and_update(
+                model, [manager.unflatten(delta) for delta in deltas],
+                [len(loader.dataset) for loader in loaders], manager, server_opt,
+            )
+            if round_id + 1 in checkpoint_rounds and not self.checkpoint_path(round_id + 1).exists():
+                self._save_checkpoint(round_id + 1, model, manager, buffers, optimizers,
+                                      scalers, loaders, server_opt)
+            if round_id >= first_round:
+                yield round_id, tuple(deltas)
 
     def _save_checkpoint(
         self, round_id: int, model: FLModelTemplate, manager: StateDictManager,
@@ -327,7 +246,9 @@ class Trace:
         server_optimizer: torch.optim.Optimizer,
     ) -> None:
         assert all(loader.generator is not None for loader in loaders)
-        _atomic_save({
+        path = self.checkpoint_path(round_id)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        torch.save({
             "round": round_id,
             "server": manager.flatten(model.state_dict()),
             "buffers": buffers,
@@ -335,16 +256,15 @@ class Trace:
             "scalers": [scaler.state_dict() for scaler in scalers],
             "loaders": [cast(torch.Generator, loader.generator).get_state() for loader in loaders],
             "server_optimizer": server_optimizer.state_dict(),
-        }, self.checkpoint_dir / f"round_{round_id}.pt")
+        }, temporary)
+        temporary.replace(path)
 
-    def _delta_path(self, round_id: int, client_id: int) -> Path:
-        return self.directory / f"round_{round_id}_client_{client_id}.pt"
-
-    def _read_marker(self) -> dict[str, Any]:
-        return json.loads(self.marker_path.read_text())
-
-    def _write_marker(self, marker: dict[str, Any]) -> None:
-        self.marker_path.write_text(json.dumps(marker, indent=2))
+    def _saved_rounds(self) -> list[int]:
+        return [
+            int(match.group(1))
+            for path in self.checkpoint_dir.glob("round_*.pt")
+            if (match := re.fullmatch(r"round_(\d+)\.pt", path.name))
+        ]
 
     @staticmethod
     def _device_signature(device: torch.device) -> dict[str, Any]:

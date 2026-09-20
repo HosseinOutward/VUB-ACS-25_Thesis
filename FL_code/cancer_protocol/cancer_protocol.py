@@ -66,14 +66,6 @@ class _WZProtocol(BaseProtocol):
     def allocate_training_histories(self) -> None:
         """Append ledgers beyond the decoder-visible one; a single-round schedule needs none."""
 
-    def install_histories(self, histories: tuple[ReconstructionHistory, ...]) -> None:
-        """Install an independent cached decoder-history state for sparse replay."""
-        assert len(histories) == len(self.histories)
-        assert [history.config_snapshot() for history in histories] == [
-            history.config_snapshot() for history in self.histories]
-        self.histories = histories
-        self._recons_history = histories[0]
-
     def after_decode(
         self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
     ) -> None:
