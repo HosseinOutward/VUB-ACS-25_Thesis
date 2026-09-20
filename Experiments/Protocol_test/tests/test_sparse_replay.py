@@ -71,6 +71,14 @@ class _FakeProtocol:
         self.histories = histories
 
 
+class _TupleHistory:
+    def config_snapshot(self) -> dict[str, Any]:
+        return {"slices": ((0, 1, None),)}
+
+    def commit(self, *_args: Any) -> None:
+        return None
+
+
 def _write_plan(tmp_path: Path, cases: tuple[sparse_replay.ReplayCase, ...], **overrides: Any) -> Path:
     (tmp_path / "fl.json").write_text(json.dumps({"protocol": "identity", "num_clients": 3, "num_classes": 2}))
     payload: dict[str, Any] = {
@@ -257,6 +265,48 @@ def test_run_sparse_plan_rejects_start_round_below_history_depth_before_trace_en
     with pytest.raises(AssertionError, match="preceding raw rounds"):
         sparse_replay.run_sparse_plan(sparse_replay.load_plan(plan_path), plan_path)
     assert str((tmp_path / "trace").resolve()) not in _FakeTrace._ensured_dirs
+
+
+def test_run_sparse_plan_builds_history_cache_with_case_manager_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case()
+    plan_path = _write_plan(tmp_path, (case,))
+    protocols: list[tuple[str, bool]] = []
+
+    def build_protocol(_plan: Any, _case: Any, manager: Any = None) -> _FakeProtocol:
+        protocols.append(("manager", manager is not None))
+        return _FakeProtocol(snapshot_tag="with-slices" if manager is not None else "without-slices")
+
+    monkeypatch.setattr(sparse_replay, "case_protocol", build_protocol)
+    monkeypatch.setattr(sparse_replay, "Trace", _FakeTrace)
+
+    def initialize_resolved_model(cfg: Any, _device: torch.device) -> nn.Module:
+        assert str((tmp_path / "trace").resolve()) in _FakeTrace._ensured_dirs
+        assert cfg.num_classes == 2
+        return nn.Linear(1, 1, bias=False)
+
+    monkeypatch.setattr(sparse_replay, "initialize_model", initialize_resolved_model)
+    monkeypatch.setattr(sparse_replay, "simulate_compression", _recording_simulate([]))
+
+    sparse_replay.run_sparse_plan(sparse_replay.load_plan(plan_path), plan_path)
+
+    assert protocols == [("manager", False), ("manager", True), ("manager", True)]
+
+
+def test_initial_history_cache_identity_round_trips_json_tuples(
+    tmp_path: Path,
+) -> None:
+    case = _case()
+    plan = sparse_replay.load_plan(_write_plan(tmp_path, (case,)))
+
+    protocol = _FakeProtocol()
+    protocol.histories = (_TupleHistory(),)
+    trace = _FakeTrace(tmp_path / "trace", SimpleNamespace(num_clients=3), dataset_revision="rev-1")
+    _FakeTrace._ensured_dirs.add(str(trace.directory))
+
+    sparse_replay._ensure_initial_history_cache(plan, case, trace, protocol)
+    sparse_replay._load_initial_history_cache(plan, case, trace.identity(), protocol)
 
 
 # --- Raw visibility and ordering --- #

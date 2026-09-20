@@ -150,7 +150,7 @@ def _initial_history_identity(
     plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any], protocol: _WZProtocol,
 ) -> dict[str, Any]:
     """Describe one reusable initial-SI cache independently of O/T training policy."""
-    return {
+    identity = {
         "version": _INITIAL_HISTORY_CACHE_VERSION,
         "trace": trace_identity,
         "start_round": case.start_round,
@@ -158,6 +158,8 @@ def _initial_history_identity(
            if case.initial_si == "nsplit" else {}),
         "history": [history.config_snapshot() for history in protocol.histories],
     }
+    # The marker is persisted as JSON, so normalize tuples before hashing and comparing it.
+    return json.loads(json.dumps(identity))
 
 
 def _initial_history_cache_dir(
@@ -389,9 +391,9 @@ def _run_gpu_cases(plan: ReplayPlan, provenance: Mapping[str, Any]) -> tuple[Pat
 def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
     """Ensure the shared raw trace once, then execute every case against it."""
     cfg = load_fl_config(plan.fl_config)
-    protocols = [case_protocol(plan, case) for case in plan.cases]
+    validation_protocols = [case_protocol(plan, case) for case in plan.cases]
     needed: set[int] = set()
-    for case, protocol in zip(plan.cases, protocols, strict=True):
+    for case, protocol in zip(plan.cases, validation_protocols, strict=True):
         depth = protocol.max_per_client_recons_history
         assert depth is not None and case.start_round >= depth > 0, (
             f"Case {case.case_id} needs {depth} preceding raw rounds.")
@@ -403,6 +405,11 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
         sorted(needed), torch.device(plan.trace_device),
         checkpoint_rounds={case.start_round for case in plan.cases},
     )
+    # Cache histories with the same parameter slices that each spawned case uses.  Validation
+    # above deliberately remains manager/trace-free so malformed schedules fail early; model
+    # construction waits for Trace's resolved config (for example, its resolved num_classes).
+    manager = StateDictManager(initialize_model(trace.cfg, torch.device("cpu")))
+    protocols = [case_protocol(plan, case, manager) for case in plan.cases]
     trace_identity = trace.identity()
     history_caches: set[Path] = set()
     for case, protocol in zip(plan.cases, protocols, strict=True):
