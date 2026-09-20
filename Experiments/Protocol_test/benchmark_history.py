@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import json
 from pathlib import Path
 import sys
@@ -29,6 +29,7 @@ from FL_code.cancer_protocol.history import (
     CompressedReconstructionHistory,
     ReconstructionHistory,
 )
+from FL_code.cancer_protocol.wz_quantizer import SideInfoMatrix
 
 MIB = 1024**2
 
@@ -41,8 +42,73 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--layers", type=int, default=1, help="Number of equal-sized normalization layers.")
     parser.add_argument("--seed", type=int, default=43)
     parser.add_argument("--trace-delta", type=Path, help="Path to a flat float32 trace delta .pt file.")
+    parser.add_argument("--side-info-columns", type=int, default=20)
+    parser.add_argument("--random-rows", type=int, default=550_000)
+    parser.add_argument("--sweep-rows", type=int, default=100_000)
+    parser.add_argument("--side-info-repeats", type=int, default=1)
+    parser.add_argument("--side-info-device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument(
+        "--benchmark-side-info", action="store_true",
+        help="Also build a SideInfoMatrix over the delta and time its three access patterns.",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(argv)
+
+
+def _synchronize(device: torch.device) -> None:
+    """Wait for device work so timings include asynchronous CUDA kernels."""
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _benchmark_side_info(
+    delta: torch.Tensor, norm_slices: tuple[slice, ...], args: argparse.Namespace
+) -> dict[str, Any]:
+    """Time the three side-information access patterns the decoding consumers actually issue."""
+    assert 0 < args.random_rows <= delta.numel() and 0 < args.sweep_rows <= delta.numel()
+    assert args.side_info_columns > 0 and args.side_info_repeats > 0
+    device = torch.device(
+        ("cuda" if torch.cuda.is_available() else "cpu")
+        if args.side_info_device == "auto" else args.side_info_device)
+    assert device.type != "cuda" or torch.cuda.is_available(), "--side-info-device=cuda needs CUDA."
+
+    started = perf_counter()
+    matrix = SideInfoMatrix(
+        tuple(CompressedHistoryVector(delta * (1 + column / 1_000), norm_slices)
+              for column in range(args.side_info_columns)),
+        delta.numel(), torch.tensor([[1.0, 0.0]]).repeat(len(norm_slices), 1), norm_slices, device)
+    _synchronize(device)
+    build_seconds = perf_counter() - started
+
+    random_rows = torch.randperm(delta.numel())[:args.random_rows].to(device)
+
+    def sweep() -> None:
+        for start in range(0, delta.numel(), args.sweep_rows):
+            matrix[start:start + args.sweep_rows]
+
+    cases: dict[str, Callable[[], Any]] = {
+        # The draw is held, matching a training epoch; the sweep and the keys are consumed and
+        # dropped one batch at a time, matching `batch_loop` and `unique_row_groups`.
+        "random_draw": lambda: matrix[random_rows],
+        "contiguous_sweep": sweep,
+        "code_keys": lambda: [None for _ in matrix.iter_code_columns()],
+    }
+    timings: dict[str, Any] = {}
+    for name, case in cases.items():
+        case()  # Warm the allocator and the kernels so the first repeat is not an outlier.
+        _synchronize(device)
+        seconds: list[float] = []
+        for _ in range(args.side_info_repeats):
+            started = perf_counter()
+            case()
+            _synchronize(device)
+            seconds.append(perf_counter() - started)
+        timings[name] = {"seconds": seconds, "median_seconds": median(seconds)}
+    return {
+        "device": str(device), "columns": args.side_info_columns,
+        "random_rows": args.random_rows, "sweep_rows": args.sweep_rows,
+        "repeats": args.side_info_repeats, "build_seconds": build_seconds, **timings,
+    }
 
 
 def _synthetic_delta(elements: int, seed: int) -> torch.Tensor:
@@ -136,6 +202,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             _benchmark_representation(item, delta, args.commits, norm_slices)
             for item in representations
         ],
+        **({"side_info": _benchmark_side_info(delta, norm_slices, args)}
+           if args.benchmark_side_info else {}),
     }
 
 
@@ -154,6 +222,14 @@ def _print_results(result: dict[str, Any]) -> None:
         )
         if "chunk_layouts" in row:
             print(f"  layouts={row['chunk_layouts']} packed_code_bits={row['packed_code_bits']}")
+    if "side_info" in result:
+        side_info = result["side_info"]
+        print(
+            f"\nSideInfoMatrix ({side_info['device']}, {side_info['columns']} columns, "
+            f"build {side_info['build_seconds']:.4f} s; medians over {side_info['repeats']} repeats)"
+        )
+        for name in ("random_draw", "contiguous_sweep", "code_keys"):
+            print(f"  {name:<18} {side_info[name]['median_seconds']:>9.5f} s  {side_info[name]['seconds']}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
