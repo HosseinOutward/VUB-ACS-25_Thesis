@@ -1,7 +1,7 @@
 """Plot averaged staged RD views from complete or explicitly incomplete sparse-replay cases.
 
-Reads declared cases from one sparse-replay output root and renders overall, per-start, and
-per-training-cycle RD figures plus comparison and timing tables. Unfinished cases contribute only
+Reads declared cases from one sparse-replay output root and renders overall, per-start, per-phase
+and per-training-cycle RD figures, one directory per rate source, plus comparison and timing tables. Unfinished cases contribute only
 their validated record prefix, with `INCOMPLETE` embedded in every plot filename and title.
 """
 
@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Mapping, Sequence
 import json
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
+from matplotlib.axes import Axes
 import matplotlib.pyplot as plt
 import numpy as np
 from numpy.typing import NDArray
@@ -81,10 +84,11 @@ def round_curve(rows: pd.DataFrame, records_path: Path, rate_field: str) -> tupl
         f"Incomplete {rate_field}: {records_path}.")
     sizes = rows.model_size.to_numpy(dtype=float)
     assert (sizes == sizes[0]).all(), f"Aggregating workers with different model_size is unsupported: {records_path}."
-    wmapes = np.stack([numeric_list(value, "stage_wmapes", records_path) for value in rows.stage_wmapes])
+    # Records store WMAPE as a percentage; every curve here is dB of the plain ratio.
+    wmapes = np.stack([numeric_list(value, "stage_wmapes", records_path) for value in rows.stage_wmapes]) / 100
     mean_wmape = wmapes.mean(axis=0)
     assert (mean_wmape > 0).all(), f"Non-positive WMAPE: {records_path}."
-    distortion = 20 * np.log10(mean_wmape / 100)
+    distortion = 20 * np.log10(mean_wmape)
     if rate_field == "final_bytes":
         rate = rows.final_bytes.to_numpy(dtype=float).mean() * (2**20 * 8) / sizes[0]
         return np.array([rate]), distortion[-1:]
@@ -119,10 +123,10 @@ def stage_points(case_records: pd.DataFrame) -> pd.DataFrame:
 def averaged_curves(points: pd.DataFrame, group_keys: tuple[str, ...] = ()) -> pd.DataFrame:
     """Average staged curves over rows, converting WMAPE to dB only after aggregation."""
     curves = points[points.rate_field.isin(_CURVE_RATE_FIELDS)].copy()
-    curves["wmape"] = 100 * 10 ** (curves.wmape_db / 20)
+    curves["wmape"] = 10 ** (curves.wmape_db / 20)
     keys = ["codec_id", "initial_si", *group_keys, "rate_field", "stage"]
     averaged = curves.groupby(keys, as_index=False).agg(rate=("rate", "mean"), wmape=("wmape", "mean"))
-    averaged["wmape_db"] = 20 * np.log10(averaged.pop("wmape") / 100)
+    averaged["wmape_db"] = 20 * np.log10(averaged.pop("wmape"))
     return averaged
 
 
@@ -133,66 +137,95 @@ def _tone(color: tuple[float, ...], index: int, count: int) -> tuple[float, ...]
     return (*rgb, 1.0)
 
 
-def _plot_view(points: pd.DataFrame, output: Path, name: str, title: str,
-               group_keys: tuple[str, ...], suffix: str = "") -> None:
-    """Render one averaged RD view with shared protocol/start styling."""
-    curves = averaged_curves(points, group_keys)
-    assert not curves.empty, f"No staged curves available for {name}."
-    fields = [field for field in _CURVE_RATE_FIELDS if field in set(curves.rate_field)]
-    labels = dict(zip(RATE_FIELDS, RATE_LABELS, strict=True))
-    codecs = sorted(curves.codec_id.unique())
+def _draw_curves(
+    axis: Axes, curves: pd.DataFrame, xlabel: str, title: str,
+    starts: Sequence[Any], base_colors: Mapping[str, tuple[float, ...]], group_keys: tuple[str, ...],
+) -> None:
+    """Draw every protocol/start curve of one rate source onto one axis."""
+    line_keys = ["codec_id", "initial_si", *group_keys]
+    for identity, stages in curves.groupby(line_keys, sort=True):
+        identity = identity if isinstance(identity, tuple) else (identity,)
+        codec, initial_si = identity[0], identity[1]
+        start = identity[line_keys.index("start_round")] if "start_round" in line_keys else None
+        start_index = starts.index(start)
+        color = _tone(base_colors[codec], start_index, len(starts))
+        stages = stages.sort_values("stage")
+        axis.plot(
+            stages.rate, stages.wmape_db, color=color, alpha=.95 - .25 * start_index / max(len(starts) - 1, 1),
+            marker="o" if initial_si == "raw" else "s", markeredgecolor=base_colors[codec],
+            markerfacecolor="none" if initial_si == "raw" else color,
+            markeredgewidth=.9, linewidth=1.8,
+            linestyle="-" if initial_si == "raw" else "--",
+            label=f"{codec} \u00b7 {initial_si}" + ("" if start is None else f" \u00b7 start {start}"),
+        )
+    axis.set(xlabel=f"{xlabel} (bits/coordinate)", ylabel="Mean WMAPE (dB)", title=title)
+    axis.ticklabel_format(axis="x", style="plain", useOffset=False)
+    axis.grid(alpha=.25)
+    axis.spines[["top", "right"]].set_visible(False)
+    axis.legend(fontsize=8)
+
+
+def _plot_view(
+    panels: Sequence[tuple[str, pd.DataFrame]], output: Path, name: str,
+    group_keys: tuple[str, ...], suffix: str = "",
+) -> None:
+    """Write one figure per rate source, in that source's directory, one axis per named panel.
+
+    Each rate source gets its own directory because it is a separate x axis: curves are only ever
+    compared within one source, never across two of them.
+    """
+    curves = {title: averaged_curves(points, group_keys) for title, points in panels if not points.empty}
+    curves = {title: frame for title, frame in curves.items() if not frame.empty}
+    assert curves, f"No staged curves available for {name}."
+    combined = pd.concat(curves.values())
+    codecs = sorted(combined.codec_id.unique())
     base_colors = dict(zip(codecs, matplotlib.colormaps["tab10"].resampled(len(codecs)).colors, strict=True))
-    starts = sorted(curves.start_round.unique()) if "start_round" in group_keys else [None]
-    figure, axes = plt.subplots(1, len(fields), figsize=(6 * len(fields), 4.5), squeeze=False,
-                                layout="constrained")
-    for axis, field in zip(axes[0], fields, strict=True):
-        subset = curves[curves.rate_field == field]
-        line_keys = ["codec_id", "initial_si", *group_keys]
-        for identity, stages in subset.groupby(line_keys, sort=True):
-            identity = identity if isinstance(identity, tuple) else (identity,)
-            codec = identity[0]
-            initial_si = identity[1]
-            start = identity[line_keys.index("start_round")] if "start_round" in line_keys else None
-            start_index = starts.index(start)
-            color = _tone(base_colors[codec], start_index, len(starts))
-            label = f"{codec} · {initial_si}" + ("" if start is None else f" · start {start}")
-            stages = stages.sort_values("stage")
-            axis.plot(
-                stages.rate, stages.wmape_db, color=color, alpha=.95 - .25 * start_index / max(len(starts) - 1, 1),
-                marker="o" if initial_si == "raw" else "s", markeredgecolor=base_colors[codec],
-                markerfacecolor="none" if initial_si == "raw" else color,
-                markeredgewidth=.9, linewidth=1.8,
-                linestyle="-" if initial_si == "raw" else "--", label=label,
-            )
-        axis.set(xlabel=f"{labels[field]} (bits/coordinate)",
-                 ylabel="Mean WMAPE (dB rel. 100%)", title=title)
-        axis.ticklabel_format(axis="x", style="plain", useOffset=False)
-        axis.grid(alpha=.25)
-        axis.spines[["top", "right"]].set_visible(False)
-        axis.legend(fontsize=8)
-    figure.savefig(output / f"rd_{name}{suffix}.png", dpi=180)
-    plt.close(figure)
+    starts = sorted(combined.start_round.unique()) if "start_round" in group_keys else [None]
+    labels = dict(zip(RATE_FIELDS, RATE_LABELS, strict=True))
+    for field in _CURVE_RATE_FIELDS:
+        drawn = {title: frame[frame.rate_field == field] for title, frame in curves.items()}
+        drawn = {title: frame for title, frame in drawn.items() if not frame.empty}
+        if not drawn:
+            continue
+        figure, axes = plt.subplots(1, len(drawn), figsize=(6 * len(drawn), 4.5), squeeze=False,
+                                    layout="constrained")
+        for axis, (title, frame) in zip(axes[0], drawn.items(), strict=True):
+            _draw_curves(axis, frame, labels[field], title, starts, base_colors, group_keys)
+        (output / field).mkdir(parents=True, exist_ok=True)
+        figure.savefig(output / field / f"rd_{name}{suffix}.png", dpi=180)
+        plt.close(figure)
 
 
 def plot_results(points: pd.DataFrame, output: Path, *, incomplete: bool = False) -> None:
-    """Write stage data and the overall, per-start, and per-cycle averaged RD views."""
+    """Write stage data and the overall, per-start, per-phase, and per-cycle averaged RD views."""
     assert not points.empty, "Records contain no stage RD metrics."
     output.mkdir(parents=True, exist_ok=True)
-    for stale_plot in output.glob("rd_*.png"):
+    for stale_plot in output.glob("*/rd_*.png"):
         stale_plot.unlink()
     points.to_csv(output / "stage_points.csv", index=False)
     suffix = "_INCOMPLETE" if incomplete else ""
     title_suffix = " (incomplete run)" if incomplete else ""
-    _plot_view(points, output, "overall", f"Overall protocol average{title_suffix}", (), suffix)
-    _plot_view(points, output, "by_start", f"Average by sparse start{title_suffix}", ("start_round",), suffix)
+    views: list[tuple[str, list[tuple[str, pd.DataFrame]], tuple[str, ...]]] = [
+        ("overall", [(f"Overall protocol average{title_suffix}", points)], ()),
+        ("by_start", [(f"Average by sparse start{title_suffix}", points)], ("start_round",)),
+        # The trained round and its frozen reuse answer different questions, so they are read
+        # side by side rather than pooled into one per-start average.
+        ("by_phase", [
+            (f"Trained round only{title_suffix}", points[points.phase == "trained"]),
+            (f"Frozen-round average{title_suffix}", points[points.phase == "frozen"]),
+        ], ("start_round",)),
+    ]
     cycles = sorted(points.cycle.unique())
     if len(cycles) > 1:
-        for cycle in cycles:
-            _plot_view(
-                points[points.cycle == cycle], output, f"cycle_{cycle + 1}",
-                f"Training cycle {cycle + 1}: trained round and frozen rounds{title_suffix}",
-                ("start_round",), suffix,
-            )
+        views.extend(
+            (f"cycle_{cycle + 1}",
+             [(f"Training cycle {cycle + 1}: trained round and frozen rounds{title_suffix}",
+               points[points.cycle == cycle])],
+             ("start_round",))
+            for cycle in cycles
+        )
+    for name, panels, group_keys in views:
+        _plot_view(panels, output, name, group_keys, suffix)
 
 
 def timing_summary(case_records: pd.DataFrame) -> pd.DataFrame:

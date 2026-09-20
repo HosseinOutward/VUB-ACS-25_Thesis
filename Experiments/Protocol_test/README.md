@@ -19,9 +19,11 @@ independent of which clients are measured for compression.
    `complete.json`, checks its identity, and enriches its rows with placement/phase metadata. The
    runner uses it to decide reuse; the analysis path uses it to read finished cases.
 4. **Analysis.** `plot.py` reads every finished case through `records.read_completed_case` and
-   writes `analysis/stage_points.csv`, `rate_distortion.png`, `rates_by_round.png`, and
-   `comparison_gaps.csv`. Workers count equally: stage WMAPE is the mean worker percentage, then
-   `20*log10(mean/100)`; stage rates are mean worker rates, then cumulative. Rate sources
+   writes `analysis/stage_points.csv`, `comparison_gaps.csv`, `timing_summary.csv`, and one figure
+   directory per rate source (`analysis/prior_stage_rates/`, `analysis/coder_stage_rates/`) holding
+   that source's `rd_overall`, `rd_by_start`, `rd_by_phase` (trained round beside the frozen-round
+   average) and, for multi-cycle plans, `rd_cycle_<n>` views. Workers count equally: stage WMAPE is the mean worker ratio (records store
+   percentages), then `20*log10(mean)` dB; stage rates are mean worker rates, then cumulative. Rate sources
    (`prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
    another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
    single-stage, non-overlapping,

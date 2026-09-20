@@ -51,16 +51,22 @@ class StagedIndexTransportMixin:
         return self._oracle_prior if self.code_with_oracle_prior else self.quantizer.coding_model
 
     def conditional_code_lengths(self, *args: Any, **kwargs: Any) -> tuple[Any, EncoderDecoderLayeredRNN]:
-        """Fit or reuse the source-fitted prior and record its out-of-band decoder grant."""
-        code_lengths, self._oracle_prior = super().conditional_code_lengths(*args, **kwargs)
-        # The grant, not `self._oracle_prior` itself: a separate decoder object must recover this
-        # from an explicit hand-off, not from this encoder's retained model instance.
-        self.oracle_prior_grant = self._oracle_prior.decoder_state_dict()
-        return code_lengths, self._oracle_prior
+        """Fit or reuse the retrained prior, granting it out of band only when the coder uses it."""
+        code_lengths, prior_model = super().conditional_code_lengths(*args, **kwargs)
+        if self.code_with_oracle_prior:
+            self._oracle_prior = prior_model
+            # The grant, not `self._oracle_prior` itself: a separate decoder object must recover
+            # this from an explicit hand-off, not from this encoder's retained model instance.
+            self.oracle_prior_grant = prior_model.decoder_state_dict()
+        return code_lengths, prior_model
 
     def add_prior_to_record(self, *args: Any, **kwargs: Any) -> None:
-        """Fit an oracle coder prior against the quantizer's exact decoder side information."""
+        """Record the retrained prior rate, on exact decoder SI when the coder codes with it."""
         if not self.code_with_oracle_prior:
+            # Diagnostic only here: this transport codes with the quantizer's own joint-trained
+            # model, so its retrained-prior reference follows the protocol-wide SI policy exactly
+            # as a plain T/O round does, and is the reference `coder_rate` is quoted against.
+            super().add_prior_to_record(*args, **kwargs)
             return
         # A protocol may estimate diagnostics with wider server SI. An actual coder must evaluate
         # the same model with the same SI shape at both ends, including temporal TRR rounds.
@@ -150,16 +156,14 @@ class StagedIndexTransportMixin:
         facts["coder_prior_si"] = (
             "decoder_legal_exact_oracle_grant" if cls.code_with_oracle_prior else "quantizer_decoder_si"
         )
-        facts["prior_stage_rates_si"] = (
-            "decoder_legal_exact_oracle_grant" if cls.code_with_oracle_prior else None
-        )
+        # Non-oracle transports keep the base policy: their retrained prior is a diagnostic
+        # reference, not the model the coder conditions on.
+        if cls.code_with_oracle_prior:
+            facts["prior_stage_rates_si"] = "decoder_legal_exact_oracle_grant"
         facts["oracle_prior_grant_channel"] = (
             "out_of_band_not_in_final_bytes" if cls.code_with_oracle_prior else None
         )
         facts["rate_fields_available"] = facts["rate_fields_available"] | {
-            "prior_stage_rates": cls.code_with_oracle_prior,
-            "marginal_stage_rates": cls.code_with_oracle_prior,
-            "training_prior_stage_rates": cls.code_with_oracle_prior,
             "coder_rate": True,
             "coder_stage_rates": True,
             "coder_overhead_rate": True,
