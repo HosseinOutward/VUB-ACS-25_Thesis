@@ -104,7 +104,10 @@ def model_training_hash(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     extra_pairs = kwargs.get("extra_training_pairs", ())
     hashed_kwargs = {
         key: value for key, value in kwargs.items()
-        if key not in {"side_information", "side_info", "extra_training_pairs", "training_cache_discriminator"}
+        if key not in {
+            "side_information", "side_info", "extra_training_pairs", "training_cache_discriminator",
+            "side_info_columns_cache",
+        }
     }
     shape = getattr(side_information, "shape", ())
     si_size = shape[1] if len(shape) > 1 else len(side_information)

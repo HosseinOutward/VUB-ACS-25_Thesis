@@ -209,6 +209,9 @@ class BaseRoundCodec:
     def decode(self, payload: Any, record: CompressionRecord) -> torch.Tensor:
         raise NotImplementedError
 
+    def release_round_resources(self) -> None:
+        """Release transient per-client-round resources; stateless codecs have nothing to release."""
+
 
 class IdentityRoundCodec(BaseRoundCodec):
     """Round codec that reconstructs the original delta exactly."""
@@ -487,4 +490,6 @@ def simulate_compression(
     record.append_record_to_csv(save_dir)
     record.save_artifacts(save_dir)
 
+    # This call is the client-round boundary, so anything scoped to it is dropped here.
+    round_codec.release_round_resources()
     return reconstructed

@@ -20,7 +20,13 @@ from FL_code.FL_core.utils import compress_data_list, decompress_data_list
 from .brent_wz_models import EncoderDecoderLayeredRNN
 from .history import HistoryVector, ReconstructionHistory
 from .prior_code import PriorCalculator
-from .wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, SideInfoMatrix, WZcfgQuant
+from .wz_quantizer import (
+    DedupedWZQuantizerCancer,
+    PreprocessMetadata,
+    SideInfoColumnsCache,
+    SideInfoMatrix,
+    WZcfgQuant,
+)
 
 
 @dataclass
@@ -152,6 +158,7 @@ class _WZRoundCodec(BaseRoundCodec):
     _original_delta_vec: torch.Tensor | None = None
     _prior_side_information: list[HistoryVector] | None = None
     _retrained_prior_model: EncoderDecoderLayeredRNN | None
+    _side_info_columns_cache: SideInfoColumnsCache
 
     def options_to_config(
         self,
@@ -166,6 +173,7 @@ class _WZRoundCodec(BaseRoundCodec):
         """Separate round diagnostics from options that configure the learned quantizer."""
         self.dump_element_metrics = dump_element_metrics
         self._retrained_prior_model = None
+        self._side_info_columns_cache = SideInfoColumnsCache()
         self.c_cfg = self.config_class(
             bins_per_plane=bins_per_plane,
             num_planes=num_planes,
@@ -276,11 +284,16 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> DedupedWZQuantizerCancer:
         """Train the ordinary decoder-side quantizer from the supplied target and SI."""
         assert x is not None and si is not None
-        self.quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))
+        self.quantizer = self.quantizer_class(
+            c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
         self.quantizer.train_model(x, si)
         gc.collect()
         torch.cuda.empty_cache()
         return self.quantizer
+
+    def release_round_resources(self) -> None:
+        """Release transient encoded side-information columns after this client-round."""
+        self._side_info_columns_cache.clear()
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
@@ -471,7 +484,8 @@ class T_RoundCodec(_WZRoundCodec):
         """Create an untrained worker-side quantizer and retain its legal SI."""
         assert x is None and si is not None
         self.si = si
-        self.quantizer = self.quantizer_class(c_cfg=self.c_cfg, si_size=len(si))
+        self.quantizer = self.quantizer_class(
+            c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
         self._send_quantizer_state = False
         return self.quantizer
 

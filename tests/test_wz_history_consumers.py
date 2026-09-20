@@ -7,12 +7,61 @@ from torch import nn
 from FL_code.FL_core.cache import model_training_hash
 from FL_code.cancer_protocol.history import _CHUNK_ELEMENTS, CompressedHistoryVector, HistoryVector
 from FL_code.cancer_protocol.wz_quantizer import (
+    SideInfoColumns,
+    SideInfoColumnsCache,
     SideInfoMatrix,
     WZQuantizerCancer,
     WZcfgQuant,
     unique_row_groups,
     wz_model_training_loop,
 )
+
+
+def test_side_info_columns_cache_reuses_a_b_a_and_evicts_strongly() -> None:
+    vectors = [HistoryVector(torch.full((4,), float(value))) for value in (1, 2, 3)]
+    cache = SideInfoColumnsCache()
+    first = cache.get([vectors[0]], 4, (slice(0, 4),), torch.device("cpu"))
+    assert cache.get([vectors[1]], 4, (slice(0, 4),), torch.device("cpu")) is not first
+    assert cache.get([vectors[0]], 4, (slice(0, 4),), torch.device("cpu")) is first
+    cache.get([vectors[2]], 4, (slice(0, 4),), torch.device("cpu"))
+    assert cache.get([vectors[0]], 4, (slice(0, 4),), torch.device("cpu")) is first
+    assert cache.get([vectors[1]], 4, (slice(0, 4),), torch.device("cpu")) is not first
+    assert list(cache._entries)[-1][0] is vectors[1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_side_info_columns_cache_normalizes_unindexed_cuda_without_rebuild() -> None:
+    value = HistoryVector(torch.arange(4, dtype=torch.float32))
+    cache = SideInfoColumnsCache()
+    first = cache.get([value], 4, (slice(0, 4),), torch.device("cuda"))
+    payload = first._columns
+    second = cache.get([value], 4, (slice(0, 4),), torch.device("cuda"))
+    assert second is first and second._columns is payload
+
+
+def test_side_info_matrices_share_columns_but_keep_target_factors() -> None:
+    value = HistoryVector(torch.arange(4, dtype=torch.float32))
+    columns = SideInfoColumnsCache().get([value], 4, (slice(0, 4),), torch.device("cpu"))
+    first = SideInfoMatrix([value], 4, torch.tensor([[1.0, 0.0]]), (slice(0, 4),), torch.device("cpu"), columns)
+    second = SideInfoMatrix([value], 4, torch.tensor([[2.0, 1.0]]), (slice(0, 4),), torch.device("cpu"), columns)
+    assert first._column_payload is second._column_payload is columns
+    assert torch.equal(first[:], second[:] * 2 + 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_moving_shared_side_info_columns_does_not_invalidate_other_matrix() -> None:
+    value = HistoryVector(torch.arange(4, dtype=torch.float32))
+    columns = SideInfoColumnsCache().get([value], 4, (slice(0, 4),), torch.device("cpu"))
+    first = SideInfoMatrix(
+        [value], 4, torch.tensor([[1.0, 0.0]]), (slice(0, 4),), torch.device("cpu"), columns)
+    second = SideInfoMatrix(
+        [value], 4, torch.tensor([[1.0, 0.0]]), (slice(0, 4),), torch.device("cpu"), columns)
+
+    first.to("cuda")
+
+    assert first.device.type == "cuda"
+    assert second.device.type == "cpu"
+    assert torch.equal(second[:].squeeze(1), value.materialize())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="training loop requires CUDA")
@@ -74,10 +123,70 @@ def test_side_information_matrix_decodes_compressed_rows_and_normalizes() -> Non
     rows = torch.tensor([19, 0, 7, 3])
     assert torch.equal(matrix[rows], expected[rows])
     assert torch.equal(matrix[4:12], expected[4:12])
-    chunks = matrix._columns[0].chunks
-    assert chunks is not None and chunks[0].layout == "raw"
-    assert chunks[0].values.device == matrix.device
+    chunks = tuple(compressed._iter_encoded_chunks())
+    payload = matrix._columns[0]
+    assert chunks[0].layout == "raw" and payload.raw_chunks.tolist() == [True]
+    assert payload.ranks.device == matrix.device and payload.ranks.dtype is torch.int32
     assert matrix.device.type == device.type
+
+
+def test_side_information_rows_is_lazy_and_nested_selection_is_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    values = torch.arange(20, dtype=torch.float32) / 10
+    matrix = SideInfoMatrix(
+        [HistoryVector(values), HistoryVector(values + 1)], 20,
+        torch.tensor([[1.0, 0.0]]), (slice(0, 20),), torch.device("cpu"),
+    )
+    calls = 0
+    original = matrix._decode_column
+
+    def counted(column: object, rows: torch.Tensor, *args: torch.Tensor) -> torch.Tensor:
+        nonlocal calls
+        calls += 1
+        return original(column, rows, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(matrix, "_decode_column", counted)
+    view = matrix.rows(slice(2, 12))
+    assert view.shape == (10, 2) and view.device == matrix.device and view.dtype == matrix.dtype
+    assert calls == 0
+    nested = view.rows(torch.tensor([7, 1, 4]))
+    assert calls == 0
+    assert torch.equal(nested[:], matrix[torch.tensor([9, 3, 6])])
+    assert calls == 4
+
+
+def test_lazy_code_grouping_keeps_equal_values_in_distinct_chunks_separate() -> None:
+    values = torch.zeros(_CHUNK_ELEMENTS + 1)
+    compressed = CompressedHistoryVector(
+        values, normalization_factors=torch.tensor([[1.0, 0.0]])
+    )
+    matrix = SideInfoMatrix(
+        [compressed], values.numel(), torch.tensor([[1.0, 0.0]]),
+        (slice(0, values.numel()),), torch.device("cpu"),
+    )
+    selected = torch.tensor([0, _CHUNK_ELEMENTS])
+    _, dense_inverse, _ = unique_row_groups((values[selected, None],), 32)
+    _, lazy_inverse, _ = unique_row_groups((matrix.rows(selected),), 32)
+    assert torch.equal(dense_inverse, torch.tensor([0, 0]))
+    assert torch.equal(lazy_inverse, torch.tensor([0, 1]))
+
+
+def test_slice_backed_row_selection_does_not_resolve_full_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = torch.arange(100, dtype=torch.float32)
+    matrix = SideInfoMatrix(
+        [HistoryVector(values)], values.numel(), torch.tensor([[1.0, 0.0]]),
+        (slice(0, values.numel()),), torch.device("cpu"),
+    )
+    view = matrix.rows(slice(10, 90))
+
+    def fail_resolution() -> torch.Tensor:
+        raise AssertionError("slice-backed tensor selection resolved the full range")
+
+    monkeypatch.setattr(view, "_resolved_indices", fail_resolution)
+    selected = view.rows(torch.tensor([2, 5]))
+    assert selected.shape == (2, 1)
+    assert selected.code_rows(torch.tensor([0, 1])).shape == (2, 1)
 
 
 def test_side_information_matrix_gathers_uint16_codes_on_accelerator() -> None:
@@ -96,11 +205,14 @@ def test_side_information_matrix_gathers_uint16_codes_on_accelerator() -> None:
     )
     rows = torch.tensor([65_535, 0, 128], device=device)
 
-    chunks = matrix._columns[0].chunks
-    assert chunks is not None and chunks[0].codes is not None
-    assert chunks[0].layout == "direct" and chunks[0].codes.dtype is torch.uint16
+    chunks = tuple(compressed._iter_encoded_chunks())
+    payload = matrix._columns[0]
+    assert chunks[0].layout == "direct" and payload.raw_chunks is None
+    assert payload.ranks.dtype is torch.int16
     assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
     assert matrix.code_rows(rows).shape == (3, 1)
+    expected = chunks[0].local_keys(rows.cpu()).to(torch.int64)
+    assert torch.equal(matrix.code_rows(rows).cpu()[:, 0], expected)
 
 
 def test_side_information_matrix_gathers_packed_codes_on_accelerator() -> None:
@@ -119,8 +231,10 @@ def test_side_information_matrix_gathers_packed_codes_on_accelerator() -> None:
     )
     rows = torch.tensor([0, 1, 255, 256, 16_383, values.numel() - 1], device=device)
 
-    chunks = matrix._columns[0].chunks
-    assert chunks is not None and chunks[0].layout == "packed"
+    chunks = tuple(compressed._iter_encoded_chunks())
+    payload = matrix._columns[0]
+    assert chunks[0].layout == "packed" and payload.raw_chunks is None
+    assert payload.ranks.dtype is torch.int16
     assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
     assert torch.unique(matrix.code_rows(rows)).numel() == rows.numel() - 1
 
@@ -144,10 +258,31 @@ def test_side_information_matrix_decodes_across_adaptive_chunk_layouts() -> None
         [0, _CHUNK_ELEMENTS - 1, _CHUNK_ELEMENTS, values.numel() - 1], device=device
     )
 
-    chunks = matrix._columns[0].chunks
-    assert chunks is not None and [chunk.layout for chunk in chunks] == ["packed", "raw"]
+    chunks = tuple(compressed._iter_encoded_chunks())
+    payload = matrix._columns[0]
+    assert [chunk.layout for chunk in chunks] == ["packed", "raw"]
+    assert payload.raw_chunks.tolist() == [False, True] and payload.ranks.dtype is torch.int32
     assert torch.equal(matrix[rows].cpu().squeeze(1), compressed.materialize()[rows.cpu()])
     assert torch.unique(matrix.code_rows(rows)).numel() == rows.numel()
+
+    def expected_codes(selected: torch.Tensor) -> torch.Tensor:
+        selected = selected.cpu()
+        output = torch.empty(selected.numel(), dtype=torch.int64)
+        for chunk_id, chunk in enumerate(chunks):
+            mask = (selected >= chunk.start) & (selected < chunk.stop)
+            if mask.any():
+                output[mask] = chunk.local_keys(selected[mask] - chunk.start).to(torch.int64)
+                output[mask] += chunk_id * (1 << 32)
+        return output
+
+    random_rows = torch.tensor([_CHUNK_ELEMENTS - 257, 3, _CHUNK_ELEMENTS + 99, values.numel() - 1])
+    assert torch.equal(matrix.code_rows(random_rows.to(device)).cpu()[:, 0], expected_codes(random_rows))
+    assert torch.equal(
+        torch.cat(tuple(matrix.iter_code_columns())).cpu(),
+        expected_codes(torch.arange(values.numel())),
+    )
+    contiguous = slice(_CHUNK_ELEMENTS - 3, _CHUNK_ELEMENTS + 4)
+    assert torch.equal(matrix[contiguous].cpu().squeeze(1), compressed.materialize()[contiguous])
 
 
 def test_unique_row_groups_uses_compact_codes_and_normalization_slice() -> None:
@@ -209,7 +344,9 @@ def test_model_training_hash_ignores_side_information_contents_but_keeps_size() 
     }
     changed = kwargs | {"side_information": (HistoryVector(torch.ones(5)),)}
     wider = kwargs | {"side_information": (HistoryVector(torch.zeros(5)), HistoryVector(torch.zeros(5)))}
+    with_round_cache = kwargs | {"side_info_columns_cache": SideInfoColumnsCache()}
     assert model_training_hash((), kwargs) == model_training_hash((), changed)
+    assert model_training_hash((), kwargs) == model_training_hash((), with_round_cache)
     assert model_training_hash((), kwargs) != model_training_hash((), wider)
 
 

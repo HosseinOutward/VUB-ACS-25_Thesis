@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,30 +24,171 @@ from FL_code.FL_core.utils import (
 )
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .history import _CompressedHistoryChunk, CompressedHistoryVector, HistoryVector
+from .history import _CHUNK_ELEMENTS, CompressedHistoryVector, HistoryVector
 from .prior_code import INFERENCE_BATCH, DedupedPriorCalculator, PriorCalculator
 
 
 # Below this point, exact grouping costs more than the avoided RNN work.
 TRAINING_DEDUPLICATION_MIN_FRACTION = 0.1
+assert _CHUNK_ELEMENTS > 0 and _CHUNK_ELEMENTS & (_CHUNK_ELEMENTS - 1) == 0
+_CHUNK_SHIFT = _CHUNK_ELEMENTS.bit_length() - 1
+
+
+def _resolve_device(device: torch.device | str) -> torch.device:
+    """Bind an unindexed CUDA device to the current one, so device identity compares exactly."""
+    resolved = torch.device(device)
+    return (torch.device("cuda", torch.cuda.current_device())
+            if resolved.type == "cuda" and resolved.index is None else resolved)
+
+
+def select_si_rows(
+    side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+    index: slice | torch.Tensor,
+) -> SideInfoMatrix | _SideInfoRows | torch.Tensor:
+    """Select side-information rows lazily when the source can, eagerly for a dense tensor."""
+    if isinstance(side_info, (SideInfoMatrix, _SideInfoRows)):
+        return side_info.rows(index)
+    return side_info[index]
 
 
 @dataclass(frozen=True, slots=True)
 class _SideInfoColumn:
     """One decoder-side-information column retained in its compact device representation."""
 
-    chunks: tuple[_CompressedHistoryChunk, ...] | None
+    ranks: torch.Tensor | None
+    dictionaries: torch.Tensor | None
+    chunk_offsets: torch.Tensor | None
+    raw_chunks: torch.Tensor | None  # None when no chunk stores values verbatim
     dense: torch.Tensor | None
     source_norm_factors: torch.Tensor | None
+
+
+class SideInfoColumns:
+    """Target-independent flat side-information payload shared by round matrices.
+
+    The payload is produced from CPU ``HistoryVector`` instances and consumed by
+    ``SideInfoMatrix`` decoders; compressed columns retain device ranks, concatenated
+    dictionaries, chunk offsets, and raw-chunk flags while dense columns retain values.
+    """
+
+    def __init__(
+        self, side_information: Sequence[HistoryVector], vector_size: int,
+        norm_slices: Sequence[slice], device: torch.device,
+    ) -> None:
+        assert all(value.numel() == vector_size for value in side_information), (
+            f"Each side-information vector must contain {vector_size} values.")
+        self.vector_size = vector_size
+        self._device = device
+        self._columns = tuple(self._encode(value, vector_size, norm_slices, device)
+                              for value in side_information)
+
+    @staticmethod
+    def _encode(value: HistoryVector, vector_size: int, norm_slices: Sequence[slice], device: torch.device) -> _SideInfoColumn:
+        if isinstance(value, CompressedHistoryVector):
+            expected_ranges = tuple((item.start, item.stop) for item in norm_slices)
+            assert value.normalization_ranges == expected_ranges, (
+                "Stored history normalization slices differ from the current model slices.")
+            chunks = tuple(value._iter_encoded_chunks())
+            if chunks:
+                # Keep one random-access rank and one concatenated value array per column.
+                # Raw chunks use their local coordinate as a rank; this also makes the final
+                # partial chunk follow exactly the same indexing path as full chunks.
+                all_dictionary = all(chunk.codes is not None for chunk in chunks)
+                narrow = all_dictionary and all(chunk.values.numel() <= 65_536 for chunk in chunks)
+                rank_dtype = torch.int16 if narrow else torch.int32
+                ranks = torch.empty(vector_size, dtype=rank_dtype, device=device)
+                values: list[torch.Tensor] = []
+                offsets = [0]
+                raw = []
+                for chunk in chunks:
+                    chunk = chunk.to(device)
+                    local = torch.arange(chunk.stop - chunk.start, device=device)
+                    ranks[chunk.start:chunk.stop] = (
+                        local.to(rank_dtype) if chunk.codes is None else chunk.ranks(local).to(rank_dtype))
+                    raw.append(chunk.codes is None)
+                    values.append(chunk.values)
+                    offsets.append(offsets[-1] + chunk.values.numel())
+                return _SideInfoColumn(
+                    ranks, torch.cat(values),
+                    torch.tensor(offsets, dtype=torch.long, device=device),
+                    torch.tensor(raw, dtype=torch.bool, device=device) if any(raw) else None,
+                    None, value.normalization_factors.to(device),
+                )
+        values = value.materialize()
+        assert values.numel() == vector_size
+        return _SideInfoColumn(None, None, None, None, values.to(device=device, dtype=torch.float32), None)
+
+    @property
+    def device(self) -> torch.device:
+        """Return the device containing the flat column payload tensors."""
+        return self._device
+
+    @property
+    def columns(self) -> tuple[_SideInfoColumn, ...]:
+        """Return the target-independent per-column flat payloads."""
+        return self._columns
+
+    def to(self, device: torch.device) -> SideInfoColumns:
+        """Return this payload on ``device`` without invalidating matrices sharing it."""
+        if device == self._device:
+            return self
+        result = self.__class__.__new__(self.__class__)
+        result.vector_size = self.vector_size
+        result._device = device
+        result._columns = tuple(_SideInfoColumn(
+            None if column.ranks is None else column.ranks.to(device),
+            None if column.dictionaries is None else column.dictionaries.to(device),
+            None if column.chunk_offsets is None else column.chunk_offsets.to(device),
+            None if column.raw_chunks is None else column.raw_chunks.to(device),
+            None if column.dense is None else column.dense.to(device),
+            None if column.source_norm_factors is None else column.source_norm_factors.to(device),
+        ) for column in self._columns)
+        return result
+
+
+class SideInfoColumnsCache:
+    """Encoded columns reused by every side-information matrix of one client-round.
+
+    A client-round builds matrices over the same vectors in train(A), encode(A), prior(B),
+    decode(A) order, so two least-recently-used entries cover it. Entries are matched by vector
+    identity and keep those vectors alive, so no recycled object can alias a stale payload;
+    ``_WZRoundCodec.release_round_resources`` drops them when the client-round ends.
+    """
+
+    _MAX_ENTRIES = 2
+
+    def __init__(self) -> None:
+        self._entries: OrderedDict[tuple[HistoryVector, ...], SideInfoColumns] = OrderedDict()
+
+    def get(
+        self, side_information: Sequence[HistoryVector], vector_size: int,
+        norm_slices: Sequence[slice], device: torch.device,
+    ) -> SideInfoColumns:
+        """Return the encoded columns for these exact side-information vectors, building on a miss."""
+        device = _resolve_device(device)
+        key = tuple(side_information)
+        for stored_key in self._entries:
+            if len(stored_key) == len(key) and all(left is right for left, right in zip(stored_key, key)):
+                self._entries[stored_key] = self._entries[stored_key].to(device)
+                self._entries.move_to_end(stored_key)
+                return self._entries[stored_key]
+        self._entries[key] = SideInfoColumns(key, vector_size, norm_slices, device)
+        while len(self._entries) > self._MAX_ENTRIES:
+            self._entries.popitem(last=False)
+        return self._entries[key]
+
+    def clear(self) -> None:
+        """Release encoded columns while leaving model and protocol state untouched."""
+        self._entries.clear()
 
 
 class SideInfoMatrix:
     """GPU-resident compressed side information with batched row decoding.
 
-    A matrix stores one history vector per column. Compressed vectors keep their adaptive chunks
-    on the selected device and decode only requested rows; dense ``HistoryVector`` values use a
-    device tensor directly. Gathered compressed values are restored with their stored source
-    factors, then normalized with the current target factors on the device.
+    A matrix stores one history vector per column. Compressed vectors use flat device ranks,
+    concatenated dictionaries, and chunk metadata to decode only requested rows; dense
+    ``HistoryVector`` values use a device tensor directly. Gathered values are restored with
+    their stored source factors, then normalized with current target factors on the device.
     """
 
     def __init__(
@@ -56,29 +198,38 @@ class SideInfoMatrix:
         norm_factors: torch.Tensor,
         norm_slices: Sequence[slice],
         device: torch.device,
+        columns: SideInfoColumns | None = None,
     ) -> None:
         self._shape = (vector_size, max(len(side_information), 1))
-        requested_device = torch.device(device)
-        self._device = (
-            torch.device("cuda", torch.cuda.current_device())
-            if requested_device.type == "cuda" and requested_device.index is None
-            else requested_device
-        )
+        self._device = _resolve_device(device)
         self._dtype = torch.float32
         self._norm_factors = norm_factors.to(self._device, dtype=torch.float32)
         self._norm_slices = tuple(slice(*value.indices(vector_size)) for value in norm_slices)
         self._slice_ids = torch.full((vector_size,), -1, dtype=torch.int32, device=self._device)
         for index, value_slice in enumerate(self._norm_slices):
             self._slice_ids[value_slice] = index
-        self._columns = tuple(
-            self._encode_column(value, vector_size, self._device)
-            for value in side_information
-        )
+        self._column_payload = columns.to(self._device) if columns is not None else SideInfoColumns(
+            side_information, vector_size, self._norm_slices, self._device)
+        self._columns = self._column_payload.columns
 
     @property
     def shape(self) -> tuple[int, int]:
         """Return ``(vector_size, side_information_count)`` like a dense matrix."""
         return self._shape
+
+    def rows(self, index: slice | torch.Tensor | Sequence[int] | int) -> _SideInfoRows:
+        """Return a lazy view selecting rows without decoding their values."""
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self._shape[0])
+            assert step == 1, "SideInfoMatrix only supports contiguous slices."
+            return _SideInfoRows(self, slice(start, stop))
+        row_indices = (
+            torch.tensor([index], device=self._device) if isinstance(index, int)
+            else torch.as_tensor(index, dtype=torch.long, device=self._device)
+        )
+        assert row_indices.ndim == 1 and bool(((row_indices >= 0) & (row_indices < self._shape[0])).all()), (
+            f"SideInfoMatrix row indices must be in [0, {self._shape[0]}).")
+        return _SideInfoRows(self, row_indices)
 
     @property
     def device(self) -> torch.device:
@@ -92,108 +243,171 @@ class SideInfoMatrix:
 
     def to(self, device: torch.device | str) -> SideInfoMatrix:
         """Move encoded columns and normalization metadata to ``device`` in place."""
-        requested_device = torch.device(device)
-        target = (
-            torch.device("cuda", torch.cuda.current_device())
-            if requested_device.type == "cuda" and requested_device.index is None
-            else requested_device
-        )
+        target = _resolve_device(device)
         if target == self._device:
             return self
-        self._columns = tuple(_SideInfoColumn(
-            None if column.chunks is None else tuple(item.to(target) for item in column.chunks),
-            None if column.dense is None else column.dense.to(target),
-            None if column.source_norm_factors is None else column.source_norm_factors.to(target),
-        ) for column in self._columns)
+        self._column_payload = self._column_payload.to(target)
+        self._columns = self._column_payload.columns
         self._norm_factors = self._norm_factors.to(target)
         self._slice_ids = self._slice_ids.to(target)
         self._device = target
         return self
 
-    def _encode_column(
-        self, value: HistoryVector, vector_size: int, device: torch.device
-    ) -> _SideInfoColumn:
-        if isinstance(value, CompressedHistoryVector):
-            expected_ranges = tuple((item.start, item.stop) for item in self._norm_slices)
-            assert value.normalization_ranges == expected_ranges, (
-                "Stored history normalization slices differ from the current model slices."
-            )
-            chunks = tuple(chunk.to(device) for chunk in value._iter_encoded_chunks())
-            if chunks:
-                return _SideInfoColumn(chunks, None, value.normalization_factors.to(device))
-        values = value.materialize()
-        assert values.numel() == vector_size
-        return _SideInfoColumn(None, values.to(device=device, dtype=torch.float32), None)
+    @staticmethod
+    def _gather_ranks(
+        column: _SideInfoColumn, rows: torch.Tensor, chunk_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return chunk-local ranks and their positions in the concatenated dictionary."""
+        assert column.ranks is not None and column.chunk_offsets is not None
+        ranks = column.ranks[rows].to(torch.int32)
+        if column.ranks.dtype is torch.int16:
+            ranks &= 0xFFFF  # int16 is only storage; ranks are unsigned and may exceed 32767.
+        return ranks, column.chunk_offsets[chunk_ids] + ranks
 
-    def _decode_column(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
+    def _decode_column(
+        self, column: _SideInfoColumn, rows: torch.Tensor, chunk_ids: torch.Tensor,
+        slice_ids: torch.Tensor, target_factors: torch.Tensor,
+    ) -> torch.Tensor:
         if column.dense is not None:
             decoded = column.dense[rows]
         else:
-            assert column.chunks is not None
-            decoded = torch.empty(rows.shape, device=rows.device, dtype=torch.float32)
-            for chunk in column.chunks:
-                selected = (rows >= chunk.start) & (rows < chunk.stop)
-                if selected.any():
-                    decoded[selected] = chunk.decode_rows(rows[selected] - chunk.start)
-        slice_ids = self._slice_ids[rows].long()
+            assert column.dictionaries is not None
+            _, positions = self._gather_ranks(column, rows, chunk_ids)
+            decoded = column.dictionaries[positions]
         if column.source_norm_factors is not None:
             source_factors = column.source_norm_factors[slice_ids]
             decoded.mul_(source_factors[:, 0]).add_(source_factors[:, 1])
-        target_factors = self._norm_factors[slice_ids]
         return decoded.sub_(target_factors[:, 1]).div_(target_factors[:, 0])
 
     def _decode_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return unsigned local keys and physical chunk ids for selected rows."""
-        if column.chunks is None:
-            assert column.dense is not None
+        if column.dense is not None:
             keys = column.dense[rows].view(torch.int32).to(torch.int64) & 0xFFFF_FFFF
             return keys, torch.zeros(rows.shape, dtype=torch.int64, device=rows.device)
-
-        keys = torch.empty(rows.shape, device=rows.device, dtype=torch.int64)
-        chunk_ids = torch.empty_like(keys)
-        for index, chunk in enumerate(column.chunks):
-            selected = (rows >= chunk.start) & (rows < chunk.stop)
-            if selected.any():
-                keys[selected] = chunk.local_keys(rows[selected] - chunk.start)
-                chunk_ids[selected] = index
+        chunk_ids = rows >> _CHUNK_SHIFT
+        ranks, positions = self._gather_ranks(column, rows, chunk_ids)
+        keys = ranks.to(torch.int64)
+        if column.raw_chunks is not None:
+            # A raw chunk has no dictionary, so its rank is a coordinate; key it by value bits.
+            assert column.dictionaries is not None
+            values = column.dictionaries[positions].view(torch.int32).to(torch.int64) & 0xFFFF_FFFF
+            keys = torch.where(column.raw_chunks[chunk_ids], values, keys)
         return keys, chunk_ids
 
     def _group_codes(self, column: _SideInfoColumn, rows: torch.Tensor) -> torch.Tensor:
         """Add target-normalization slice identity to compact codes used for row grouping."""
         codes, chunk_ids = self._decode_codes(column, rows)
-        chunk_count = 1 if column.chunks is None else len(column.chunks)
+        chunk_count = 1 if column.chunk_offsets is None else column.chunk_offsets.numel() - 1
         region_ids = self._slice_ids[rows].to(torch.int64) * chunk_count + chunk_ids
         return region_ids * (1 << 32) + codes
 
     def __getitem__(self, rows: slice | torch.Tensor | Sequence[int] | int) -> torch.Tensor:
         """Decode selected rows as a float32 ``(rows, columns)`` tensor."""
-        if isinstance(rows, slice):
-            start, stop, step = rows.indices(self._shape[0])
-            assert step == 1, "SideInfoMatrix only supports contiguous slices."
-            row_indices = torch.arange(start, stop, device=self._device)
-        elif isinstance(rows, int):
-            row_indices = torch.tensor([rows], device=self._device)
-        else:
-            row_indices = torch.as_tensor(rows, dtype=torch.long, device=self._device)
-        assert row_indices.ndim == 1 and bool(((row_indices >= 0) & (row_indices < self._shape[0])).all()), (
-            f"SideInfoMatrix row indices must be in [0, {self._shape[0]}).")
+        row_indices = self.rows(rows)._resolved_indices()
         if not self._columns:
             return torch.zeros((row_indices.numel(), 1), device=self._device, dtype=self._dtype)
-        return torch.stack([self._decode_column(column, row_indices) for column in self._columns], dim=1)
+        result = torch.empty((row_indices.numel(), len(self._columns)), device=self._device, dtype=self._dtype)
+        chunk_ids = row_indices >> _CHUNK_SHIFT
+        slice_ids = self._slice_ids[row_indices].long()
+        target_factors = self._norm_factors[slice_ids]
+        for index, column in enumerate(self._columns):
+            result[:, index] = self._decode_column(column, row_indices, chunk_ids, slice_ids, target_factors)
+        return result
 
-    def iter_code_columns(self) -> Iterator[torch.Tensor]:
+    def iter_code_columns(self, rows: torch.Tensor | None = None) -> Iterator[torch.Tensor]:
         """Yield compact row keys for deduplication without decoding compressed columns."""
-        rows = torch.arange(self._shape[0], device=self._device)
+        selected_rows = (
+            torch.arange(self._shape[0], device=self._device) if rows is None else rows
+        )
         if not self._columns:
-            yield torch.zeros(rows.shape, device=self._device, dtype=torch.int64)
+            yield torch.zeros(selected_rows.shape, device=self._device, dtype=torch.int64)
             return
-        yield from (self._group_codes(column, rows) for column in self._columns)
+        yield from (self._group_codes(column, selected_rows) for column in self._columns)
 
     def code_rows(self, rows: torch.Tensor) -> torch.Tensor:
         """Return transient compact keys for selected rows without decoding SI values."""
         if not self._columns:
             return torch.zeros((rows.numel(), 1), device=self._device, dtype=torch.int64)
         return torch.stack([self._group_codes(column, rows) for column in self._columns], dim=1)
+
+
+class _SideInfoRows:
+    """Lazy selected-row view over a ``SideInfoMatrix`` consumed by batched callers."""
+
+    def __init__(self, matrix: SideInfoMatrix, indices: slice | torch.Tensor) -> None:
+        self._matrix = matrix
+        self._indices = indices
+
+    def _resolved_indices(self) -> torch.Tensor:
+        if isinstance(self._indices, slice):
+            return torch.arange(
+                self._indices.start, self._indices.stop, device=self.device, dtype=torch.long
+            )
+        return self._indices
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Return the selected row count and matrix column count without decoding."""
+        row_count = (
+            self._indices.stop - self._indices.start
+            if isinstance(self._indices, slice) else self._indices.numel()
+        )
+        return (row_count, self._matrix.shape[1])
+
+    @property
+    def device(self) -> torch.device:
+        """Return the device on which selected indices and matrix data reside."""
+        return self._matrix.device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Return the decoded matrix dtype."""
+        return self._matrix.dtype
+
+    def to(self, device: torch.device | str) -> _SideInfoRows:
+        """Move the underlying matrix and selected indices to ``device`` in place."""
+        self._matrix.to(device)
+        if isinstance(self._indices, torch.Tensor):
+            self._indices = self._indices.to(self._matrix.device)
+        return self
+
+    def rows(self, index: slice | torch.Tensor | Sequence[int] | int) -> _SideInfoRows:
+        """Return a nested lazy view relative to this selection."""
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self.shape[0])
+            assert step == 1, "_SideInfoRows only supports contiguous slices."
+            if isinstance(self._indices, slice):
+                return _SideInfoRows(
+                    self._matrix,
+                    slice(self._indices.start + start, self._indices.start + stop),
+                )
+            relative = torch.arange(start, stop, device=self.device)
+        elif isinstance(index, int):
+            relative = torch.tensor([index], device=self.device)
+        else:
+            relative = torch.as_tensor(index, dtype=torch.long, device=self.device)
+        assert relative.ndim == 1 and bool(((relative >= 0) & (relative < self.shape[0])).all()), (
+            f"_SideInfoRows row indices must be in [0, {self.shape[0]}).")
+        if isinstance(self._indices, slice):
+            return _SideInfoRows(self._matrix, self._indices.start + relative)
+        return _SideInfoRows(self._matrix, self._indices[relative])
+
+    def __getitem__(self, index: slice | torch.Tensor | Sequence[int] | int) -> torch.Tensor:
+        """Decode selected rows eagerly at the leaf of a batched consumer."""
+        selected = self.rows(index)
+        return selected._matrix[selected._resolved_indices()]
+
+    def iter_code_columns(self) -> Iterator[torch.Tensor]:
+        """Yield compact keys for selected rows without decoding side-information values."""
+        yield from self._matrix.iter_code_columns(self._resolved_indices())
+
+    def code_rows(self, rows: torch.Tensor) -> torch.Tensor:
+        """Return compact keys for rows relative to this view."""
+        selected = (
+            self._indices.start + rows
+            if isinstance(self._indices, slice) else self._indices[rows]
+        )
+        return self._matrix.code_rows(selected)
 
 
 def new_rnn_model(
@@ -257,12 +471,12 @@ def wz_model_training_loop(
     model: EncoderDecoderLayeredRNN,
     parameters: Iterator[Parameter],
     training_inputs: tuple[torch.Tensor, ...],
-    side_info: SideInfoMatrix | torch.Tensor,
+    side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     c_cfg: WZcfgQuant,
     batch_size: int = 50_000,
     label: str = "Training",
     metrics_fn: Callable[
-        [EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], SideInfoMatrix | torch.Tensor], str
+        [EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], SideInfoMatrix | _SideInfoRows | torch.Tensor], str
     ] | None = None,
     index_sampler: Callable[[int], torch.Tensor] | None = None,
     **loss_fn_options,
@@ -545,6 +759,7 @@ class WZQuantizerCancer:
         self,
         c_cfg: WZcfgQuant,
         si_size: int,
+        side_info_columns_cache: SideInfoColumnsCache | None = None,
     ) -> None:
         self.c_cfg: WZcfgQuant = c_cfg
         self.no_side_info: bool = si_size == 0
@@ -556,6 +771,8 @@ class WZQuantizerCancer:
         self.coding_model: EncoderDecoderLayeredRNN = self._new_coding_model(self.side_info_size)
 
         self.side_info_list_used: list[HistoryVector] | None = None
+        # A quantizer built outside a round codec owns its cache and releases it with itself.
+        self.side_info_columns_cache = side_info_columns_cache or SideInfoColumnsCache()
         self.vector_size: int | None = None
         self.training_prior_stage_rates: tuple[float, ...] | None = None
         self.training_prior_rate: float | None = None
@@ -566,7 +783,7 @@ class WZQuantizerCancer:
     def training_metrics(
         model: EncoderDecoderLayeredRNN,
         training_inputs: tuple[torch.Tensor, ...],
-        side_info: SideInfoMatrix | torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     ) -> str:
         """Summarize hard-code stage distortion and cumulative rate on a fixed training sample."""
         x = training_inputs[0][:10_000]
@@ -656,6 +873,7 @@ class WZQuantizerCancer:
             c_cfg=self.c_cfg,
             x_raw=x_raw,
             side_information=tuple(si_raw_list or ()),
+            side_info_columns_cache=self.side_info_columns_cache,
             # Passed only when used, so single-problem training keeps the cache keys it
             # was written with; the hash covers every keyword it receives.
             **({"extra_training_pairs": tuple(
@@ -698,7 +916,7 @@ class WZQuantizerCancer:
         self._fit_prepared(x_prep, side_info)
 
     def _fit_prepared(
-        self, x_prep: torch.Tensor, side_info: SideInfoMatrix | torch.Tensor
+        self, x_prep: torch.Tensor, side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor
     ) -> None:
         """Fit the coding model to normalized rows and record its own training rate estimate."""
         assert self.vector_size is not None
@@ -708,7 +926,7 @@ class WZQuantizerCancer:
         # Diagnostics describe the problem this quantizer will code, which is the leading block.
         bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
         prior = self.prior_calculator.compute_prior_from_network(
-            self.coding_model, bins, side_info[:self.vector_size])
+            self.coding_model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
         self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             prior, bins, self.c_cfg.num_planes)
         self.training_prior_rate = sum(self.training_prior_stage_rates)
@@ -716,10 +934,10 @@ class WZQuantizerCancer:
     def _stack_training_pairs(
         self,
         x_prep: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         extra_pairs: Sequence[tuple[torch.Tensor, Sequence[HistoryVector]]],
         problem_weights: tuple[float, ...] | None = None,
-    ) -> tuple[torch.Tensor, SideInfoMatrix | torch.Tensor]:
+    ) -> tuple[torch.Tensor, SideInfoMatrix | _SideInfoRows | torch.Tensor]:
         """Append further training problems below the coded one, each normalized by its own target."""
         # `> 1` as well, so weights handed in without anything to weigh fail here rather than being
         # dropped while still counting toward the training cache key.
@@ -730,6 +948,12 @@ class WZQuantizerCancer:
             return x_prep, side_info
 
         rows = x_prep.shape[0]
+        # Dense, unlike every other side-information consumer: the hook that reaches here is
+        # dormant, so it is guarded rather than given its own lazy stacked view.
+        stacked_bytes = rows * (1 + len(extra_pairs)) * side_info.shape[1] * 4
+        assert stacked_bytes < 1 << 31, (
+            f"extra_training_problems() would materialize {stacked_bytes / 1024 ** 3:.1f} GiB of "
+            "dense side information; make the stacked block lazy before enabling it at this size.")
         # Filled block by block rather than concatenated, because holding the parts and the
         # concatenation at once doubles peak memory at full vector size.
         stacked_x = torch.empty(
@@ -754,7 +978,7 @@ class WZQuantizerCancer:
 
     def _train_finite_candidate_and_retrieve_best(
         self, x_prep: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor, wmspe_denom: float,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor, wmspe_denom: float,
     ) -> EncoderDecoderLayeredRNN:
         failure_tolerance = self.candidate_failure_tolerance
         made_quants_and_stat: list[tuple[EncoderDecoderLayeredRNN, float]] = []
@@ -788,7 +1012,7 @@ class WZQuantizerCancer:
             self.coding_model = model
             bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
             reconstruction = self.decode_prepared(
-                bins, side_info[:self.vector_size], INFERENCE_BATCH)
+                bins, select_si_rows(side_info, slice(0, self.vector_size)), INFERENCE_BATCH)
             if not torch.isfinite(reconstruction).all():
                 rejected.append(f"attempt {attempt_index + 1}: non-finite reconstruction")
             elif not self._candidate_is_usable(bins, reconstruction):
@@ -853,7 +1077,7 @@ class WZQuantizerCancer:
     def decode_stages_prepared(
         self,
         bins: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
         """Decode every normalized reconstruction stage from bins and side information."""
@@ -871,7 +1095,7 @@ class WZQuantizerCancer:
     def decode_prepared(
         self,
         bins: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
         """Decode the final normalized reconstruction stage."""
@@ -945,8 +1169,11 @@ class WZQuantizerCancer:
             f"Each side-information vector must contain {self.vector_size} values.")
 
         return SideInfoMatrix(
-            side_information, self.vector_size,
-            source_metadata.norm_factors, self.norm_slices, self.device)
+            side_information, self.vector_size, source_metadata.norm_factors,
+            self.norm_slices, self.device,
+            self.side_info_columns_cache.get(
+                side_information, self.vector_size, self.norm_slices, self.device),
+        )
 
     def set_side_information(self, side_info: Sequence[HistoryVector]) -> None:
         """Set the decoder-available side-information vectors used by decoding and conditional priors."""
@@ -968,6 +1195,7 @@ def _train_quantizer_parameters(
     side_information: tuple[HistoryVector, ...],
     extra_training_pairs: tuple[tuple[torch.Tensor, tuple[HistoryVector, ...]], ...] = (),
     problem_weights: tuple[float, ...] | None = None,
+    side_info_columns_cache: SideInfoColumnsCache | None = None,
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
     # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss
     # leave the caller's RNG identical for later stochastic steps in the same client-round.
@@ -975,21 +1203,22 @@ def _train_quantizer_parameters(
     with torch.random.fork_rng(devices=[torch.cuda.current_device()], enabled=seeded):
         if seeded:
             torch.manual_seed(c_cfg.training_seed)
-        quantizer = quantizer_class(c_cfg=c_cfg, si_size=len(side_information))
+        quantizer = quantizer_class(
+            c_cfg=c_cfg, si_size=len(side_information), side_info_columns_cache=side_info_columns_cache)
         quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
     assert quantizer.training_prior_stage_rates is not None
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
 
 
-def _rows_for_grouping(block: torch.Tensor | SideInfoMatrix, rows: torch.Tensor) -> torch.Tensor:
+def _rows_for_grouping(block: torch.Tensor | SideInfoMatrix | _SideInfoRows, rows: torch.Tensor) -> torch.Tensor:
     """Select rows from a grouping block while preserving compact SI code columns."""
-    if isinstance(block, SideInfoMatrix):
+    if isinstance(block, (SideInfoMatrix, _SideInfoRows)):
         return block.code_rows(rows)
     return block.flatten(start_dim=1)[rows]
 
 
 def unique_row_groups(
-    blocks: Sequence[torch.Tensor | SideInfoMatrix],
+    blocks: Sequence[torch.Tensor | SideInfoMatrix | _SideInfoRows],
     match_bits: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Group rows agreeing on every column of every block, floats compared on a leading-bit prefix.
@@ -1003,11 +1232,15 @@ def unique_row_groups(
     assert blocks
     device = blocks[0].device
     size = blocks[0].shape[0]
-    assert all(block.shape[0] == size and (isinstance(block, SideInfoMatrix) or block.ndim >= 2) for block in blocks)
+    assert all(
+        block.shape[0] == size
+        and (isinstance(block, (SideInfoMatrix, _SideInfoRows)) or block.ndim >= 2)
+        for block in blocks
+    )
 
     def columns() -> Iterator[torch.Tensor]:
         for block in blocks:
-            if isinstance(block, SideInfoMatrix):
+            if isinstance(block, (SideInfoMatrix, _SideInfoRows)):
                 yield from block.iter_code_columns()
                 continue
             flattened = block.flatten(start_dim=1)
@@ -1020,7 +1253,7 @@ def unique_row_groups(
 
     generator = torch.Generator(device=device).manual_seed(0)
     projection = torch.randn(
-        sum(block.shape[1] if isinstance(block, SideInfoMatrix) else block.flatten(start_dim=1).shape[1]
+        sum(block.shape[1] if isinstance(block, (SideInfoMatrix, _SideInfoRows)) else block.flatten(start_dim=1).shape[1]
             for block in blocks),
         generator=generator, device=device, dtype=torch.float64,
     )
@@ -1071,7 +1304,7 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
     def decode_stages_prepared(
         self,
         bins: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
         """Decode every stage once per symbol-and-SI float-prefix group."""
@@ -1080,11 +1313,11 @@ class DedupedWZQuantizerCancer(WZQuantizerCancer):
             (side_info, bins_device.T), self.match_bits
         )
         recons = super().decode_stages_prepared(
-            bins_device[:, representatives], side_info[representatives], batch_size
+            bins_device[:, representatives], select_si_rows(side_info, representatives), batch_size
         ).to(self.device)[:, inverse]
         if collisions.numel():
             recons[:, collisions] = super().decode_stages_prepared(
-                bins_device[:, collisions], side_info[collisions], batch_size
+                bins_device[:, collisions], select_si_rows(side_info, collisions), batch_size
             ).to(self.device)
 
         return recons.cpu()
