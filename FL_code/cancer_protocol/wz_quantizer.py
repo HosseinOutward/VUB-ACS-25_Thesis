@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -672,6 +672,7 @@ class WZcfgQuant(BaseModel):
     lr: float = 0.0056728196862653865
     lr_step: int = 43
     tau: float = 5.5
+    warm_training: bool = False
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
     # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
@@ -707,6 +708,8 @@ class WZcfgQuant(BaseModel):
         }
         if self.quantizer_train_repeats != 2:
             payload["quantizer_train_repeats"] = self.quantizer_train_repeats
+        if self.warm_training:
+            payload["warm_training"] = True
         if self.training_seed is not None:
             payload["training_seed"] = self.training_seed
         if self.training_cache_discriminator is not None:
@@ -776,8 +779,30 @@ class WZQuantizerCancer:
         self.vector_size: int | None = None
         self.training_prior_stage_rates: tuple[float, ...] | None = None
         self.training_prior_rate: float | None = None
+        self._warm_start_state: dict[str, torch.Tensor] | None = None
         # Set while stacking, whenever the caller weights the stacked problems unevenly.
         self.training_index_sampler: Callable[[int], torch.Tensor] | None = None
+
+    def load_warm_start_state(self, state: Mapping[str, torch.Tensor]) -> None:
+        """Load prior-round parameters once and retain them for every training candidate."""
+        assert self.warm_training, "A warm-start state requires warm_training=True."
+        assert self._warm_start_state is None, "Warm-start state can only be loaded once per quantizer."
+        try:
+            self.coding_model.load_state_dict(state)
+        except RuntimeError as error:
+            raise AssertionError(
+                "The previous quantizer model is incompatible with the warm-training architecture."
+            ) from error
+        self._warm_start_state = {
+            name: value.detach().cpu().clone()
+            for name, value in self.coding_model.state_dict().items()
+        }
+
+    def training_config(self) -> WZcfgQuant:
+        """Return the effective optimizer and temperature settings for this fit."""
+        if not self.warm_training:
+            return self.c_cfg
+        return self.c_cfg.model_copy(update={"lr": self.lr * 0.3, "tau": 0.5})
 
     @staticmethod
     def training_metrics(
@@ -858,6 +883,8 @@ class WZQuantizerCancer:
         the coded vector, its side information, and every diagnostic stay those of ``x_raw``.
         ``problem_weights`` gives one sampling weight per stacked problem, the coded one first.
         """
+        assert not self.warm_training or self._warm_start_state is not None, (
+            "warm_training=True requires load_warm_start_state() before training.")
         if self.cache_dir is None:
             self._train_model_uncached(x_raw, si_raw_list, extra_pairs, problem_weights)
             return
@@ -879,6 +906,7 @@ class WZQuantizerCancer:
             **({"extra_training_pairs": tuple(
                 (extra_x, tuple(extra_si)) for extra_x, extra_si in extra_pairs)} if extra_pairs else {}),
             **({"problem_weights": problem_weights} if problem_weights is not None else {}),
+            **({"warm_start_state": self._warm_start_state} if self._warm_start_state is not None else {}),
         )
         # Cache only portable training results; bind the current decoder-available
         # side information to this fresh quantizer instance.
@@ -992,10 +1020,12 @@ class WZQuantizerCancer:
                 if attempt_index == 0
                 else self._new_coding_model(self.side_info_size)
             )
+            if attempt_index > 0 and self._warm_start_state is not None:
+                model.load_state_dict(self._warm_start_state)
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
-                (x_prep,), side_info, self.c_cfg, batch_size=self.train_batch_size,
+                (x_prep,), side_info, self.training_config(), batch_size=self.train_batch_size,
                 label=f"Quantizer attempt {attempt_index + 1}",
                 metrics_fn=self.training_metrics,
                 index_sampler=self.training_index_sampler,
@@ -1196,6 +1226,7 @@ def _train_quantizer_parameters(
     extra_training_pairs: tuple[tuple[torch.Tensor, tuple[HistoryVector, ...]], ...] = (),
     problem_weights: tuple[float, ...] | None = None,
     side_info_columns_cache: SideInfoColumnsCache | None = None,
+    warm_start_state: dict[str, torch.Tensor] | None = None,
 ) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
     # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss
     # leave the caller's RNG identical for later stochastic steps in the same client-round.
@@ -1205,6 +1236,8 @@ def _train_quantizer_parameters(
             torch.manual_seed(c_cfg.training_seed)
         quantizer = quantizer_class(
             c_cfg=c_cfg, si_size=len(side_information), side_info_columns_cache=side_info_columns_cache)
+        if warm_start_state is not None:
+            quantizer.load_warm_start_state(warm_start_state)
         quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
     assert quantizer.training_prior_stage_rates is not None
     return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates

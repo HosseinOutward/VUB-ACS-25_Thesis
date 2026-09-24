@@ -79,6 +79,12 @@ class _WZProtocol(BaseProtocol):
         """Return the (target, SI) this codec trains on, read from the decoder-visible ledger."""
         return codec.get_training_data(self._recons_history, client_id)
 
+    def quantizer_initial_state(
+        self, codec: _WZRoundCodec, client_id: int
+    ) -> Mapping[str, torch.Tensor] | None:
+        """Return the protocol-selected initialization state for a new quantizer."""
+        return None
+
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the scheduled codec with only the history and model state its policy requests."""
         round_codec_class, parsed, round_name_full = self._get_curr_round_codec_name(round_id)
@@ -110,7 +116,11 @@ class _WZProtocol(BaseProtocol):
         target, side_information = self.training_problem(codec, round_id, client_id)
         if self.retrained_prior_uses_server_si:
             codec.set_retrained_prior_si(self._recons_history, client_id)
-        codec.build_quantizer(target, side_information)
+        codec.build_quantizer(
+            target,
+            side_information,
+            self.quantizer_initial_state(codec, client_id),
+        )
         self.last_trained_codec[client_id] = codec
         return codec
 
@@ -205,10 +215,42 @@ class WZCancerProtocol(_WZProtocol):
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
 
 
+class _LatestQuantizerWarmStartMixin:
+    """Select each client's latest completed quantizer as a warm-training parent."""
+
+    def quantizer_initial_state(
+        self, codec: _WZRoundCodec, client_id: int
+    ) -> Mapping[str, torch.Tensor] | None:
+        state = super().quantizer_initial_state(codec, client_id)
+        if not codec.c_cfg.warm_training:
+            return state
+        previous = self.last_trained_codec.get(client_id)
+        assert previous is not None, (
+            f"Warm training requires a previously trained quantizer for client {client_id}.")
+        assert previous.quantizer.training_prior_stage_rates is not None, (
+            f"Client {client_id}'s warm-start quantizer has not completed training.")
+        return previous.quantizer.coding_model.state_dict()
+
+
+class WarmWZCancerProtocol(_LatestQuantizerWarmStartMixin, WZCancerProtocol):
+    """Cancer WZ schedule with a cold cycle followed by warm 3x3 rounds."""
+
+    warmup_round_codecs: tuple[str, ...] = (
+        *WZCancerProtocol.warmup_round_codecs,
+        *WZCancerProtocol.routine_round_codecs,
+    )
+    routine_round_codecs: tuple[str, ...] = (
+        f"{WZCancerProtocol.routine_round_codecs[0]}|warm_training",
+        *WZCancerProtocol.routine_round_codecs[1:],
+    )
+    protocol_name: ClassVar[str] = "wz_cancer_warm"
+
+
 __all__ = [
     "CancerRecord",
     "F_RoundCodec",
     "Oracle_RoundCodec",
     "T_RoundCodec",
     "WZCancerProtocol",
+    "WarmWZCancerProtocol",
 ]

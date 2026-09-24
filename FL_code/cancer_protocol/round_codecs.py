@@ -280,12 +280,17 @@ class _WZRoundCodec(BaseRoundCodec):
         self.quantizer.side_info_list_used = list(side_information)
 
     def build_quantizer(
-        self, x: torch.Tensor | None, si: list[HistoryVector] | None
+        self,
+        x: torch.Tensor | None,
+        si: list[HistoryVector] | None,
+        initial_state: Mapping[str, torch.Tensor] | None = None,
     ) -> DedupedWZQuantizerCancer:
         """Train the ordinary decoder-side quantizer from the supplied target and SI."""
         assert x is not None and si is not None
         self.quantizer = self.quantizer_class(
             c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
+        if initial_state is not None:
+            self.quantizer.load_warm_start_state(initial_state)
         self.quantizer.train_model(x, si)
         gc.collect()
         torch.cuda.empty_cache()
@@ -479,13 +484,18 @@ class T_RoundCodec(_WZRoundCodec):
         return None, [entry.value for entry in entries]
 
     def build_quantizer(
-        self, x: torch.Tensor | None, si: list[HistoryVector] | None
+        self,
+        x: torch.Tensor | None,
+        si: list[HistoryVector] | None,
+        initial_state: Mapping[str, torch.Tensor] | None = None,
     ) -> DedupedWZQuantizerCancer:
         """Create an untrained worker-side quantizer and retain its legal SI."""
         assert x is None and si is not None
         self.si = si
         self.quantizer = self.quantizer_class(
             c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
+        if initial_state is not None:
+            self.quantizer.load_warm_start_state(initial_state)
         self._send_quantizer_state = False
         return self.quantizer
 
