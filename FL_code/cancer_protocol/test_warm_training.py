@@ -79,7 +79,7 @@ def test_warm_training_reduces_effective_epochs_lr_and_tau() -> None:
     assert config.lr == WZcfgQuant.model_fields["lr"].default
     assert config.tau == WZcfgQuant.model_fields["tau"].default
     assert config.training_cache_payload()["warm_training"] is True
-    assert config.training_cache_payload()["warm_retrain_repeats"] == 3
+    assert config.training_cache_payload()["warm_retrain_repeats"] == 2
     assert "warm_training" not in config.model_copy(update={"warm_training": False}).training_cache_payload()
     assert "warm_retrain_repeats" not in config.model_copy(
         update={"warm_training": False}
@@ -127,7 +127,7 @@ def _populate_pool(protocol: WarmWZCancerProtocol, si_size: int = 1) -> None:
     protocol.quantizer_pool_si_size = si_size
 
 
-def test_warm_protocol_selects_three_shared_pool_parents_for_any_client() -> None:
+def test_warm_protocol_selects_two_shared_pool_parents_for_any_client() -> None:
     """Warm selection uses one ordered pool regardless of the current codec or client."""
     protocol = WarmWZCancerProtocol()
     _populate_pool(protocol)
@@ -136,10 +136,10 @@ def test_warm_protocol_selects_three_shared_pool_parents_for_any_client() -> Non
         for client_id in (0, 1):
             codec = _codec(codec_class, warm_training=True)
             states = protocol.quantizer_initial_states(codec, client_id, si_size=1)
-            assert codec.warm_parent_slots == (0, 1, 2)
-            assert len(states) == 3
+            assert codec.warm_parent_slots == (0, 1)
+            assert len(states) == 2
             parameter_name = next(iter(states[0]))
-            assert [float(state[parameter_name].flatten()[0]) for state in states] == [0, 1, 2]
+            assert [float(state[parameter_name].flatten()[0]) for state in states] == [0, 1]
 
 
 def test_protocol_uses_cold_training_until_shared_pool_is_full_then_asserts_si() -> None:
@@ -149,7 +149,7 @@ def test_protocol_uses_cold_training_until_shared_pool_is_full_then_asserts_si()
 
     _populate_pool(protocol)
     assert protocol.quantizer_config_overrides(5, 7) == {
-        "warm_training": True, "warm_retrain_repeats": 3}
+        "warm_training": True, "warm_retrain_repeats": 2}
     warm_codec = _codec(T_RoundCodec, warm_training=True)
     with pytest.raises(AssertionError, match="expected 1 side-information vectors, got 2"):
         protocol.quantizer_initial_states(warm_codec, 0, si_size=2)
@@ -170,7 +170,7 @@ def test_first_five_completed_training_calls_populate_one_shared_pool() -> None:
 
 
 def test_warm_parent_rotation_is_balanced() -> None:
-    """Five refreshes select every pool slot exactly three times."""
+    """Five refreshes select every pool slot exactly twice."""
     protocol = WarmWZCancerProtocol()
     _populate_pool(protocol)
     selections = []
@@ -180,18 +180,18 @@ def test_warm_parent_rotation_is_balanced() -> None:
         protocol.quantizer_initial_states(codec, refresh, si_size=1)
         selections.append(codec.warm_parent_slots)
 
-    assert selections == [(0, 1, 2), (3, 4, 0), (1, 2, 3), (4, 0, 1), (2, 3, 4)]
-    assert [sum(slot in selection for selection in selections) for slot in range(5)] == [3] * 5
+    assert selections == [(0, 1), (2, 3), (4, 0), (1, 2), (3, 4)]
+    assert [sum(slot in selection for selection in selections) for slot in range(5)] == [2] * 5
 
 
 def test_warm_training_keeps_one_winner_per_parent_and_deploys_the_best(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Three lineages use the warm repeat count and retain both lineage and global winners."""
+    """Two lineages use the warm repeat count and retain both lineage and global winners."""
     config = _config(warm_training=True).model_copy(update={"warm_retrain_repeats": 3})
     quantizer = WZQuantizerCancer(config, si_size=1)
     parents = []
-    for value in (1.0, 2.0, 3.0):
+    for value in (1.0, 2.0):
         state = {name: tensor.detach().clone() for name, tensor in quantizer.coding_model.state_dict().items()}
         next(iter(state.values())).fill_(value)
         parents.append(state)
@@ -211,15 +211,15 @@ def test_warm_training_keeps_one_winner_per_parent_and_deploys_the_best(
         model = quantizer._new_coding_model(quantizer.side_info_size)
         model.load_state_dict(initial_state)
         parent_value = float(next(iter(initial_state.values())).flatten()[0])
-        return model, {1.0: 3.0, 2.0: 1.0, 3.0: 2.0}[parent_value]
+        return model, {1.0: 3.0, 2.0: 1.0}[parent_value]
 
     monkeypatch.setattr(quantizer, "_train_finite_candidate", fake_train)
     winner = quantizer._train_finite_candidate_and_retrieve_best(
         torch.zeros((1, 1)), torch.zeros((1, 1)), 1.0
     )
 
-    assert observed_repeats == [3, 3, 3]
-    assert quantizer.warm_retrained_losses == (3.0, 1.0, 2.0)
+    assert observed_repeats == [3, 3]
+    assert quantizer.warm_retrained_losses == (3.0, 1.0)
     assert quantizer.warm_deployed_parent == 1
     parameter_name = next(iter(parents[1]))
     assert torch.equal(winner.state_dict()[parameter_name], parents[1][parameter_name])
@@ -238,7 +238,7 @@ def test_completed_warm_round_replaces_only_selected_pool_slots() -> None:
     codec.quantizer.warm_retrained_states = replacements
     untouched = {
         slot: {name: tensor.clone() for name, tensor in protocol.quantizer_pool[slot].items()}
-        for slot in (3, 4)
+        for slot in (2, 3, 4)
     }
 
     protocol.after_decode(
@@ -269,18 +269,18 @@ def test_cache_results_restore_legacy_cold_and_complete_warm_payloads(
 
     warm = WZQuantizerCancer(
         _config(warm_training=True).model_copy(update={"cache_dir": tmp_path}), si_size=1)
-    parents = tuple({name: value.clone() for name, value in cold_state.items()} for _ in range(3))
+    parents = tuple({name: value.clone() for name, value in cold_state.items()} for _ in range(2))
     warm.load_warm_start_states(parents)
     replacements = tuple({name: value.clone() + index for name, value in cold_state.items()}
-                         for index in range(3))
+                         for index in range(2))
     monkeypatch.setattr(
         wz_quantizer_module,
         "cache_call",
-        lambda *args, **kwargs: (replacements[1], (0.2, 0.3), replacements, (3.0, 1.0, 2.0), 1),
+        lambda *args, **kwargs: (replacements[1], (0.2, 0.3), replacements, (3.0, 1.0), 1),
     )
     warm.train_model(target, side_information)
 
-    assert warm.warm_retrained_losses == (3.0, 1.0, 2.0)
+    assert warm.warm_retrained_losses == (3.0, 1.0)
     assert warm.warm_deployed_parent == 1
     assert all(torch.equal(warm.coding_model.state_dict()[name], value)
                for name, value in replacements[1].items())

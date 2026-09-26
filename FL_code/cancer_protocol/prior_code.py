@@ -125,6 +125,8 @@ class PriorCalculator:
             "Retrained prior configuration must match the source quantizer's marginal architecture."
         )
         if not source_model.marginal:
+            # Copy-based retraining intentionally preserves the quantizer prior architecture;
+            # schedules using different T/O visibility policies must not change its SI width.
             assert source_model.conditionalRNN.input_dim == (
                 c_cfg.bins_per_plane + side_info.shape[1]
             ), "Retrained prior side-information width must match the quantizer prior architecture."

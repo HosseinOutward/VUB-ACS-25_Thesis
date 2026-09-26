@@ -206,6 +206,21 @@ def test_prior_retraining_rejects_incompatible_marginal_architecture() -> None:
             bins, soft_codes, torch.zeros(3, 1), config, source)
 
 
+def test_round_prior_retraining_rejects_marginal_quantizers_explicitly() -> None:
+    """Round codecs reject the currently unsupported marginal-to-conditional prior transfer."""
+    codec = T_RoundCodec(None, "T")
+    config = WZcfgQuant(bins_per_plane=2, num_planes=2, marginal_loss=True)
+
+    with pytest.raises(AssertionError, match="do not currently support marginal quantizers"):
+        codec.conditional_code_lengths(
+            SimpleNamespace(),
+            torch.zeros((2, 3), dtype=torch.long),
+            torch.zeros((2, 3, 2)),
+            torch.zeros((3, 1)),
+            config,
+        )
+
+
 def test_prior_parent_state_changes_only_the_prior_cache_key() -> None:
     """Parent priors distinguish retraining cache entries without invalidating quantizer caches."""
     config = WZcfgQuant(bins_per_plane=2, num_planes=2, hidden_dim=4, layers=1)

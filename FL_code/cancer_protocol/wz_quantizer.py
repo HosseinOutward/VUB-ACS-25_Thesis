@@ -673,7 +673,7 @@ class WZcfgQuant(BaseModel):
     lr_step: int = 43
     tau: float = 5.5
     warm_training: bool = False
-    warm_retrain_repeats: int = Field(default=3, ge=1, strict=True)
+    warm_retrain_repeats: int = Field(default=2, ge=1, strict=True)
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
     prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)

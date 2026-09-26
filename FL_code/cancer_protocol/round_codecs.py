@@ -342,6 +342,9 @@ class _WZRoundCodec(BaseRoundCodec):
         c_cfg: WZcfgQuant,
     ) -> tuple[torch.Tensor, EncoderDecoderLayeredRNN]:
         """Fit the retrained prior once, then evaluate that frozen model on refreshed F-round SI."""
+        assert not c_cfg.marginal_loss, (
+            "Retrained conditional priors do not currently support marginal quantizers."
+        )
         prior_cfg = c_cfg.model_copy(update={"marginal_loss": False})
         if self.round_name_full == "F":
             assert self._retrained_prior_model is not None, (

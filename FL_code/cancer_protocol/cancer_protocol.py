@@ -232,7 +232,7 @@ class WarmWZCancerProtocol(WZCancerProtocol):
     """Cancer WZ schedule maintaining five compatible shared warm-training lineages."""
 
     pool_size: ClassVar[int] = 5
-    parents_per_refresh: ClassVar[int] = 3
+    parents_per_refresh: ClassVar[int] = 2
     # The extra identity round fills the five-entry history before any pool model is trained.
     history_prep_round_codecs: ClassVar[tuple[str, ...]] = (
         *WZCancerProtocol.warmup_round_codecs,
@@ -241,13 +241,13 @@ class WarmWZCancerProtocol(WZCancerProtocol):
     warmup_round_codecs: tuple[str, ...] = history_prep_round_codecs
     routine_round_codecs: tuple[str, ...] = WZCancerProtocol.routine_round_codecs
     protocol_name: ClassVar[str] = "wz_cancer_warm"
-    warm_retrain_repeats: int = 3
+    warm_retrain_repeats: int = 2
 
     def options_to_config(
         self,
         refresh_frozen_si: bool = True,
         retrained_prior_uses_server_si: bool = True,
-        warm_retrain_repeats: int = 3,
+        warm_retrain_repeats: int = 2,
     ) -> None:
         """Configure SI policies and the number of retraining attempts per selected parent."""
         super().options_to_config(refresh_frozen_si, retrained_prior_uses_server_si)
@@ -280,7 +280,7 @@ class WarmWZCancerProtocol(WZCancerProtocol):
     def quantizer_initial_states(
         self, codec: _WZRoundCodec, client_id: int, si_size: int
     ) -> tuple[Mapping[str, torch.Tensor], ...]:
-        """Select three parents, asserting that warmup established the expected pool and SI width."""
+        """Select two parents, asserting that warmup established the expected pool and SI width."""
         if not codec.c_cfg.warm_training:
             return super().quantizer_initial_states(codec, client_id, si_size)
         assert len(self.quantizer_pool) == self.pool_size, (
