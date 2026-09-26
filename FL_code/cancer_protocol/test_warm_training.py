@@ -66,14 +66,16 @@ def test_warm_training_requires_loaded_state(monkeypatch: pytest.MonkeyPatch) ->
         quantizer.train_model(torch.arange(8, dtype=torch.float32), [HistoryVector(torch.arange(8.0))])
 
 
-def test_warm_training_overrides_only_effective_lr_and_tau() -> None:
-    """Warm fitting changes only the effective optimizer rate and temperature."""
+def test_warm_training_reduces_effective_epochs_lr_and_tau() -> None:
+    """Warm fitting uses one quarter of the epochs and lower rate and temperature."""
     config = _config(warm_training=True)
     quantizer = WZQuantizerCancer(config, si_size=1)
     effective = quantizer.training_config()
 
+    assert effective.train_epochs == max(1, round(config.train_epochs * 0.25))
     assert effective.lr == config.lr * 0.3
     assert effective.tau == 0.5
+    assert config.train_epochs == WZcfgQuant.model_fields["train_epochs"].default
     assert config.lr == WZcfgQuant.model_fields["lr"].default
     assert config.tau == WZcfgQuant.model_fields["tau"].default
     assert config.training_cache_payload()["warm_training"] is True
@@ -82,6 +84,13 @@ def test_warm_training_overrides_only_effective_lr_and_tau() -> None:
     assert "warm_retrain_repeats" not in config.model_copy(
         update={"warm_training": False}
     ).training_cache_payload()
+
+
+def test_warm_training_epoch_reduction_has_a_one_epoch_minimum() -> None:
+    """Very short base fits still produce a valid warm-training configuration."""
+    config = _config(warm_training=True).model_copy(update={"train_epochs": 1})
+
+    assert config.warm_retraining_config().train_epochs == 1
 
 
 def test_warm_parent_state_is_part_of_training_cache_key() -> None:

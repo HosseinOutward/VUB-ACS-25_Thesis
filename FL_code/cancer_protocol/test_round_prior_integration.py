@@ -191,6 +191,21 @@ def test_prior_retraining_rejects_incompatible_side_information_width() -> None:
         PriorCalculator.make_trained_prior_model(bins, soft_codes, torch.zeros(3, 2), config, source)
 
 
+def test_prior_retraining_rejects_incompatible_marginal_architecture() -> None:
+    """Prior retraining cannot change a copied model between marginal and conditional input."""
+    config = WZcfgQuant(bins_per_plane=2, num_planes=2, hidden_dim=4, layers=1)
+    source = EncoderDecoderLayeredRNN(
+        input_dim=1, side_info_size=1, bins_per_plane=2, num_planes=2,
+        layers=1, hidden_dim=4, marginal=True,
+    )
+    bins = torch.zeros((2, 3), dtype=torch.long)
+    soft_codes = torch.zeros((2, 3, 2))
+
+    with pytest.raises(AssertionError, match="marginal architecture"):
+        PriorCalculator.make_trained_prior_model(
+            bins, soft_codes, torch.zeros(3, 1), config, source)
+
+
 def test_prior_parent_state_changes_only_the_prior_cache_key() -> None:
     """Parent priors distinguish retraining cache entries without invalidating quantizer caches."""
     config = WZcfgQuant(bins_per_plane=2, num_planes=2, hidden_dim=4, layers=1)

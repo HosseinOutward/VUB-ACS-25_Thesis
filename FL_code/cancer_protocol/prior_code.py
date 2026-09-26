@@ -121,6 +121,9 @@ class PriorCalculator:
         )
         assert source_model.num_planes == c_cfg.num_planes
         assert source_model.bins_per_plane == c_cfg.bins_per_plane
+        assert source_model.marginal == c_cfg.marginal_loss, (
+            "Retrained prior configuration must match the source quantizer's marginal architecture."
+        )
         if not source_model.marginal:
             assert source_model.conditionalRNN.input_dim == (
                 c_cfg.bins_per_plane + side_info.shape[1]

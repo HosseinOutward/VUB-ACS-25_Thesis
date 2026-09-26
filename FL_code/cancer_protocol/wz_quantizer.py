@@ -701,9 +701,9 @@ class WZcfgQuant(BaseModel):
     def warm_retraining_config(self, train_epochs: int | None = None) -> WZcfgQuant:
         """Return the shared lower-rate, lower-temperature configuration for warm fitting."""
         return self.model_copy(update={
+            "train_epochs": train_epochs if train_epochs is not None else max(1, round(self.train_epochs * 0.25)),
             "lr": self.lr * 0.3,
             "tau": 0.5,
-            **({"train_epochs": train_epochs} if train_epochs is not None else {}),
         })
 
     def training_cache_payload(self) -> dict[str, Any]:
