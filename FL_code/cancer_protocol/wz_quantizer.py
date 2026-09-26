@@ -676,6 +676,7 @@ class WZcfgQuant(BaseModel):
     warm_retrain_repeats: int = Field(default=3, ge=1, strict=True)
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
+    prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)
     # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
     # inputs, e.g. a sparse-replay case seeding torch's RNG per client-round. Omitted from the
     # cache payload when unset so every existing cache entry keeps its current key.
@@ -696,6 +697,14 @@ class WZcfgQuant(BaseModel):
     layers: int = 6
     cache_dir: Path | None = None
     cache_overwrite: bool = False
+
+    def warm_retraining_config(self, train_epochs: int | None = None) -> WZcfgQuant:
+        """Return the shared lower-rate, lower-temperature configuration for warm fitting."""
+        return self.model_copy(update={
+            "lr": self.lr * 0.3,
+            "tau": 0.5,
+            **({"train_epochs": train_epochs} if train_epochs is not None else {}),
+        })
 
     def training_cache_payload(self) -> dict[str, Any]:
         """Return the model-semantic options used to identify cached training results."""
@@ -816,7 +825,7 @@ class WZQuantizerCancer:
         """Return the effective optimizer and temperature settings for this fit."""
         if not self.warm_training:
             return self.c_cfg
-        return self.c_cfg.model_copy(update={"lr": self.lr * 0.3, "tau": 0.5})
+        return self.c_cfg.warm_retraining_config()
 
     @staticmethod
     def training_metrics(

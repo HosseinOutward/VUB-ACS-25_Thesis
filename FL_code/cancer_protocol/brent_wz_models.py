@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from functools import partial
 
 import torch
@@ -137,6 +138,25 @@ class EncoderDecoderLayeredRNN(nn.Module):
         """Decoder-side parameters: decoder RNN, reconstructor heads, and the conditional prior network."""
         return self._transmission_state_dict(
             self.state_dict(), ('decoder.', 'reconstructor', 'conditional'))
+
+    def conditional_state_dict(self) -> dict[str, torch.Tensor]:
+        """Return only conditional-prior parameters used to initialize prior retraining."""
+        return self._transmission_state_dict(self.state_dict(), ('conditional',))
+
+    def copy_for_prior_retraining(self) -> EncoderDecoderLayeredRNN:
+        """Copy this quantizer's conditional prior and release unrelated network parameters."""
+        prior_model = deepcopy(self)
+        prior_model.encoder = None
+        prior_model.decoder = None
+        if prior_model.shared_encoder:
+            prior_model.binner = None
+        else:
+            prior_model.binners = None
+        if prior_model.shared_decoder:
+            prior_model.reconstructor = None
+        else:
+            prior_model.reconstructors = None
+        return prior_model
 
     def encode(
         self,

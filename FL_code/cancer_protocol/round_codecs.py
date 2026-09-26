@@ -351,7 +351,12 @@ class _WZRoundCodec(BaseRoundCodec):
             assert self._retrained_prior_model is None, (
                 "A trained round may fit its retrained prior only once.")
             prior_model = PriorCalculator.make_trained_prior_model(
-                bins.long(), soft_codes, side_info, prior_cfg)
+                source_model=quantizer.coding_model,
+                bins_vec=bins.long(),
+                soft_codes=soft_codes,
+                side_info=side_info,
+                c_cfg=prior_cfg,
+            )
             self._retrained_prior_model = prior_model
         prior = quantizer.prior_calculator.compute_prior_from_network(
             prior_model, bins, side_info)

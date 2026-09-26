@@ -407,8 +407,12 @@ def main() -> None:
     assert soft_codes is not None
     side_info = quantizer.normalize_side_info_tensor(metadata, [HistoryVector(si)])
     prior_model = PriorCalculator.make_trained_prior_model(
-        bins.long(), soft_codes, side_info,
-        quantizer_config.model_copy(update={"marginal_loss": False}))
+        source_model=quantizer.coding_model,
+        bins_vec=bins.long(),
+        soft_codes=soft_codes,
+        side_info=side_info,
+        c_cfg=quantizer_config.model_copy(update={"marginal_loss": False}),
+    )
     coder_device = torch.device(args.device) if args.device else side_info.device
 
     def prior(decoded: torch.Tensor, stage: int) -> torch.Tensor:

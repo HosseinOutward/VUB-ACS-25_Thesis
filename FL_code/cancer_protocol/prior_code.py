@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -112,46 +111,40 @@ class PriorCalculator:
         soft_codes: torch.Tensor,
         side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         c_cfg: WZcfgQuant,
+        source_model: EncoderDecoderLayeredRNN,
         batch_size: int = 50_000,
-        *,
-        model_factory: Callable[[int], EncoderDecoderLayeredRNN] | None = None,
     ) -> EncoderDecoderLayeredRNN:
-        """Train a new conditional prior model from fixed quantizer bins and soft codes."""
+        """Fine-tune an independent copy of a quantizer's conditional prior on fixed bins."""
         assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
+        assert source_model.num_planes == c_cfg.num_planes
+        assert source_model.bins_per_plane == c_cfg.bins_per_plane
+        if not source_model.marginal:
+            assert source_model.conditionalRNN.input_dim == (
+                c_cfg.bins_per_plane + side_info.shape[1]
+            ), "Retrained prior side-information width must match the quantizer prior architecture."
+        retrain_cfg = c_cfg.warm_retraining_config(c_cfg.prior_retrain_epochs)
         if c_cfg.cache_dir is None:
-            return _train_prior_model(bins_vec, soft_codes, side_info, 
-                        c_cfg, batch_size, model_factory=model_factory,)
-
-        assert model_factory is None, "Custom prior-model factories cannot use the persistent prior cache."
-
-        from .wz_quantizer import new_rnn_model
+            return _train_prior_model(
+                bins_vec, soft_codes, side_info, retrain_cfg, source_model, batch_size)
 
         state_dict = cache_call(
             _train_prior_parameters,
             c_cfg.cache_dir / "priors",
-            model_training_hash,
+            _prior_training_hash,
             c_cfg.cache_overwrite,
             bins_vec=bins_vec,
             soft_codes=soft_codes,
             side_info=side_info,
-            c_cfg=c_cfg,
+            c_cfg=retrain_cfg,
+            source_model=source_model,
+            source_prior_state=source_model.conditional_state_dict(),
             batch_size=batch_size,
         )
-        # Recreate the configured architecture so the cache stores parameters,
-        # rather than a mutable model instance tied to an earlier replay.
-        model = new_rnn_model(
-            c_cfg.num_planes,
-            c_cfg.bins_per_plane,
-            side_info.shape[1],
-            c_cfg.marginal_loss,
-            c_cfg.hidden_dim,
-            c_cfg.layers,
-            c_cfg.shared_heads,
-        )
-        model.load_state_dict(state_dict)
+        model = source_model.copy_for_prior_retraining()
+        model.load_state_dict(state_dict, strict=True)
         return model
 
 
@@ -160,11 +153,10 @@ def _train_prior_model(
     soft_codes: torch.Tensor,
     side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     c_cfg: WZcfgQuant,
+    source_model: EncoderDecoderLayeredRNN,
     batch_size: int,
-    *,
-    model_factory: Callable[[int], EncoderDecoderLayeredRNN] | None = None,
 ) -> EncoderDecoderLayeredRNN:
-    from .wz_quantizer import new_rnn_model, wz_model_training_loop
+    from .wz_quantizer import wz_model_training_loop
 
     context_codes = (
         F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
@@ -175,12 +167,7 @@ def _train_prior_model(
     for attempt_index in range(c_cfg.prior_train_repeats + 2):
         if len(attempts) == c_cfg.prior_train_repeats:
             break
-        candidate = (
-            model_factory(side_info.shape[1])
-            if model_factory is not None
-            else new_rnn_model(c_cfg.num_planes, c_cfg.bins_per_plane, side_info.shape[1],
-                    c_cfg.marginal_loss, c_cfg.hidden_dim, c_cfg.layers, c_cfg.shared_heads, )
-        )
+        candidate = source_model.copy_for_prior_retraining()
         prior_heads = (
             candidate.conditionalPriors
             if not candidate.shared_priors else (candidate.conditionalPrior,))
@@ -206,6 +193,8 @@ def _train_prior_parameters(
     soft_codes: torch.Tensor,
     side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     c_cfg: WZcfgQuant,
+    source_model: EncoderDecoderLayeredRNN,
+    source_prior_state: dict[str, torch.Tensor],
     batch_size: int,
 ) -> dict[str, torch.Tensor]:
     # See _train_quantizer_parameters: seeded on a cache miss, forked so hits and misses match.
@@ -213,7 +202,14 @@ def _train_prior_parameters(
     with torch.random.fork_rng(devices=[torch.cuda.current_device()], enabled=seeded):
         if seeded:
             torch.manual_seed(c_cfg.training_seed)
-        return _train_prior_model(bins_vec, soft_codes, side_info, c_cfg, batch_size).state_dict()
+        return _train_prior_model(
+            bins_vec, soft_codes, side_info, c_cfg, source_model, batch_size).state_dict()
+
+
+def _prior_training_hash(args: tuple[object, ...], kwargs: dict[str, object]) -> str:
+    """Hash prior training inputs while excluding the unhashable model object itself."""
+    hash_kwargs = {key: value for key, value in kwargs.items() if key != "source_model"}
+    return model_training_hash(args, hash_kwargs)
 
 
 class DedupedPriorCalculator(PriorCalculator):
