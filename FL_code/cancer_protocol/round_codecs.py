@@ -100,6 +100,8 @@ class CancerRecord(CompressionRecord):
     coder_stage_rates: list[float] | None = None
     coder_overhead_rate: float | None = None
     symbol_error_rate: float | None = None
+    warm_parent_slots: list[int] | None = None
+    warm_deployed_slot: int | None = None
 
     @property
     def element_metrics(self) -> ElementMetrics | None:
@@ -159,6 +161,7 @@ class _WZRoundCodec(BaseRoundCodec):
     _prior_side_information: list[HistoryVector] | None = None
     _retrained_prior_model: EncoderDecoderLayeredRNN | None
     _side_info_columns_cache: SideInfoColumnsCache
+    warm_parent_slots: tuple[int, ...] = ()
 
     def options_to_config(
         self,
@@ -283,14 +286,14 @@ class _WZRoundCodec(BaseRoundCodec):
         self,
         x: torch.Tensor | None,
         si: list[HistoryVector] | None,
-        initial_state: Mapping[str, torch.Tensor] | None = None,
+        initial_states: Sequence[Mapping[str, torch.Tensor]] = (),
     ) -> DedupedWZQuantizerCancer:
         """Train the ordinary decoder-side quantizer from the supplied target and SI."""
         assert x is not None and si is not None
         self.quantizer = self.quantizer_class(
             c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
-        if initial_state is not None:
-            self.quantizer.load_warm_start_state(initial_state)
+        if initial_states:
+            self.quantizer.load_warm_start_states(initial_states)
         self.quantizer.train_model(x, si)
         gc.collect()
         torch.cuda.empty_cache()
@@ -314,12 +317,18 @@ class _WZRoundCodec(BaseRoundCodec):
         )
         training_prior_stage_rates = list(self.quantizer.prior_calculator.compute_plane_rates(
             training_prior, bins, self.c_cfg.num_planes))
+        assert not self.warm_parent_slots or self.quantizer.warm_deployed_parent is not None, (
+            "Warm training completed without selecting a deployed parent.")
         record.update_record_fields(
             encoder_size=compressed_size(self.quantizer.coding_model.encoder_state_dict()),
             decoder_size=compressed_size(self.quantizer.coding_model.decoder_state_dict()),
             meta_data_size=compressed_size(metadata),
             training_prior_rate=sum(training_prior_stage_rates),
             training_prior_stage_rates=training_prior_stage_rates,
+            **({
+                "warm_parent_slots": list(self.warm_parent_slots),
+                "warm_deployed_slot": self.warm_parent_slots[self.quantizer.warm_deployed_parent],
+            } if self.warm_parent_slots and self.quantizer.warm_deployed_parent is not None else {}),
         )
         self.add_prior_to_record(bins, soft_codes, metadata, record)
         return {"payload_content": (bins, metadata)}
@@ -487,15 +496,15 @@ class T_RoundCodec(_WZRoundCodec):
         self,
         x: torch.Tensor | None,
         si: list[HistoryVector] | None,
-        initial_state: Mapping[str, torch.Tensor] | None = None,
+        initial_states: Sequence[Mapping[str, torch.Tensor]] = (),
     ) -> DedupedWZQuantizerCancer:
         """Create an untrained worker-side quantizer and retain its legal SI."""
         assert x is None and si is not None
         self.si = si
         self.quantizer = self.quantizer_class(
             c_cfg=self.c_cfg, si_size=len(si), side_info_columns_cache=self._side_info_columns_cache)
-        if initial_state is not None:
-            self.quantizer.load_warm_start_state(initial_state)
+        if initial_states:
+            self.quantizer.load_warm_start_states(initial_states)
         self._send_quantizer_state = False
         return self.quantizer
 

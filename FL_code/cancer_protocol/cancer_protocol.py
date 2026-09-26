@@ -79,11 +79,15 @@ class _WZProtocol(BaseProtocol):
         """Return the (target, SI) this codec trains on, read from the decoder-visible ledger."""
         return codec.get_training_data(self._recons_history, client_id)
 
-    def quantizer_initial_state(
-        self, codec: _WZRoundCodec, client_id: int
-    ) -> Mapping[str, torch.Tensor] | None:
-        """Return the protocol-selected initialization state for a new quantizer."""
-        return None
+    def quantizer_initial_states(
+        self, codec: _WZRoundCodec, client_id: int, si_size: int
+    ) -> tuple[Mapping[str, torch.Tensor], ...]:
+        """Return the protocol-selected initialization states for a new quantizer."""
+        return ()
+
+    def quantizer_config_overrides(self, round_id: int, client_id: int) -> Mapping[str, Any]:
+        """Return protocol-owned quantizer options for this training call."""
+        return {}
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the scheduled codec with only the history and model state its policy requests."""
@@ -96,6 +100,14 @@ class _WZProtocol(BaseProtocol):
             return round_codec_class(parsed.options, round_name_full)
 
         assert isinstance(parsed.options, dict)
+        protocol_overrides = self.quantizer_config_overrides(round_id, client_id)
+        assert not parsed.options.keys() & protocol_overrides.keys(), (
+            "Protocol quantizer overrides duplicate scheduled round options."
+        )
+        effective_round_name = round_name_full + "".join(
+            f"|{name}" if value is True else f"|{name}={value!r}"
+            for name, value in protocol_overrides.items()
+        )
         codec = round_codec_class(
             parsed.options | {
                 "sd_slices": self.sd_slices,
@@ -108,8 +120,8 @@ class _WZProtocol(BaseProtocol):
                     *self.warmup_round_codecs,
                     *self.routine_round_codecs,
                 ),
-            },
-            round_name_full,
+            } | protocol_overrides,
+            effective_round_name,
         )
         assert isinstance(codec, _WZRoundCodec)
 
@@ -119,7 +131,7 @@ class _WZProtocol(BaseProtocol):
         codec.build_quantizer(
             target,
             side_information,
-            self.quantizer_initial_state(codec, client_id),
+            self.quantizer_initial_states(codec, client_id, len(side_information)),
         )
         self.last_trained_codec[client_id] = codec
         return codec
@@ -149,6 +161,7 @@ class _WZProtocol(BaseProtocol):
                 "Refreshed side information no longer matches the frozen quantizer.")
         previous.round_name_full = round_name_full
         previous.dump_element_metrics = False
+        previous.warm_parent_slots = ()
         previous._original_delta_vec = None
         if side_information is not None:
             previous.refresh_side_information(side_information)
@@ -215,35 +228,122 @@ class WZCancerProtocol(_WZProtocol):
         self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
 
 
-class _LatestQuantizerWarmStartMixin:
-    """Select each client's latest completed quantizer as a warm-training parent."""
+class WarmWZCancerProtocol(WZCancerProtocol):
+    """Cancer WZ schedule maintaining five compatible shared warm-training lineages."""
 
-    def quantizer_initial_state(
-        self, codec: _WZRoundCodec, client_id: int
-    ) -> Mapping[str, torch.Tensor] | None:
-        state = super().quantizer_initial_state(codec, client_id)
-        if not codec.c_cfg.warm_training:
-            return state
-        previous = self.last_trained_codec.get(client_id)
-        assert previous is not None, (
-            f"Warm training requires a previously trained quantizer for client {client_id}.")
-        assert previous.quantizer.training_prior_stage_rates is not None, (
-            f"Client {client_id}'s warm-start quantizer has not completed training.")
-        return previous.quantizer.coding_model.state_dict()
-
-
-class WarmWZCancerProtocol(_LatestQuantizerWarmStartMixin, WZCancerProtocol):
-    """Cancer WZ schedule with a cold cycle followed by warm 3x3 rounds."""
-
-    warmup_round_codecs: tuple[str, ...] = (
+    pool_size: ClassVar[int] = 5
+    parents_per_refresh: ClassVar[int] = 3
+    # The extra identity round fills the five-entry history before any pool model is trained.
+    history_prep_round_codecs: ClassVar[tuple[str, ...]] = (
         *WZCancerProtocol.warmup_round_codecs,
-        *WZCancerProtocol.routine_round_codecs,
+        "I",
     )
-    routine_round_codecs: tuple[str, ...] = (
-        f"{WZCancerProtocol.routine_round_codecs[0]}|warm_training",
-        *WZCancerProtocol.routine_round_codecs[1:],
-    )
+    warmup_round_codecs: tuple[str, ...] = history_prep_round_codecs
+    routine_round_codecs: tuple[str, ...] = WZCancerProtocol.routine_round_codecs
     protocol_name: ClassVar[str] = "wz_cancer_warm"
+    warm_retrain_repeats: int = 3
+
+    def options_to_config(
+        self,
+        refresh_frozen_si: bool = True,
+        retrained_prior_uses_server_si: bool = True,
+        warm_retrain_repeats: int = 3,
+    ) -> None:
+        """Configure SI policies and the number of retraining attempts per selected parent."""
+        super().options_to_config(refresh_frozen_si, retrained_prior_uses_server_si)
+        assert type(warm_retrain_repeats) is int and warm_retrain_repeats > 0
+        self.warm_retrain_repeats = warm_retrain_repeats
+
+    def __init__(
+        self,
+        options: Mapping[str, Any] | None = None,
+        protocol_name_full: str | None = None,
+        sd_slices: Sequence[slice] | None = None,
+        cache_dir: Path | None = None,
+        cache_overwrite: bool = False,
+    ) -> None:
+        super().__init__(options, protocol_name_full, sd_slices, cache_dir, cache_overwrite)
+        self.quantizer_pool: list[dict[str, torch.Tensor]] = []
+        self.quantizer_pool_si_size: int | None = None
+        self.warm_refresh_count: int = 0
+
+    def quantizer_config_overrides(self, round_id: int, client_id: int) -> Mapping[str, Any]:
+        """Switch eligible training calls to warm mode only after the shared pool is full."""
+        if round_id < len(self.history_prep_round_codecs) or len(self.quantizer_pool) < self.pool_size:
+            return {}
+        assert len(self.quantizer_pool) == self.pool_size
+        return {
+            "warm_training": True,
+            "warm_retrain_repeats": self.warm_retrain_repeats,
+        }
+
+    def quantizer_initial_states(
+        self, codec: _WZRoundCodec, client_id: int, si_size: int
+    ) -> tuple[Mapping[str, torch.Tensor], ...]:
+        """Select three parents, asserting that warmup established the expected pool and SI width."""
+        if not codec.c_cfg.warm_training:
+            return super().quantizer_initial_states(codec, client_id, si_size)
+        assert len(self.quantizer_pool) == self.pool_size, (
+            f"Warm training requires {self.pool_size} shared base quantizers; "
+            f"completed training calls produced {len(self.quantizer_pool)}."
+        )
+        assert self.quantizer_pool_si_size == si_size, (
+            f"Warm training expected {self.quantizer_pool_si_size} "
+            f"side-information vectors, got {si_size}."
+        )
+        start = self.warm_refresh_count * self.parents_per_refresh % self.pool_size
+        codec.warm_parent_slots = tuple(
+            (start + offset) % self.pool_size for offset in range(self.parents_per_refresh)
+        )
+        return tuple(self.quantizer_pool[slot] for slot in codec.warm_parent_slots)
+
+    def after_decode(
+        self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
+    ) -> None:
+        """Commit reconstruction first, then advance the completed pool lineages."""
+        super().after_decode(reconst, record, round_codec)
+        if not isinstance(round_codec, _WZRoundCodec) or round_codec.round_name_full == "F":
+            return
+
+        if round_codec.c_cfg.warm_training:
+            states = round_codec.quantizer.warm_retrained_states
+            assert len(round_codec.warm_parent_slots) == len(states) == self.parents_per_refresh
+            for slot, state in zip(round_codec.warm_parent_slots, states, strict=True):
+                self.quantizer_pool[slot] = {
+                    name: value.detach().cpu().clone() for name, value in state.items()
+                }
+            self.warm_refresh_count += 1
+            return
+
+        if record.round_id < len(self.history_prep_round_codecs):
+            return
+        quantizer = round_codec.quantizer
+        assert quantizer.training_prior_stage_rates is not None
+        assert len(self.quantizer_pool) < self.pool_size, (
+            "A cold training call completed after the shared warm pool was already full."
+        )
+        if not self.quantizer_pool:
+            self.quantizer_pool_si_size = quantizer.side_info_size
+        else:
+            assert self.quantizer_pool_si_size == quantizer.side_info_size, (
+                f"Base quantizer {len(self.quantizer_pool)} has incompatible SI width."
+            )
+        self.quantizer_pool.append({
+            name: value.detach().cpu().clone()
+            for name, value in quantizer.coding_model.state_dict().items()
+        })
+
+    def config_snapshot(self) -> dict[str, Any]:
+        """Record the fixed pool construction and balanced parent-selection policy."""
+        snapshot = super().config_snapshot()
+        snapshot["warm_quantizer_pool"] = {
+            "pool_size": self.pool_size,
+            "parents_per_refresh": self.parents_per_refresh,
+            "selection": "balanced_rotating_window_v1",
+            "warm_retrain_repeats": self.warm_retrain_repeats,
+            "history_readiness": "warmup_schedule_asserted_at_warm_entry",
+        }
+        return snapshot
 
 
 __all__ = [

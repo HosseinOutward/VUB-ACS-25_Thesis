@@ -673,6 +673,7 @@ class WZcfgQuant(BaseModel):
     lr_step: int = 43
     tau: float = 5.5
     warm_training: bool = False
+    warm_retrain_repeats: int = Field(default=3, ge=1, strict=True)
     quantizer_train_repeats: int = 2
     prior_train_repeats: int = 2
     # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
@@ -710,6 +711,7 @@ class WZcfgQuant(BaseModel):
             payload["quantizer_train_repeats"] = self.quantizer_train_repeats
         if self.warm_training:
             payload["warm_training"] = True
+            payload["warm_retrain_repeats"] = self.warm_retrain_repeats
         if self.training_seed is not None:
             payload["training_seed"] = self.training_seed
         if self.training_cache_discriminator is not None:
@@ -779,24 +781,36 @@ class WZQuantizerCancer:
         self.vector_size: int | None = None
         self.training_prior_stage_rates: tuple[float, ...] | None = None
         self.training_prior_rate: float | None = None
-        self._warm_start_state: dict[str, torch.Tensor] | None = None
+        self._warm_start_states: tuple[dict[str, torch.Tensor], ...] = ()
+        self.warm_retrained_states: tuple[dict[str, torch.Tensor], ...] = ()
+        self.warm_retrained_losses: tuple[float, ...] = ()
+        self.warm_deployed_parent: int | None = None
         # Set while stacking, whenever the caller weights the stacked problems unevenly.
         self.training_index_sampler: Callable[[int], torch.Tensor] | None = None
 
     def load_warm_start_state(self, state: Mapping[str, torch.Tensor]) -> None:
-        """Load prior-round parameters once and retain them for every training candidate."""
+        """Load one prior-round parent state for warm retraining."""
+        self.load_warm_start_states((state,))
+
+    def load_warm_start_states(self, states: Sequence[Mapping[str, torch.Tensor]]) -> None:
+        """Load the ordered parent states used by independent warm-retraining lineages."""
         assert self.warm_training, "A warm-start state requires warm_training=True."
-        assert self._warm_start_state is None, "Warm-start state can only be loaded once per quantizer."
-        try:
-            self.coding_model.load_state_dict(state)
-        except RuntimeError as error:
-            raise AssertionError(
-                "The previous quantizer model is incompatible with the warm-training architecture."
-            ) from error
-        self._warm_start_state = {
-            name: value.detach().cpu().clone()
-            for name, value in self.coding_model.state_dict().items()
-        }
+        assert not self._warm_start_states, "Warm-start states can only be loaded once per quantizer."
+        assert states, "Warm training requires at least one parent state."
+        copied: list[dict[str, torch.Tensor]] = []
+        for parent_index, state in enumerate(states):
+            try:
+                self.coding_model.load_state_dict(state)
+            except RuntimeError as error:
+                raise AssertionError(
+                    f"Warm parent {parent_index} is incompatible with the warm-training architecture."
+                ) from error
+            copied.append({
+                name: value.detach().cpu().clone()
+                for name, value in self.coding_model.state_dict().items()
+            })
+        self._warm_start_states = tuple(copied)
+        self.coding_model.load_state_dict(self._warm_start_states[0])
 
     def training_config(self) -> WZcfgQuant:
         """Return the effective optimizer and temperature settings for this fit."""
@@ -883,13 +897,13 @@ class WZQuantizerCancer:
         the coded vector, its side information, and every diagnostic stay those of ``x_raw``.
         ``problem_weights`` gives one sampling weight per stacked problem, the coded one first.
         """
-        assert not self.warm_training or self._warm_start_state is not None, (
-            "warm_training=True requires load_warm_start_state() before training.")
+        assert not self.warm_training or self._warm_start_states, (
+            "warm_training=True requires load_warm_start_states() before training.")
         if self.cache_dir is None:
             self._train_model_uncached(x_raw, si_raw_list, extra_pairs, problem_weights)
             return
 
-        state_dict, training_prior_stage_rates = cache_call(
+        training_result = cache_call(
             _train_quantizer_parameters,
             self.cache_dir / "quantizers",
             model_training_hash,
@@ -906,8 +920,14 @@ class WZQuantizerCancer:
             **({"extra_training_pairs": tuple(
                 (extra_x, tuple(extra_si)) for extra_x, extra_si in extra_pairs)} if extra_pairs else {}),
             **({"problem_weights": problem_weights} if problem_weights is not None else {}),
-            **({"warm_start_state": self._warm_start_state} if self._warm_start_state is not None else {}),
+            **({"warm_start_states": self._warm_start_states} if self._warm_start_states else {}),
         )
+        if self._warm_start_states:
+            state_dict, training_prior_stage_rates, warm_states, warm_losses, deployed_parent = training_result
+        else:
+            # Preserve the established two-item cold-cache payload and its existing entries.
+            state_dict, training_prior_stage_rates = training_result
+            warm_states, warm_losses, deployed_parent = (), (), None
         # Cache only portable training results; bind the current decoder-available
         # side information to this fresh quantizer instance.
         assert self.side_info_list_used is None
@@ -921,6 +941,9 @@ class WZQuantizerCancer:
         self.coding_model.load_state_dict(state_dict)
         self.training_prior_stage_rates = training_prior_stage_rates
         self.training_prior_rate = sum(training_prior_stage_rates)
+        self.warm_retrained_states = warm_states
+        self.warm_retrained_losses = warm_losses
+        self.warm_deployed_parent = deployed_parent
 
     def _train_model_uncached(
         self,
@@ -1008,25 +1031,56 @@ class WZQuantizerCancer:
         self, x_prep: torch.Tensor,
         side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor, wmspe_denom: float,
     ) -> EncoderDecoderLayeredRNN:
+        if self._warm_start_states:
+            states: list[dict[str, torch.Tensor]] = []
+            losses: list[float] = []
+            for parent_index, parent_state in enumerate(self._warm_start_states):
+                model, loss = self._train_finite_candidate(
+                    x_prep, side_info, wmspe_denom, parent_state, self.warm_retrain_repeats,
+                    f"parent {parent_index}"
+                )
+                states.append({
+                    name: value.detach().cpu().clone()
+                    for name, value in model.state_dict().items()
+                })
+                losses.append(loss)
+                del model
+            self.warm_retrained_states = tuple(states)
+            self.warm_retrained_losses = tuple(losses)
+            self.warm_deployed_parent = min(
+                range(len(states)), key=self.warm_retrained_losses.__getitem__)
+            self.coding_model.load_state_dict(self.warm_retrained_states[self.warm_deployed_parent])
+            return self.coding_model
+        return self._train_finite_candidate(
+            x_prep, side_info, wmspe_denom, None, self.quantizer_train_repeats, "cold"
+        )[0]
+
+    def _train_finite_candidate(
+        self,
+        x_prep: torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+        wmspe_denom: float,
+        initial_state: Mapping[str, torch.Tensor] | None,
+        repeats: int,
+        label: str,
+    ) -> tuple[EncoderDecoderLayeredRNN, float]:
+        """Train one lineage repeatedly and return its lowest-loss usable candidate."""
         failure_tolerance = self.candidate_failure_tolerance
         made_quants_and_stat: list[tuple[EncoderDecoderLayeredRNN, float]] = []
         rejected: list[str] = []
-        for attempt_index in range(self.quantizer_train_repeats + failure_tolerance):
-            if len(made_quants_and_stat) == self.quantizer_train_repeats:
+        for attempt_index in range(repeats + failure_tolerance):
+            if len(made_quants_and_stat) == repeats:
                 break
 
-            model = (
-                self.coding_model
-                if attempt_index == 0
-                else self._new_coding_model(self.side_info_size)
-            )
-            if attempt_index > 0 and self._warm_start_state is not None:
-                model.load_state_dict(self._warm_start_state)
+            model = self.coding_model if attempt_index == 0 and initial_state is None else self._new_coding_model(
+                self.side_info_size)
+            if initial_state is not None:
+                model.load_state_dict(initial_state)
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
                 (x_prep,), side_info, self.training_config(), batch_size=self.train_batch_size,
-                label=f"Quantizer attempt {attempt_index + 1}",
+                label=f"Quantizer {label} attempt {attempt_index + 1}",
                 metrics_fn=self.training_metrics,
                 index_sampler=self.training_index_sampler,
                 wmspe_denom=wmspe_denom,
@@ -1052,13 +1106,12 @@ class WZQuantizerCancer:
                 )
             else:
                 made_quants_and_stat.append((model, loss))
-        assert len(made_quants_and_stat) == self.quantizer_train_repeats, (
-            f"Created {len(made_quants_and_stat)}/{self.quantizer_train_repeats} required "
-            f"quantizer candidates after {self.quantizer_train_repeats + failure_tolerance} "
-            f"attempts; rejected: {rejected}."
+        assert len(made_quants_and_stat) == repeats, (
+            f"Created {len(made_quants_and_stat)}/{repeats} required {label} quantizer candidates "
+            f"after {repeats + failure_tolerance} attempts; rejected: {rejected}."
         )
 
-        return min(made_quants_and_stat, key=lambda attempt: attempt[1])[0]
+        return min(made_quants_and_stat, key=lambda attempt: attempt[1])
 
     def _candidate_is_usable(
         self,
@@ -1226,8 +1279,10 @@ def _train_quantizer_parameters(
     extra_training_pairs: tuple[tuple[torch.Tensor, tuple[HistoryVector, ...]], ...] = (),
     problem_weights: tuple[float, ...] | None = None,
     side_info_columns_cache: SideInfoColumnsCache | None = None,
-    warm_start_state: dict[str, torch.Tensor] | None = None,
-) -> tuple[dict[str, torch.Tensor], tuple[float, ...]]:
+    warm_start_states: tuple[dict[str, torch.Tensor], ...] = (),
+) -> tuple[dict[str, torch.Tensor], tuple[float, ...]] | tuple[
+    dict[str, torch.Tensor], tuple[float, ...], tuple[dict[str, torch.Tensor], ...], tuple[float, ...], int
+]:
     # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss
     # leave the caller's RNG identical for later stochastic steps in the same client-round.
     seeded = c_cfg.training_seed is not None
@@ -1236,11 +1291,18 @@ def _train_quantizer_parameters(
             torch.manual_seed(c_cfg.training_seed)
         quantizer = quantizer_class(
             c_cfg=c_cfg, si_size=len(side_information), side_info_columns_cache=side_info_columns_cache)
-        if warm_start_state is not None:
-            quantizer.load_warm_start_state(warm_start_state)
+        if warm_start_states:
+            quantizer.load_warm_start_states(warm_start_states)
         quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
     assert quantizer.training_prior_stage_rates is not None
-    return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
+    if not warm_start_states:
+        return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
+    assert quantizer.warm_deployed_parent is not None
+    return (
+        quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates,
+        quantizer.warm_retrained_states, quantizer.warm_retrained_losses,
+        quantizer.warm_deployed_parent,
+    )
 
 
 def _rows_for_grouping(block: torch.Tensor | SideInfoMatrix | _SideInfoRows, rows: torch.Tensor) -> torch.Tensor:
