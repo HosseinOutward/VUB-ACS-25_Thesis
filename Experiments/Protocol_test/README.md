@@ -86,11 +86,7 @@ systemd-run --user --collect --unit=fl-wz-global-plot --service-type=exec \
 
 These plans train real 30-client quantizers and are not smoke tests.
 
-## Validation commands
-
-```bash
-.venv/bin/python -m pytest -q Experiments/Protocol_test/test_records.py Experiments/Protocol_test/test_rd_metrics.py FL_code/cancer_protocol/test_round_prior_integration.py FL_code/cancer_protocol/test_warm_training.py
-```
+## Reruns and recovery
 
 A repeated `sparse_replay` invocation reuses every completed named case artifact after an identity
 match, without recompression. Quantizer and conditional-prior training always run. An interrupted

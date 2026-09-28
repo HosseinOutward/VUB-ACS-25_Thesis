@@ -44,3 +44,4 @@ Experiments/statistical_relation_boosting/results/history/*/logs/*
 Experiments/Protocol_test/exp_records/**
 /.claude/
 /.pytest_cache/
+/archived_tests/

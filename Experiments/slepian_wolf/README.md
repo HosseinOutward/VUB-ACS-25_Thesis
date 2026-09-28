@@ -14,16 +14,6 @@ overheads reported by each benchmark. They are not measurements on real FL delta
 | `practical_sw_benchmark.py`: one-shot, fixed-rate pilot, rate-adaptive LDPCA, and oracle SW on staged synthetic Gaussian indices | `.venv/bin/python Experiments/slepian_wolf/practical_sw_benchmark.py --bins 2 --stages 3 --seed 0` (repeat with `--seed 1` and `--seed 2`; use `--bins 4 --stages 2 --reconst-ld 160` for the second configuration) | `results/practical_sw_{2b3s,4b2s}_seed{0,1,2}.{json,csv}` |
 | `quantizer_sw_integration_benchmark.py`: original versus value/Gray-ordered oracle labels, wire rate, symbol errors and reconstruction MSE | `.venv/bin/python Experiments/slepian_wolf/quantizer_sw_integration_benchmark.py --bins 4 --stages 2 --value-ordered-mapping --target-ber 0.0001 --output Experiments/slepian_wolf/results/quantizer_sw_integration_4b2s_mapped_strict.json` | `results/quantizer_sw_integration_*.json` |
 
-The unit tests are:
-
-```text
-.venv/bin/python -m pytest -q --import-mode=importlib tests/test_codec_lifecycle.py tests/test_history.py tests/test_trace.py \
-  tests/test_staged_transport.py tests/test_oracle_sw_mixin.py \
-  Experiments/Protocol_test/tests/test_plot.py Experiments/Protocol_test/tests/test_sparse_replay.py \
-  Experiments/slepian_wolf/test_oracle_sw_mixin.py \
-  Experiments/slepian_wolf/test_practical_sw.py
-```
-
 ## Numeric verdicts that remain valid
 
 The practical controller's tuned defaults are `pilot_blocks=20`, `bootstrap_margin=0.20`,
