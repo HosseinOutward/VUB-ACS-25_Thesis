@@ -7,17 +7,17 @@ import hashlib
 import json
 import multiprocessing
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
+from itertools import pairwise
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from Experiments.Protocol_test import records
-from FL_code.FL_core.cache import content_hash
+from FL_code.FL_core.explicit_cache import CacheEntry, TorchCodec, atomic_output, content_hash
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
 from FL_code.FL_core.models import initialize_model
 from FL_code.FL_core.trace import Trace
@@ -29,7 +29,7 @@ from temp_nsplit import nsplit_quantize
 # Bump whenever this module's execution semantics change in a way that could produce different
 # records for an unchanged plan/trace, so a completed case cannot be silently reused as if it
 # still matched.
-_EXPERIMENT_SEMANTICS_VERSION = 9
+_EXPERIMENT_SEMANTICS_VERSION = 10
 _CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v1"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -125,11 +125,7 @@ def load_fl_config(path: Path) -> FLConfig:
 
 def case_protocol(plan: ReplayPlan, case: ReplayCase, manager: StateDictManager | None = None) -> _WZProtocol:
     """Build the case using the protocol's schedule and codec configuration APIs."""
-    protocol = create_protocol(
-        case.protocol,
-        None if manager is None else manager.get_slices(),
-        cache_dir=None,
-    )
+    protocol = create_protocol(case.protocol, None if manager is None else manager.get_slices())
     assert isinstance(protocol, _WZProtocol), "Sparse history experiments require a WZ protocol."
     protocol.set_schedule(case.start_round, case.round_codecs)
     return protocol
@@ -141,7 +137,7 @@ def _case_dir(plan: ReplayPlan, case: ReplayCase) -> Path:
 
 def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> int:
     """Derive a per-client-round seed so one fit cannot change another's stochastic training."""
-    return int(content_hash((seed, start_round, round_id, client_id), {})[:8], 16)
+    return int(content_hash((seed, start_round, round_id, client_id))[:8], 16)
 
 
 def _case_metadata(case: ReplayCase, protocol: _WZProtocol) -> dict[str, Any]:
@@ -165,7 +161,6 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "trace": trace_identity,
         "seed": plan.seed,
         "codec_seed_policy": _CODEC_SEED_POLICY,
-        "raw_update_cache": "disabled",
         "case": _case_metadata(case, protocol),
         "protocol_snapshot": protocol_snapshot,
         "history_representation": protocol_snapshot["history"],
@@ -189,7 +184,6 @@ def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[
         "seed": plan.seed,
         "dataset_revision": plan.dataset_revision,
         "nsplit_bins": plan.nsplit_bins,
-        "raw_update_cache": "disabled",
         "trace": trace_identity,
         "cases": [
             {"case_id": case.case_id, "codec_id": case.codec_id}
@@ -232,18 +226,23 @@ def _provenance(plan: ReplayPlan, plan_path: Path) -> dict[str, Any]:
         "output_root": str(plan.output_root),
         "gpu_ids": list(plan.gpu_ids),
         "max_parallel_cases": plan.max_parallel_cases,
-        "raw_update_cache": "disabled",
-        "server_checkpoint_scope": "run",
         "plan": json.loads(plan_path.read_text()),
     }
 
 
-def run_case(
-    plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], checkpoint_dir: Path,
-) -> Path:
+def _checkpoint_rounds(windows: Sequence[tuple[int, int]]) -> list[int]:
+    """Pick, for `(first, last)` trace windows run in this order, the round whose initial state each saves.
+
+    Only one continuation state is kept per trajectory, so a case leaves it where the next case's
+    window begins, or right after its own last round when the next window begins beyond that.
+    """
+    return [min(last + 1, next_first) for (_, last), (next_first, _) in pairwise(windows)] + [windows[-1][1] + 1]
+
+
+def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], checkpoint_round: int) -> Path:
     """Evaluate selected clients while decoded and unselected raw updates advance history."""
     trace = Trace(
-        checkpoint_dir, load_fl_config(plan.fl_config), dataset_revision=plan.dataset_revision,
+        load_fl_config(plan.fl_config), dataset_revision=plan.dataset_revision,
         device=torch.device(plan.trace_device),
     )
     cfg = trace.cfg
@@ -271,30 +270,25 @@ def run_case(
             f"Existing case output lacks pre_run_identity.json, so recovery is unsafe: {case_dir}."
         )
         records.validate_case_records(records_path, identity["case"])
-        temporary = completion.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
-        temporary.replace(completion)
+        with atomic_output(completion) as temporary:
+            temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
         return records_path
     case_dir.mkdir(parents=True)
-    temporary = pre_run_identity.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"identity": identity}, indent=2))
-    temporary.replace(pre_run_identity)
+    with atomic_output(pre_run_identity) as temporary:
+        temporary.write_text(json.dumps({"identity": identity}, indent=2))
 
-    checkpoint_rounds = {candidate.start_round for candidate in plan.cases}
     history_name = "raw_history" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_history"
-    for round_id, deltas in trace.stream(
-        case.start_round - depth, case.start_round - 1, checkpoint_rounds=checkpoint_rounds,
-    ):
-        for client_id, delta in enumerate(deltas):
-            delta = nsplit_quantize(delta, plan.nsplit_bins) if case.initial_si == "nsplit" else delta
-            for history in protocol.histories:
-                history.commit(delta, CompressionRecord(round_id, client_id, history_name), Access.TEMPORAL_TOO)
-
     last_round = case.start_round + len(case.round_codecs) - 1
-    for round_id, deltas in trace.stream(
-        case.start_round, last_round, checkpoint_rounds=checkpoint_rounds,
-    ):
+    # Keyed only on the trajectory, so each save replaces the previous case's continuation state.
+    checkpoint = CacheEntry(_REPO_ROOT / "_/data/trace_states", trace_identity, TorchCodec())
+    for round_id, deltas in trace.stream(case.start_round - depth, last_round, checkpoint, checkpoint_round):
         for client_id, delta in enumerate(deltas):
+            if round_id < case.start_round:
+                delta = nsplit_quantize(delta, plan.nsplit_bins) if case.initial_si == "nsplit" else delta
+                for history in protocol.histories:
+                    history.commit(
+                        delta, CompressionRecord(round_id, client_id, history_name), Access.TEMPORAL_TOO)
+                continue
             assert delta.numel() == manager.param_count
             if client_id in case.client_ids:
                 set_global_seed(_codec_seed(plan.seed, case.start_round, round_id, client_id))
@@ -304,24 +298,23 @@ def run_case(
                     history.commit(delta, CompressionRecord(round_id, client_id, "raw_history"), Access.TEMPORAL_TOO)
 
     records.validate_case_records(records_path, identity["case"])
-    temporary = completion.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
-    temporary.replace(completion)
+    with atomic_output(completion) as temporary:
+        temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
     return records_path
 
 
 def _run_gpu_case(
-    plan: ReplayPlan, gpu_id: int, case: ReplayCase, provenance: Mapping[str, Any], checkpoint_dir: Path,
+    plan: ReplayPlan, gpu_id: int, case: ReplayCase, provenance: Mapping[str, Any], checkpoint_round: int,
 ) -> Path:
     """Run one case in a disposable GPU worker so allocator growth cannot cross case boundaries."""
     torch.cuda.set_device(gpu_id)
-    return run_case(plan, case, provenance, checkpoint_dir)
+    return run_case(plan, case, provenance, checkpoint_round)
 
 
 def _run_gpu_cases(
-    plan: ReplayPlan, provenance: Mapping[str, Any], checkpoint_dir: Path,
+    plan: ReplayPlan, provenance: Mapping[str, Any], checkpoint_rounds: Mapping[ReplayCase, int],
 ) -> tuple[Path, ...]:
-    """Run memory-bounded batches whose cases each get a disposable GPU worker."""
+    """Run memory-bounded batches, in `checkpoint_rounds` order, each case in a disposable GPU worker."""
     assert plan.gpu_ids
     context = multiprocessing.get_context("spawn")
     results: list[Path] = []
@@ -330,7 +323,7 @@ def _run_gpu_cases(
         mp_context=context,
         max_tasks_per_child=1,
     ) as pool:
-        cases = tuple(sorted(plan.cases, key=lambda case: case.start_round))
+        cases = tuple(checkpoint_rounds)
         for start in range(0, len(cases), plan.max_parallel_cases):
             batch = cases[start : start + plan.max_parallel_cases]
             futures = [
@@ -340,7 +333,7 @@ def _run_gpu_cases(
                     plan.gpu_ids[(start + offset) % len(plan.gpu_ids)],
                     case,
                     provenance,
-                    checkpoint_dir,
+                    checkpoint_rounds[case],
                 )
                 for offset, case in enumerate(batch)
             ]
@@ -349,16 +342,21 @@ def _run_gpu_cases(
 
 
 def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
-    """Stream every case and share only run-scoped start-point checkpoints between them."""
+    """Run cases in trace-window order, each resuming the FL trajectory from the last saved state."""
     cfg = load_fl_config(plan.fl_config)
     validation_protocols = [case_protocol(plan, case) for case in plan.cases]
+    windows: dict[ReplayCase, tuple[int, int]] = {}
     for case, protocol in zip(plan.cases, validation_protocols, strict=True):
         depth = protocol.max_per_client_recons_history
         assert depth is not None and case.start_round >= depth > 0, (
             f"Case {case.case_id} needs {depth} preceding raw rounds.")
         assert max(case.client_ids) < cfg.num_clients
+        windows[case] = (case.start_round - depth, case.start_round + len(case.round_codecs) - 1)
+    # Execution order: the earliest trace window first, so each case can resume from its predecessor.
+    ordered = sorted(windows, key=lambda case: windows[case])
+    checkpoint_rounds = dict(zip(ordered, _checkpoint_rounds([windows[case] for case in ordered]), strict=True))
     trace_identity = Trace(
-        plan.output_root / ".start-point-models", cfg, dataset_revision=plan.dataset_revision,
+        cfg, dataset_revision=plan.dataset_revision,
         device=torch.device(plan.trace_device),
     ).identity()
     provenance = _provenance(plan, plan_path)
@@ -372,20 +370,14 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
     else:
         plan.output_root.mkdir(parents=True, exist_ok=True)
         assert not any(plan.output_root.iterdir()), f"Output root contains untracked experiment results: {plan.output_root}."
-        temporary = manifest_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
-        temporary.replace(manifest_path)
+        with atomic_output(manifest_path) as temporary:
+            temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
 
-    with TemporaryDirectory(prefix=".start-point-models-", dir=plan.output_root) as scratch:
-        checkpoint_dir = Path(scratch)
-        return (
-            _run_gpu_cases(plan, provenance, checkpoint_dir)
-            if plan.gpu_ids
-            else tuple(
-                run_case(plan, case, provenance, checkpoint_dir)
-                for case in sorted(plan.cases, key=lambda item: item.start_round)
-            )
-        )
+    return (
+        _run_gpu_cases(plan, provenance, checkpoint_rounds)
+        if plan.gpu_ids
+        else tuple(run_case(plan, case, provenance, round_id) for case, round_id in checkpoint_rounds.items())
+    )
 
 
 def main() -> None:

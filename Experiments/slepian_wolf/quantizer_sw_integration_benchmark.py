@@ -176,7 +176,6 @@ def run_quantizer_sw_comparison(
     value_ordered_mapping: bool,
     target_ber: float,
     seed: int,
-    cache_dir: Path | None,
 ) -> QuantizerSWResult:
     """Train once and compare baseline and oracle-SW payloads on identical inference data."""
     assert bins_per_stage >= 2 and bins_per_stage & (bins_per_stage - 1) == 0
@@ -214,7 +213,6 @@ def run_quantizer_sw_comparison(
         fused_optimizer=True,
         hidden_dim=100,
         layers=3,
-        cache_dir=cache_dir,
     )
     quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
     quantizer.train_model(training_target, [HistoryVector(training_side_information)])
@@ -415,11 +413,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--target-ber", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path("_/data/protocol_cache/sw_quantizer_integration"),
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         default=Path("Experiments/slepian_wolf/results/quantizer_sw_integration.json"),
@@ -442,7 +435,6 @@ def main() -> None:
         value_ordered_mapping=args.value_ordered_mapping,
         target_ber=args.target_ber,
         seed=args.seed,
-        cache_dir=args.cache_dir,
     )
     _print_result(result)
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -4,13 +4,13 @@ from collections.abc import Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 import csv
-import tempfile
 import time
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 import numpy as np
 
+from FL_code.FL_core.explicit_cache import atomic_output
 from FL_code.FL_core.utils import (
     ParsedConfigurableName,
     payload_size_mib,
@@ -19,9 +19,6 @@ from FL_code.FL_core.utils import (
 
 if TYPE_CHECKING:
     from .utils import StateDictManager
-
-
-DEFAULT_PROTOCOL_CACHE_DIR = Path("_/data/protocol_cache")
 
 
 def _synchronized_time() -> float:
@@ -131,15 +128,10 @@ class CompressionRecord:
                     rows_to_rewrite = [*reader, record_dict]
 
         if rows_to_rewrite is not None:
-            with tempfile.NamedTemporaryFile(
-                'w', newline='', dir=save_dir, prefix=f".{csv_file.stem}.",
-                suffix=".tmp", delete=False
-            ) as temp_file:
-                temp_path = Path(temp_file.name)
+            with atomic_output(csv_file) as temp_path, temp_path.open('w', newline='') as temp_file:
                 writer = csv.DictWriter(temp_file, fieldnames=fieldnames)
                 writer.writeheader()
                 writer.writerows(rows_to_rewrite)
-            temp_path.replace(csv_file)
             return
 
         with csv_file.open('a', newline='') as f:
@@ -250,8 +242,6 @@ class BaseProtocol:
     protocol_name_full: str
     _round_codec_classes: dict[str, type[BaseRoundCodec]]
     sd_slices: Sequence[slice] | None
-    cache_dir: Path | None
-    cache_overwrite: bool
     _schedule_placed: bool = False
 
     def __init_subclass__(cls) -> None:
@@ -272,16 +262,12 @@ class BaseProtocol:
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
         sd_slices: Sequence[slice] | None = None,
-        cache_dir: Path | None = None,
-        cache_overwrite: bool = False,
     ) -> None:
         self.protocol_name_full = protocol_name_full or type(self).protocol_name
         if options:
             self.options_to_config(**options)
         self._round_codec_classes = self._validate_round_codecs()
         self.sd_slices = sd_slices
-        self.cache_dir = cache_dir
-        self.cache_overwrite = cache_overwrite
 
     def options_to_config(self, **options: Any) -> Any:
         raise NotImplementedError
@@ -357,8 +343,6 @@ class BaseProtocol:
 def create_protocol(
     protocol_name: str,
     sd_slices: Sequence[slice] | None = None,
-    cache_dir: Path | None = None,
-    cache_overwrite: bool = False,
 ) -> BaseProtocol:
     """Create a validated protocol schedule."""
     from FL_code.cancer_protocol import cancer_protocol
@@ -368,8 +352,6 @@ def create_protocol(
         parsed.options,
         protocol_name,
         sd_slices=sd_slices,
-        cache_dir=cache_dir,
-        cache_overwrite=cache_overwrite,
     )
 
 

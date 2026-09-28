@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any, ClassVar
 
 import torch
@@ -48,16 +47,8 @@ class _WZProtocol(BaseProtocol):
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
         sd_slices: Sequence[slice] | None = None,
-        cache_dir: Path | None = None,
-        cache_overwrite: bool = False,
     ) -> None:
-        super().__init__(
-            options,
-            protocol_name_full,
-            sd_slices,
-            cache_dir,
-            cache_overwrite,
-        )
+        super().__init__(options, protocol_name_full, sd_slices)
         self.last_trained_codec = {}
         self._recons_history = CompressedReconstructionHistory(
             self.max_per_client_recons_history, self.sd_slices
@@ -122,15 +113,6 @@ class _WZProtocol(BaseProtocol):
         codec = round_codec_class(
             parsed.options | {
                 "sd_slices": self.sd_slices,
-                "cache_dir": self.cache_dir,
-                "cache_overwrite": self.cache_overwrite,
-                # Cases share a cache root, so schedule provenance must separate histories that
-                # happen to have the same target and side-information count.
-                "training_cache_discriminator": (
-                    self.protocol_name_full,
-                    *self.warmup_round_codecs,
-                    *self.routine_round_codecs,
-                ),
             } | protocol_overrides,
             effective_round_name,
         )
@@ -196,8 +178,6 @@ class _WZProtocol(BaseProtocol):
                 "bins_per_plane",
                 "num_planes",
                 "norm_slices",
-                "cache_dir",
-                "cache_overwrite",
             },
         )
         snapshot["max_per_client_recons_history"] = self.max_per_client_recons_history
@@ -274,10 +254,8 @@ class WarmWZCancerProtocol(WZCancerProtocol):
         options: Mapping[str, Any] | None = None,
         protocol_name_full: str | None = None,
         sd_slices: Sequence[slice] | None = None,
-        cache_dir: Path | None = None,
-        cache_overwrite: bool = False,
     ) -> None:
-        super().__init__(options, protocol_name_full, sd_slices, cache_dir, cache_overwrite)
+        super().__init__(options, protocol_name_full, sd_slices)
         self.quantizer_pool: list[dict[str, torch.Tensor]] = []
         self.quantizer_pool_si_size: int | None = None
         self.server_si_prior_pool: list[dict[str, torch.Tensor]] = []

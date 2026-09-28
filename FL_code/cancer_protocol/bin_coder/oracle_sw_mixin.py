@@ -76,13 +76,9 @@ class OracleSWRoundMixin(StagedIndexTransportMixin):
         self.sw_codec = SlepianWolfCodec(self.sw_config)
 
     def options_to_config(self, sw_search_step: int | None = None, **options: Any) -> None:
-        """Apply an explicit row-search-step override before forwarding quantizer/cache options."""
+        """Apply an explicit row-search-step override before forwarding codec options."""
         if sw_search_step is not None:
             self.sw_search_step = sw_search_step
-        if (cache_dir := options.get("cache_dir")) is not None:
-            self.sw_config = self.sw_config.model_copy(
-                update={"matrix_cache_dir": cache_dir / "sw_matrices"}
-            )
         super().options_to_config(**options)
 
     @classmethod

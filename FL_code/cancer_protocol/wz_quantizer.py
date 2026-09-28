@@ -13,12 +13,12 @@ import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
 
-from FL_code.FL_core.cache import cache_call, model_training_hash
 from FL_code.FL_core.utils import (
     OUTLIER_CHUNK,
     OutlierMetadata,
     PreprocessMetadata,
     create_training_progress_bar,
+    fork_torch_rng,
     normalization_params,
     outlier_metadata,
 )
@@ -634,30 +634,6 @@ class WZcfgQuant(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    _TRAINING_CACHE_FIELDS: ClassVar[frozenset[str]] = frozenset({
-        "bins_per_plane",
-        "num_planes",
-        "norm_slices",
-        "outlier_threshold",
-        "marginal_loss",
-        "train_epochs",
-        "reconst_ld",
-        "train_sample_size",
-        "train_batch_size",
-        "lr",
-        "lr_step",
-        "tau",
-        "prior_train_repeats",
-        "fused_optimizer",
-        "mixed_precision",
-        "source_perturbation",
-        "shared_heads",
-        "prior_context",
-        "prior_probabilities",
-        "hidden_dim",
-        "layers",
-    })
-
     bins_per_plane: int
     num_planes: int
     norm_slices: Sequence[slice] | None = None
@@ -677,11 +653,8 @@ class WZcfgQuant(BaseModel):
     quantizer_train_repeats: int = 3
     prior_train_repeats: int = 3
     prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)
-    # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
-    # inputs, e.g. a sparse-replay case seeding torch's RNG per client-round. Omitted from the
-    # cache payload when unset so every existing cache entry keeps its current key.
+    # Allows a replay to make an individual model fit deterministic without changing later RNG use.
     training_seed: int | None = None
-    training_cache_discriminator: str | tuple[str, ...] | None = None
 
     training_progress_bar: bool = False
     training_log_every_epochs: int | None = None
@@ -695,8 +668,6 @@ class WZcfgQuant(BaseModel):
     prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
     hidden_dim: int = 128
     layers: int = 6
-    cache_dir: Path | None = None
-    cache_overwrite: bool = False
 
     def warm_retraining_config(self, train_epochs: int | None = None) -> WZcfgQuant:
         """Return the shared lower-rate, lower-temperature configuration for warm fitting."""
@@ -705,30 +676,6 @@ class WZcfgQuant(BaseModel):
             "lr": self.lr * 0.3,
             "tau": 0.5,
         })
-
-    def training_cache_payload(self) -> dict[str, Any]:
-        """Return the model-semantic options used to identify cached training results."""
-        payload = self.model_dump(include=self._TRAINING_CACHE_FIELDS) | {
-            # These pinned historical values preserve the established baseline cache namespace.
-            "max_side_info_count": 5,
-            "pretrain_pth_dir": Path("FL_code/data/pre_trained_pth"),
-            "training_progress_bar": False,
-            "training_log_every_epochs": None,
-            "tf32": False,
-        }
-        # Two was the omitted historical default. Every other value, including today's default,
-        # must remain explicit so it cannot reuse a legacy two-repeat cache entry.
-        if self.quantizer_train_repeats != 2:
-            payload["quantizer_train_repeats"] = self.quantizer_train_repeats
-        if self.warm_training:
-            payload["warm_training"] = True
-            payload["warm_retrain_repeats"] = self.warm_retrain_repeats
-        if self.training_seed is not None:
-            payload["training_seed"] = self.training_seed
-        if self.training_cache_discriminator is not None:
-            payload["training_cache_discriminator"] = self.training_cache_discriminator
-        return payload
-
 
 class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
@@ -767,10 +714,6 @@ class WZQuantizerCancer:
             layers=self.layers,
         )
 
-    def _cached_training_quantizer_class(self) -> type[WZQuantizerCancer]:
-        """Return the quantizer implementation whose parameters are cached."""
-        return WZQuantizerCancer
-
     def __init__(
         self,
         c_cfg: WZcfgQuant,
@@ -787,7 +730,7 @@ class WZQuantizerCancer:
         self.coding_model: EncoderDecoderLayeredRNN = self._new_coding_model(self.side_info_size)
 
         self.side_info_list_used: list[HistoryVector] | None = None
-        # A quantizer built outside a round codec owns its cache and releases it with itself.
+        # A quantizer built outside a round codec owns this process-local workspace.
         self.side_info_columns_cache = side_info_columns_cache or SideInfoColumnsCache()
         self.vector_size: int | None = None
         self.quantizer_prior_stage_rates: tuple[float, ...] | None = None
@@ -910,59 +853,6 @@ class WZQuantizerCancer:
         """
         assert not self.warm_training or self._warm_start_states, (
             "warm_training=True requires load_warm_start_states() before training.")
-        if self.cache_dir is None:
-            self._train_model_uncached(x_raw, si_raw_list, extra_pairs, problem_weights)
-            return
-
-        training_result = cache_call(
-            _train_quantizer_parameters,
-            self.cache_dir / "quantizers",
-            model_training_hash,
-            self.cache_overwrite,
-            # Inference-only subclasses share this training implementation and
-            # restore the resulting state into their own instance below.
-            quantizer_class=self._cached_training_quantizer_class(),
-            c_cfg=self.c_cfg,
-            x_raw=x_raw,
-            side_information=tuple(si_raw_list or ()),
-            side_info_columns_cache=self.side_info_columns_cache,
-            # Passed only when used, so single-problem training keeps the cache keys it
-            # was written with; the hash covers every keyword it receives.
-            **({"extra_training_pairs": tuple(
-                (extra_x, tuple(extra_si)) for extra_x, extra_si in extra_pairs)} if extra_pairs else {}),
-            **({"problem_weights": problem_weights} if problem_weights is not None else {}),
-            **({"warm_start_states": self._warm_start_states} if self._warm_start_states else {}),
-        )
-        if self._warm_start_states:
-            state_dict, quantizer_prior_stage_rates, warm_states, warm_losses, deployed_parent = training_result
-        else:
-            # Preserve the established two-item cold-cache payload and its existing entries.
-            state_dict, quantizer_prior_stage_rates = training_result
-            warm_states, warm_losses, deployed_parent = (), (), None
-        # Cache only portable training results; bind the current decoder-available
-        # side information to this fresh quantizer instance.
-        assert self.side_info_list_used is None
-        if self.no_side_info:
-            assert not si_raw_list
-            self.side_info_list_used = []
-        else:
-            assert si_raw_list
-            self.set_side_information(si_raw_list)
-        self.vector_size = x_raw.numel()
-        self.coding_model.load_state_dict(state_dict)
-        self.quantizer_prior_stage_rates = quantizer_prior_stage_rates
-        self.quantizer_prior_rate = sum(quantizer_prior_stage_rates)
-        self.warm_retrained_states = warm_states
-        self.warm_retrained_losses = warm_losses
-        self.warm_deployed_parent = deployed_parent
-
-    def _train_model_uncached(
-        self,
-        x_raw: torch.Tensor,
-        si_raw_list: Sequence[HistoryVector] | None,
-        extra_pairs: Sequence[tuple[torch.Tensor, Sequence[HistoryVector]]] = (),
-        problem_weights: tuple[float, ...] | None = None,
-    ) -> None:
         assert self.side_info_list_used is None
         if self.no_side_info:
             assert not si_raw_list, "Marginal quantizer training expects no side information."
@@ -971,11 +861,13 @@ class WZQuantizerCancer:
             assert si_raw_list
             self.set_side_information(si_raw_list)
 
-        x_prep, metadata = self.preprocess_x(x_raw)
-        x_prep, side_info = self._stack_training_pairs(
-            x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []),
-            extra_pairs, problem_weights)
-        self._fit_prepared(x_prep, side_info)
+        # Forked so a seeded fit leaves the caller's RNG untouched for its later stochastic steps.
+        with fork_torch_rng(self.training_seed):
+            x_prep, metadata = self.preprocess_x(x_raw)
+            x_prep, side_info = self._stack_training_pairs(
+                x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []),
+                extra_pairs, problem_weights)
+            self._fit_prepared(x_prep, side_info)
 
     def _fit_prepared(
         self, x_prep: torch.Tensor, side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor
@@ -1001,8 +893,7 @@ class WZQuantizerCancer:
         problem_weights: tuple[float, ...] | None = None,
     ) -> tuple[torch.Tensor, SideInfoMatrix | _SideInfoRows | torch.Tensor]:
         """Append further training problems below the coded one, each normalized by its own target."""
-        # `> 1` as well, so weights handed in without anything to weigh fail here rather than being
-        # dropped while still counting toward the training cache key.
+        # `> 1` as well, so weights handed in without anything to weigh fail here.
         assert problem_weights is None or len(problem_weights) == 1 + len(extra_pairs) > 1, (
             f"problem_weights has {len(problem_weights or ())} entries for the coded problem and "
             f"{len(extra_pairs)} extra ones.")
@@ -1280,40 +1171,6 @@ class WZQuantizerCancer:
             f"Each side-information vector must contain {self.vector_size} values.")
         assert self.side_info_list_used is None, "Side information can only be set once per quantizer instance."
         self.side_info_list_used = list(side_info)
-
-
-def _train_quantizer_parameters(
-    quantizer_class: type[WZQuantizerCancer],
-    c_cfg: WZcfgQuant,
-    x_raw: torch.Tensor,
-    side_information: tuple[HistoryVector, ...],
-    extra_training_pairs: tuple[tuple[torch.Tensor, tuple[HistoryVector, ...]], ...] = (),
-    problem_weights: tuple[float, ...] | None = None,
-    side_info_columns_cache: SideInfoColumnsCache | None = None,
-    warm_start_states: tuple[dict[str, torch.Tensor], ...] = (),
-) -> tuple[dict[str, torch.Tensor], tuple[float, ...]] | tuple[
-    dict[str, torch.Tensor], tuple[float, ...], tuple[dict[str, torch.Tensor], ...], tuple[float, ...], int
-]:
-    # Runs only on a cache miss, so the keyed seed is applied here, and forked so a hit and a miss
-    # leave the caller's RNG identical for later stochastic steps in the same client-round.
-    seeded = c_cfg.training_seed is not None
-    with torch.random.fork_rng(devices=[torch.cuda.current_device()], enabled=seeded):
-        if seeded:
-            torch.manual_seed(c_cfg.training_seed)
-        quantizer = quantizer_class(
-            c_cfg=c_cfg, si_size=len(side_information), side_info_columns_cache=side_info_columns_cache)
-        if warm_start_states:
-            quantizer.load_warm_start_states(warm_start_states)
-        quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
-    assert quantizer.quantizer_prior_stage_rates is not None
-    if not warm_start_states:
-        return quantizer.coding_model.state_dict(), quantizer.quantizer_prior_stage_rates
-    assert quantizer.warm_deployed_parent is not None
-    return (
-        quantizer.coding_model.state_dict(), quantizer.quantizer_prior_stage_rates,
-        quantizer.warm_retrained_states, quantizer.warm_retrained_losses,
-        quantizer.warm_deployed_parent,
-    )
 
 
 def _rows_for_grouping(block: torch.Tensor | SideInfoMatrix | _SideInfoRows, rows: torch.Tensor) -> torch.Tensor:

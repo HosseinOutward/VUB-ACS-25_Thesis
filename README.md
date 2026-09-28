@@ -5,7 +5,7 @@ This repository studies two-step compression: a learned Wyner–Ziv quantizer fo
 - `FL_code/` — reusable FL, quantization, and codec implementation.
 - `Experiments/` — studies and analysis; `Protocol_test/final_experiment_reports/`, `hyper_param_search/`, and `statistical_relation_boosting/` are frozen.
 - `tests/` — tests for the reusable implementation; experiment-specific tests stay with their study.
-- `_` — local datasets, traces, caches, and reference material.
+- `_` — local datasets and reference material.
 - `Thesis_doc/` — thesis sources.
 - `Paper_doc/` — paper sources.
 - `.claude/` and `.vscode/` — local agent and editor configuration.

@@ -195,8 +195,6 @@ class _WZRoundCodec(BaseRoundCodec):
         bins_per_plane: int,
         num_planes: int,
         sd_slices: Sequence[slice] | None,
-        cache_dir: Path | None = None,
-        cache_overwrite: bool = False,
         dump_element_metrics: bool = False,
         **quant_overrides: Any,
     ) -> None:
@@ -208,8 +206,6 @@ class _WZRoundCodec(BaseRoundCodec):
             bins_per_plane=bins_per_plane,
             num_planes=num_planes,
             norm_slices=sd_slices,
-            cache_dir=cache_dir,
-            cache_overwrite=cache_overwrite,
             **quant_overrides,
         )
 
@@ -219,16 +215,12 @@ class _WZRoundCodec(BaseRoundCodec):
         bins_per_plane: int,
         num_planes: int,
         sd_slices: Sequence[slice] | None = None,
-        cache_dir: Path | None = None,
-        cache_overwrite: bool = False,
         dump_element_metrics: bool = False,
         **quant_overrides: Any,
     ) -> None:
         """Validate the round wrapper and quantizer options before a replay starts."""
         assert isinstance(bins_per_plane, int) and bins_per_plane > 0
         assert isinstance(num_planes, int) and num_planes > 0
-        assert cache_dir is None or isinstance(cache_dir, Path)
-        assert isinstance(cache_overwrite, bool)
         assert isinstance(dump_element_metrics, bool)
         cls.config_class(
             bins_per_plane=bins_per_plane,

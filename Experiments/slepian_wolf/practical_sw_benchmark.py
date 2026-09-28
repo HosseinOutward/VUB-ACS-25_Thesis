@@ -230,7 +230,6 @@ def run_comparison(
     oracle_target_ber: float,
     oracle_row_step: int,
     seed: int,
-    cache_dir: Path | None,
 ) -> dict[str, Any]:
     """Train one quantizer and code one inference vector with every method under study."""
     assert bins_per_stage >= 2 and bins_per_stage & (bins_per_stage - 1) == 0
@@ -266,7 +265,6 @@ def run_comparison(
         fused_optimizer=True,
         hidden_dim=100,
         layers=3,
-        cache_dir=cache_dir,
     )
     quantizer = DedupedWZQuantizerCancer(quantizer_config, si_size=1)
     quantizer.train_model(training_target, [HistoryVector(training_side_information)])
@@ -274,7 +272,6 @@ def run_comparison(
     sw_config = SWCoderConfig(
         block_length=block_length,
         code_seed=seed,
-        matrix_cache_dir=None if cache_dir is None else cache_dir / "sw_matrices",
     )
     # Binding the codec is what replaces the quantizer's training side information with the
     # inference vector's, so nothing that reads the prior may run before it.
@@ -449,7 +446,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--oracle-target-ber", type=float, default=1e-5)
     parser.add_argument("--oracle-row-step", type=int, default=24)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--cache-dir", type=Path, default=Path("_/data/protocol_cache/sw_practical"))
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 
@@ -474,7 +470,6 @@ def main() -> None:
         oracle_target_ber=args.oracle_target_ber,
         oracle_row_step=args.oracle_row_step,
         seed=args.seed,
-        cache_dir=args.cache_dir,
     )
     _print_report(summary)
     output = args.output or Path(

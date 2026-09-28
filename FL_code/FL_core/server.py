@@ -26,12 +26,7 @@ def run_federated_server(
         X_train=None, y_train=None, X_test=X_test, y_test=y_test
     )
 
-    protocol = create_protocol(
-        cfg.protocol,
-        sd_manager.get_slices(),
-        cache_dir=cfg.protocol_cache_dir,
-        cache_overwrite=cfg.protocol_cache_overwrite,
-    )
+    protocol = create_protocol(cfg.protocol, sd_manager.get_slices())
 
     print(f"[Server] Starting FL with {num_clients} clients, {round(sd_manager.param_count/1e6,1)}M trainable params")
     print(f"[Server] Using protocol: {protocol.__class__.__name__}")

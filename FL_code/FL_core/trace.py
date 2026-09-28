@@ -1,31 +1,29 @@
-"""Deterministic identity-FL client-update streams with resumable server checkpoints."""
+"""Deterministic identity-FL client-update streams with an optional continuation checkpoint."""
 
 from __future__ import annotations
 
 import contextlib
 from contextlib import contextmanager
-import os
 import platform
 import random
-import re
-from pathlib import Path
-from typing import Any, Iterable, Iterator, cast
+from typing import Any, Iterator, cast
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
 from FL_code.run_fl import FLConfig
 from .client import train_client_update
 from .dataset import GROUP_FIELD, create_dataloader, precompute_dataset_to_shared
-from .models import FLModelTemplate, initialize_model
+from .explicit_cache import CacheEntry
+from .models import initialize_model
 from .server import aggregate_and_update
 from .utils import StateDictManager
 
 
 # Bump whenever `_run`'s algorithm changes in a way that could produce different deltas for the
-# same configuration, so cached artifacts keyed on trace identity cannot be silently reused as if
-# they still matched. Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
+# same configuration, so completed experiments and saved continuation states cannot be mistaken
+# for the same trajectory.
+# Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
 # current CUDA device rather than the requested one) and added the fixed cudnn determinism policy.
 _TRACE_VERSION = 2
 # `data_folder` is excluded: a path is not data identity, `dataset_revision` is.
@@ -41,26 +39,6 @@ _SEMANTIC_FIELDS = {
 # any RNG seed.
 _CUDNN_DETERMINISTIC = True
 _CUDNN_BENCHMARK = False
-
-
-def _restore_optimizer_state(
-    optimizer: torch.optim.Optimizer, saved: dict[str, Any], device: torch.device
-) -> None:
-    """Load one optimizer's saved state, moving only floating buffers to `device`.
-
-    SGD's momentum buffer is the only tensor this checkpoint format carries. A non-floating
-    tensor would be a scalar step counter, which a fused/capturable optimizer requires in a
-    specific placement (often CPU) that blindly moving to `device` could silently violate.
-    """
-    optimizer.load_state_dict(saved)
-    for optimizer_state in optimizer.state.values():
-        for key, value in optimizer_state.items():
-            if isinstance(value, torch.Tensor):
-                assert value.dtype.is_floating_point, (
-                    f"Unexpected non-floating optimizer state {key!r}={value!r}; refusing to "
-                    f"blindly move it to {device}."
-                )
-                optimizer_state[key] = value.to(device)
 
 
 @contextmanager
@@ -98,18 +76,15 @@ def _seeded(seed: int, device: torch.device) -> Iterator[None]:
 class Trace:
     """The one uncompressed FL trajectory every sparse replay case reads its raw updates from.
 
-    Nothing about the trajectory is stored except sparse server checkpoints under
-    `checkpoint_dir`: `stream` regenerates the deltas of the rounds it is asked for and yields
-    them, resuming from the newest checkpoint at or before its first round. Client updates are
-    large and quick to recompute, whereas reaching round r means replaying every round before it,
-    so a checkpoint at each case start is the only part worth keeping - and only for one run,
-    since `identity` is what decides whether a cached product of this trace still matches.
+    Client updates are never stored: a stream regenerates the sequential training state and yields
+    only the requested rounds. The caller may supply one checkpoint entry holding the complete
+    continuation state at the start of some round, which lets a later stream skip the rounds before it.
     """
 
     def __init__(
-        self, checkpoint_dir: Path, cfg: FLConfig, *, dataset_revision: str, device: torch.device,
+        self, cfg: FLConfig, *, dataset_revision: str, device: torch.device,
     ) -> None:
-        """Bind one FL configuration, dataset fingerprint, and generation device to a scratch dir.
+        """Bind one FL configuration, dataset fingerprint, and generation device.
 
         `dataset_revision` is an explicit, caller-supplied fingerprint for the local dataset
         `cfg.data_folder` points at - a folder path alone is not data identity, and this is
@@ -117,8 +92,7 @@ class Trace:
         """
         assert cfg.protocol == "identity", f"Trace config protocol must be identity, got {cfg.protocol!r}."
         assert cfg.num_loader_workers == 0, (
-            f"Trace supports only num_loader_workers=0 (no process-local worker state to "
-            f"checkpoint); got {cfg.num_loader_workers}."
+            f"Trace supports only num_loader_workers=0; got {cfg.num_loader_workers}."
         )
         assert cfg.num_classes is not None, (
             "Trace needs an explicit num_classes in its FL config: it is part of trace identity, "
@@ -130,7 +104,6 @@ class Trace:
             assert device.index < torch.cuda.device_count(), (
                 f"Requested {device} but only {torch.cuda.device_count()} CUDA device(s) are visible."
             )
-        self.checkpoint_dir = checkpoint_dir
         self.cfg = cfg
         self.dataset_revision = dataset_revision
         self.device = device
@@ -144,30 +117,26 @@ class Trace:
             "device": self._device_signature(self.device),
         }
 
-    def checkpoint_path(self, round_id: int) -> Path:
-        """Return the path of the continuation state at the start of `round_id`."""
-        return self.checkpoint_dir / f"round_{round_id}.pt"
-
     def stream(
-        self, first_round: int, last_round: int, *, checkpoint_rounds: Iterable[int] = (),
+        self, first_round: int, last_round: int,
+        checkpoint: CacheEntry[dict[str, Any]] | None = None, save_round: int | None = None,
     ) -> Iterator[tuple[int, tuple[torch.Tensor, ...]]]:
         """Yield `(round_id, per-client deltas)` for `first_round..last_round` inclusive.
 
-        Resumes from the newest checkpoint at or before `first_round`; any round between that
-        checkpoint and `first_round` is retrained but not yielded, because aggregation makes the
-        trajectory sequential. `checkpoint_rounds` name rounds whose *initial* server state is
-        saved as it is passed, so a later stream can start there instead of replaying to it.
+        Earlier rounds are retrained but not yielded because aggregation makes the trajectory
+        sequential. Training resumes from `checkpoint` when it holds a state at or before
+        `first_round`, and `checkpoint` is overwritten with the state at the start of `save_round`.
+        The caller keys `checkpoint` on `identity()`, the only thing a stored state must match.
         """
         assert 0 <= first_round <= last_round, f"Invalid trace round range {first_round}..{last_round}."
-        boundaries = set(checkpoint_rounds)
-        assert all(round_id > 0 for round_id in boundaries), (
-            "checkpoint_rounds identify positive rounds whose initial server state is cached.")
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        start_round = max((round_id for round_id in self._saved_rounds() if round_id <= first_round), default=0)
-        yield from self._run(start_round, first_round, last_round, boundaries)
+        assert save_round is None or (checkpoint is not None and first_round <= save_round <= last_round + 1), (
+            f"save_round={save_round} must lie within first_round={first_round} and "
+            f"last_round + 1={last_round + 1}, with a checkpoint to save into.")
+        yield from self._run(first_round, last_round, checkpoint, save_round)
 
     def _run(
-        self, start_round: int, first_round: int, final_round: int, checkpoint_rounds: set[int],
+        self, first_round: int, final_round: int,
+        checkpoint: CacheEntry[dict[str, Any]] | None, save_round: int | None,
     ) -> Iterator[tuple[int, tuple[torch.Tensor, ...]]]:
         # Setup has to finish before the first yield: a `_seeded` scope may not span one, or the
         # consumer's own seeding would run inside this trace's forked RNG state and leak into the
@@ -194,21 +163,21 @@ class Trace:
                 lr=self.cfg.server_lr, momentum=self.cfg.server_momentum,
                 nesterov=self.cfg.server_nesterov,
             )
-            if start_round > 0:
-                checkpoint = self.checkpoint_path(start_round)
-                state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-                assert state["round"] == start_round, f"Invalid checkpoint round in {checkpoint}."
+            assert all(loader.generator is not None for loader in loaders)
+            start_round = 0
+            state = checkpoint.load() if checkpoint is not None and checkpoint.path.exists() else None
+            if state is not None and state["round"] <= first_round:
+                start_round = state["round"]
                 manager.load_trainable_state(model, manager.unflatten(state["server"]))
                 buffers = state["buffers"]
+                # Optimizers move their loaded state onto their parameters' device themselves.
                 for optimizer, saved in zip(optimizers, state["client_optimizers"], strict=True):
-                    _restore_optimizer_state(optimizer, saved, self.device)
+                    optimizer.load_state_dict(saved)
                 for scaler, saved in zip(scalers, state["scalers"], strict=True):
                     scaler.load_state_dict(saved)
                 for loader, saved in zip(loaders, state["loaders"], strict=True):
-                    assert loader.generator is not None
                     loader.generator.set_state(saved)
-                _restore_optimizer_state(server_opt, state["server_optimizer"], self.device)
-
+                server_opt.load_state_dict(state["server_optimizer"])
         for round_id in range(start_round, final_round + 1):
             server = manager.clone_trainable(model.state_dict())
             deltas: list[torch.Tensor] = []
@@ -233,38 +202,18 @@ class Trace:
                 model, [manager.unflatten(delta) for delta in deltas],
                 [len(loader.dataset) for loader in loaders], manager, server_opt,
             )
-            if round_id + 1 in checkpoint_rounds and not self.checkpoint_path(round_id + 1).exists():
-                self._save_checkpoint(round_id + 1, model, manager, buffers, optimizers,
-                                      scalers, loaders, server_opt)
+            if round_id + 1 == save_round:
+                cast(CacheEntry, checkpoint).save({
+                    "round": save_round,
+                    "server": manager.flatten(model.state_dict()),
+                    "buffers": buffers,
+                    "client_optimizers": [optimizer.state_dict() for optimizer in optimizers],
+                    "scalers": [scaler.state_dict() for scaler in scalers],
+                    "loaders": [loader.generator.get_state() for loader in loaders],
+                    "server_optimizer": server_opt.state_dict(),
+                })
             if round_id >= first_round:
                 yield round_id, tuple(deltas)
-
-    def _save_checkpoint(
-        self, round_id: int, model: FLModelTemplate, manager: StateDictManager,
-        buffers: list[dict[str, torch.Tensor]], optimizers: list[torch.optim.Optimizer],
-        scalers: list[torch.amp.GradScaler], loaders: list[DataLoader],
-        server_optimizer: torch.optim.Optimizer,
-    ) -> None:
-        assert all(loader.generator is not None for loader in loaders)
-        path = self.checkpoint_path(round_id)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        torch.save({
-            "round": round_id,
-            "server": manager.flatten(model.state_dict()),
-            "buffers": buffers,
-            "client_optimizers": [optimizer.state_dict() for optimizer in optimizers],
-            "scalers": [scaler.state_dict() for scaler in scalers],
-            "loaders": [cast(torch.Generator, loader.generator).get_state() for loader in loaders],
-            "server_optimizer": server_optimizer.state_dict(),
-        }, temporary)
-        temporary.replace(path)
-
-    def _saved_rounds(self) -> list[int]:
-        return [
-            int(match.group(1))
-            for path in self.checkpoint_dir.glob("round_*.pt")
-            if (match := re.fullmatch(r"round_(\d+)\.pt", path.name))
-        ]
 
     @staticmethod
     def _device_signature(device: torch.device) -> dict[str, Any]:

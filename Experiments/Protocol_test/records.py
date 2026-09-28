@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from FL_code.FL_core.cache import content_hash
+from FL_code.FL_core.explicit_cache import content_hash
 from FL_code.FL_core.utils import parse_configurable_name
 
 _ROW_COLUMNS = ("round_id", "client_id", "round_name_full")
@@ -155,5 +155,5 @@ def _enrich(
     case_records.insert(0, "initial_si", case_metadata["initial_si"])
     case_records.insert(0, "case_id", case_dir.name)
     case_records.insert(0, "codec_id", case_dir.parent.name)
-    case_records["trace_identity_digest"] = content_hash((identity["trace"],), {})[:16]
+    case_records["trace_identity_digest"] = content_hash(identity["trace"])[:16]
     return case_records

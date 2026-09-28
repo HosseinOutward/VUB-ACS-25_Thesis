@@ -17,9 +17,11 @@ report the separately trained server-SI comparison.
 
 ## Flow
 
-1. **Trace.** `Trace` (`FL_code/FL_core/trace.py`) generates or resumes the raw, uncompressed
-   client deltas for every round any case needs, on one explicitly selected device. Generation
-   happens once per run, before any case executes.
+1. **Trace.** `Trace` (`FL_code/FL_core/trace.py`) regenerates the raw, uncompressed client deltas
+   for every round a case needs, on one explicitly selected device. Cases run in order of their
+   first trace round, and each leaves one continuation state (`_/data/trace_states/<trace identity>.pt`,
+   overwritten in place) where the next case begins, so that case resumes instead of retraining
+   from round zero. A state later than a case's first round is ignored.
 2. **Cases.** `sparse_replay.py` seeds each case's preceding raw history, then replays its window:
    every selected client's decoded reconstruction advances decoder-visible history in normal
    server order, while unselected clients advance it with raw deltas. Records land under
@@ -90,8 +92,8 @@ These plans train real 30-client quantizers and are not smoke tests.
 .venv/bin/python -m pytest -q Experiments/Protocol_test/test_records.py Experiments/Protocol_test/test_rd_metrics.py FL_code/cancer_protocol/test_round_prior_integration.py FL_code/cancer_protocol/test_warm_training.py
 ```
 
-A repeated `sparse_replay` invocation reuses every completed case (identity match) without
-recompression. Quantizer and conditional-prior training are deliberately uncached. An interrupted
+A repeated `sparse_replay` invocation reuses every completed named case artifact after an identity
+match, without recompression. Quantizer and conditional-prior training always run. An interrupted
 case is recovered only when its pre-run identity matches and its full CSV validates; other partial
 output requires inspection or a new output directory. Seeded reruns reproduce trained weights,
 symbols, rates, and WMAPE exactly, but
@@ -111,8 +113,8 @@ parts:
   case and the differing top-level keys - it never silently retrains or overwrites.
 - **`provenance`**: git `HEAD`, a fingerprint (and file list) of relevant uncommitted source under
   `FL_code/` and `Experiments/Protocol_test/`, torch/CUDA versions, the GPU names actually used,
-  the plan path, output root, `gpu_ids`, the explicit disabled model-training-cache policy, and the
-  original plan JSON. This half is never compared for reuse: changing `gpu_ids` or output location
+  the plan path, output root, `gpu_ids`, and the original plan JSON. This half is never compared
+  for reuse: changing `gpu_ids` or output location
   does not alter codec semantics.
 
 Each case also writes a small atomic `pre_run_identity.json` before replay starts. If a replay is

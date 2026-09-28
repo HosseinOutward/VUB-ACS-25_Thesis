@@ -32,7 +32,6 @@ from heapq import heappop, heappush
 from math import ceil, log2
 from multiprocessing import get_context
 import os
-from pathlib import Path
 import struct
 from time import perf_counter
 from typing import Literal, Protocol, Self
@@ -62,7 +61,7 @@ PAYLOAD_HEADER = struct.Struct(">Q8s")
 # Sentinel load for check rows this variable already uses; larger than any reachable degree sum.
 _MASKED_LOAD = np.iinfo(np.int64).max
 # Parity matrices are ~160 KB each and a rate search touches a new one per probe, so the
-# in-process cache is bounded and the (optional) on-disk cache carries reuse across runs.
+# process-local cache is bounded.
 MATRIX_MEMORY_CACHE_SIZE = 256
 # Below this block length a matrix builds in milliseconds and forking costs more than it saves.
 PARALLEL_BUILD_MIN_BLOCK_LENGTH = 512
@@ -144,7 +143,6 @@ class SWCoderConfig(BaseModel):
     # propagation pass per rung.  At the default block length a step is 1% of the rate.
     ladder_step: int = Field(default=24, ge=1)
     matrix_backend: MatrixBackend = MATRIX_BACKEND
-    matrix_cache_dir: Path | None = None
 
     @model_validator(mode="after")
     def validate_degree_distribution(self) -> Self:
@@ -771,35 +769,6 @@ def _mother_matrix(
     return edge_variable, edge_check, rng.permutation(block_length)
 
 
-def _matrix_cache_path(cache_dir: Path, key: MatrixKey | MotherKey) -> Path:
-    return cache_dir / f"{sha256(repr(key).encode()).hexdigest()[:32]}.npz"
-
-
-def _load_cached_matrix(
-    cache_dir: Path, key: MatrixKey | MotherKey, names: tuple[str, ...] = ("variable", "check")
-) -> tuple[np.ndarray, ...] | None:
-    path = _matrix_cache_path(cache_dir, key)
-    if not path.exists():
-        return None
-    with np.load(path) as stored:
-        return tuple(stored[name] for name in names)
-
-
-def _store_cached_matrix(
-    cache_dir: Path,
-    key: MatrixKey | MotherKey,
-    structure: tuple[np.ndarray, ...],
-    names: tuple[str, ...] = ("variable", "check"),
-) -> None:
-    """Publish a built matrix atomically so a killed run can never leave a half-written entry."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    path = _matrix_cache_path(cache_dir, key)
-    partial = path.with_name(f"{path.name}.{os.getpid()}.partial")
-    with partial.open("wb") as handle:
-        np.savez(handle, **dict(zip(names, structure, strict=True)))
-    partial.replace(path)
-
-
 def _bp_decode(
     llr: torch.Tensor, syndrome: torch.Tensor, edge_variable: torch.Tensor, edge_check: torch.Tensor, cfg: SWCoderConfig
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -966,16 +935,15 @@ class SlepianWolfCodec:
     """Fixed-rate encoder and decoder owning the parity matrices its plans need.
 
     Matrix construction, not belief propagation, dominates coding time, so one codec should be
-    shared by everything that touches the same plans: its caches are what make a rate search,
-    an encode/decode round trip, and a rerun cheap.
+    shared by everything that touches the same plans; resident matrices make a rate search and
+    encode/decode round trip cheap.
     """
 
     def __init__(self, cfg: SWCoderConfig | None = None) -> None:
         self.cfg = cfg or SWCoderConfig()
         self._matrices: OrderedDict[MatrixKey, tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._edge_tensors: dict[MatrixKey, tuple[torch.Tensor, torch.Tensor]] = {}
-        # One mother per plane, not per rate: merging it down to a level costs milliseconds, so
-        # this cache is what makes an LDPCA rate search essentially free.
+        # One resident mother per plane, not per rate: merging it down to a level costs milliseconds.
         self._mothers: dict[MotherKey, tuple[np.ndarray, ...]] = {}
 
     def initial_plan(self, num_stages: int, alphabet: int) -> SWRatePlan:
@@ -1012,12 +980,6 @@ class SlepianWolfCodec:
             planes = self._coded_planes(plan)
             self._edge_tensors = {key: value for key, value in self._edge_tensors.items() if key in planes}
         missing = {key: spec for key, spec in planes.items() if key not in self._matrices}
-        if self.cfg.matrix_cache_dir is not None:
-            for key in list(missing):
-                stored = _load_cached_matrix(self.cfg.matrix_cache_dir, key)
-                if stored is not None:
-                    self._remember(key, stored)
-                    del missing[key]
         if not missing:
             return
         if plan.matrix_backend == LDPCA_BACKEND:
@@ -1043,8 +1005,6 @@ class SlepianWolfCodec:
                 built = list(pool.map(_parity_matrix, *zip(*arguments, strict=True)))
         for key, structure in zip(missing, built, strict=True):
             self._remember(key, structure)
-            if self.cfg.matrix_cache_dir is not None:
-                _store_cached_matrix(self.cfg.matrix_cache_dir, key, structure)
 
     def _remember(self, key: MatrixKey, structure: tuple[np.ndarray, np.ndarray]) -> None:
         self._matrices[key] = structure
@@ -1058,17 +1018,12 @@ class SlepianWolfCodec:
             plan.matrix_backend, plan.block_length, plan.code_seed,
             plan.degree_distribution, plan.girth_candidates, stage, bit,
         )
-        names = ("variable", "check", "order")
         cached = self._mothers.get(key)
-        if cached is None and self.cfg.matrix_cache_dir is not None:
-            cached = _load_cached_matrix(self.cfg.matrix_cache_dir, key, names)
         if cached is None:
             cached = _mother_matrix(
                 plan.block_length, plan.code_seed, stage, bit,
                 plan.degree_distribution, plan.girth_candidates,
             )
-            if self.cfg.matrix_cache_dir is not None:
-                _store_cached_matrix(self.cfg.matrix_cache_dir, key, cached, names)
         self._mothers[key] = cached
         return cached
 

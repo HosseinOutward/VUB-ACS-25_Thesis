@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 
 from FL_code.run_fl import FLConfig
-from .cache import cache_call, client_update_hash
 from .models import FLModelTemplate
 from .utils import (
     EVAL_METRIC_KEYS,
     StateDictManager,
     evaluate,
     format_metrics,
-    recalibrate_batchnorm,
     set_global_seed,
     setup_fl_worker,
 )
@@ -30,7 +26,7 @@ def train_client_update(
     round_id: int,
     client_id: int,
 ) -> torch.Tensor:
-    """Train one local round and return its flattened update for optional persistence."""
+    """Train one local round and return its flattened update."""
     pre_train_state = sd_manager.clone_trainable(model.state_dict())
     for _ in range(cfg.local_epochs):
         model.train_epoch(train_loader, optimizer, scaler)
@@ -63,10 +59,6 @@ def run_federated_client(
 
     optimizer = model.configure_optimizer()
     scaler = torch.amp.GradScaler("cuda", enabled=cfg.mixed_precision)
-    client_update_cache_dir: Path | None = None
-    if cfg.debug_save_train_data or cfg.debug_load_from_saved_data:
-        client_update_cache_dir = cfg.debug_data_folder / cfg.debug_save_deltas
-
     # Reused receive buffers; dist.broadcast overwrites them in place each round.
     round_signal = torch.zeros(1, dtype=torch.long)
     vec_srvr_sd = torch.zeros(sd_manager.param_count, dtype=torch.float32, device='cpu')
@@ -97,27 +89,9 @@ def run_federated_client(
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
         pre_train_state = sd_manager.clone_trainable(model.state_dict())
 
-        delta_vec = cache_call(
-            train_client_update,
-            client_update_cache_dir,
-            client_update_hash,
-            cfg.debug_save_train_data,
-            model=model,
-            train_loader=train_loader,
-            optimizer=optimizer,
-            scaler=scaler,
-            sd_manager=sd_manager,
-            cfg=cfg,
-            round_id=curr_rnd_i,
-            client_id=client_id,
+        delta_vec = train_client_update(
+            model, train_loader, optimizer, scaler, sd_manager, cfg, curr_rnd_i, client_id,
         )
-
-        # A miss trains `model`, while a hit does not; rebuilding from the returned
-        # update gives both paths the same post-training model state.
-        sd_manager.load_trainable_state(model, pre_train_state)
-        sd_manager.apply_delta_inplace(model, sd_manager.unflatten(delta_vec))
-        if cfg.debug_load_from_saved_data and cfg.recalibrate_bn:
-            recalibrate_batchnorm(model, train_loader, cfg.bn_recalib_batches)
 
         post_train_state = sd_manager.clone_trainable(model.state_dict())
 

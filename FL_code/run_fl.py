@@ -15,7 +15,7 @@ from torch.multiprocessing.spawn import start_processes
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from FL_code.FL_core.codec import DEFAULT_PROTOCOL_CACHE_DIR, parse_and_validate_protocol
+from FL_code.FL_core.codec import parse_and_validate_protocol
 
 
 class FLConfig(BaseModel):
@@ -106,18 +106,9 @@ class FLConfig(BaseModel):
     master_addr: str = Field("localhost", description="Distributed-process master address.")
     master_port: str = Field("29500", description="Distributed-process master port.")
 
-    protocol_cache_dir: Path | None = Field(
-        DEFAULT_PROTOCOL_CACHE_DIR,
-        description="Separate cache directory for learned protocol models.",
-    )
-    protocol_cache_overwrite: bool = Field(False, description="Retrain compatible cached protocol models.")
-
-    debug_save_train_data: bool = Field(False, description="Save client updates for later replay.")
     debug_data_folder: Path = Field(Path("_/data/federated_learning"), description="Debug data directory.")
-    debug_save_deltas: str = Field("client_deltas", description="Subdirectory for saved client deltas.")
     debug_save_recons: str | None = Field(None, description="Subdirectory for saved reconstructions.")
     debug_save_recons_rounds: int | None = Field(None, description="Optional reconstruction-save round limit.")
-    debug_load_from_saved_data: bool = Field(False, description="Reuse saved client updates when available.")
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Prevent changing the configured protocol after configuration creation."""
@@ -135,11 +126,6 @@ class FLConfig(BaseModel):
             object.__setattr__(self, "local_epochs", 1)
             if self.dataset_fraction is None:
                 object.__setattr__(self, "dataset_fraction", 0.1)
-        assert not (
-            self.debug_save_train_data and self.debug_load_from_saved_data
-        ), "debug_save_train_data and debug_load_from_saved_data cannot both be enabled."
-        assert self.protocol_cache_dir is not None or not self.protocol_cache_overwrite, (
-            "protocol_cache_overwrite requires protocol_cache_dir.")
         assert self.dataset_fraction is None or 0.0 < self.dataset_fraction < 1.0, (
             "dataset_fraction must be None or a value in (0.0, 1.0).")
         assert self.client_eval_every_n_rounds > 0, "client_eval_every_n_rounds must be positive."
