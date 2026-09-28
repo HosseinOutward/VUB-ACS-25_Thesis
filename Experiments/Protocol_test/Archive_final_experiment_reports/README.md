@@ -4,6 +4,14 @@ One folder per investigation. Each folder has its own `README.md` indexing its p
 
 Naming: `YYYY-MM_topic/`.
 
+### 2026-09 — Warm-start retraining studies
+`2026-09_warm_start_retraining/`
+
+Archive of the synthetic shifted-side-information study and the SVHN/ResNet-18
+gradient warm-start development studies. Includes source/configuration, compact
+reports and per-repeat evidence; excludes traces, checkpoints, caches, logs, and
+abandoned run versions.
+
 ---
 
 ### 2026-09 — Sparse initial side information

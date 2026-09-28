@@ -1,0 +1,25 @@
+{
+  "repeat": 9,
+  "finished": "2026-09-24T14:13:16.984242+02:00",
+  "conditions_completed": [
+    "scratch120",
+    "scratch30",
+    "warm30_lr0p03_tau0p1",
+    "warm30_lr0p03_tau0p5",
+    "warm30_lr0p03_tau1",
+    "warm30_lr0p03_tau5p5",
+    "warm30_lr0p1_tau0p1",
+    "warm30_lr0p1_tau0p5",
+    "warm30_lr0p1_tau1",
+    "warm30_lr0p1_tau5p5",
+    "warm30_lr0p3_tau0p1",
+    "warm30_lr0p3_tau0p5",
+    "warm30_lr0p3_tau1",
+    "warm30_lr0p3_tau5p5",
+    "warm30_lr1_tau0p1",
+    "warm30_lr1_tau0p5",
+    "warm30_lr1_tau1",
+    "warm30_lr1_tau5p5"
+  ],
+  "failures": 0
+}

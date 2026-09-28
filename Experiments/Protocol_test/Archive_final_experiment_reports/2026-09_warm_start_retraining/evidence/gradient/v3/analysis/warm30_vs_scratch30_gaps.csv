@@ -1,0 +1,13 @@
+condition,reference,repeat,metric,status,rate_gap_bits,rate_gap_percent,distortion_gap_db,distortion_gap_percent
+warm30,scratch30,0,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,1,mean_interpolated_equal_distortion_gap,ok,-0.01485301258870811,-3.9495768404032394,-0.1682803107090339,-1.9187517224002915
+warm30,scratch30,2,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,3,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,4,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,2.725132573487607,36.853726819554744
+warm30,scratch30,5,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,-0.44524552679959517,-4.996911618455647
+warm30,scratch30,6,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,7,mean_interpolated_equal_distortion_gap,ok,0.002392257135469559,0.6587165132411862,0.034602362633265514,0.39916898757390573
+warm30,scratch30,8,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,9,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,10,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan
+warm30,scratch30,11,mean_interpolated_equal_distortion_gap,rejected_no_distortion_overlap,nan,nan,nan,nan

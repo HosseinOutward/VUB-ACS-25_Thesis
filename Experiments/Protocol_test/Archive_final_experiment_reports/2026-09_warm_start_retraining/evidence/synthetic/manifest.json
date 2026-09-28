@@ -1,0 +1,107 @@
+{
+  "config": {
+    "name": "brent_warm_start_shift_0p1_r12",
+    "repeats": 12,
+    "data_size": 2000000,
+    "noise_power": 0.01,
+    "si_shift": 0.1,
+    "train_round_id": 1,
+    "client_id": 0,
+    "codec": "O",
+    "architectures": [
+      {
+        "bins_per_plane": 2,
+        "num_planes": 3,
+        "reconst_ld": 120.0
+      },
+      {
+        "bins_per_plane": 4,
+        "num_planes": 2,
+        "reconst_ld": 160.0
+      }
+    ],
+    "training": {
+      "train_epochs": 180,
+      "train_sample_size": 200000,
+      "train_batch_size": 1000,
+      "lr": 0.003,
+      "lr_step": 40,
+      "tau": 1.0,
+      "training_progress_bar": false,
+      "training_log_every_epochs": 5,
+      "quantizer_train_repeats": 1,
+      "shared_heads": true,
+      "prior_context": "hard",
+      "prior_probabilities": "categorical",
+      "fused_optimizer": true,
+      "hidden_dim": 100,
+      "layers": 3
+    },
+    "variants": [
+      {
+        "name": "scratch",
+        "warm_start": false,
+        "lr": 0.003,
+        "tau": 1.0
+      },
+      {
+        "name": "warm_naive",
+        "warm_start": true,
+        "lr": 0.003,
+        "tau": 1.0
+      },
+      {
+        "name": "warm_lr10",
+        "warm_start": true,
+        "lr": 0.0003,
+        "tau": 1.0
+      },
+      {
+        "name": "warm_tau10",
+        "warm_start": true,
+        "lr": 0.003,
+        "tau": 0.1
+      },
+      {
+        "name": "warm_lr10_tau10",
+        "warm_start": true,
+        "lr": 0.0003,
+        "tau": 0.1
+      }
+    ],
+    "bad_convergence_rate_gap_bits": 0.05,
+    "gpu_ids": [
+      0,
+      1
+    ],
+    "max_parallel_cases": 2,
+    "output_root": "results/full_run"
+  },
+  "provenance": {
+    "git_head": "1f6f900f8b5cfb06217d5a817d45dca1ebf75dc1",
+    "dirty_source_fingerprint": "a1f4242d7fd50e34d984297b222fae4ff0b4795d89ada11a175fda07877046fb",
+    "dirty_source_paths": [
+      "FL_code/cancer_protocol/bin_coder/coded_rounds.py",
+      "FL_code/cancer_protocol/bin_coder/staged_transport.py",
+      "Experiments/warm_start_retraining/README.md",
+      "Experiments/warm_start_retraining/__init__.py",
+      "Experiments/warm_start_retraining/analyze.py",
+      "Experiments/warm_start_retraining/config.json",
+      "Experiments/warm_start_retraining/experiment.py",
+      "Experiments/warm_start_retraining/live_plot.py",
+      "Experiments/warm_start_retraining/results/full_run/analysis/rd_gaps.csv",
+      "Experiments/warm_start_retraining/results/full_run/analysis/report.md",
+      "Experiments/warm_start_retraining/results/full_run/analysis/summary.csv",
+      "Experiments/warm_start_retraining/results/full_run_control/health_checks.jsonl",
+      "Experiments/warm_start_retraining/results/full_run_control/launch.json",
+      "Experiments/warm_start_retraining/results/full_run_control/plot_refresh.log",
+      "Experiments/warm_start_retraining/results/full_run_control/runner.log",
+      "Experiments/warm_start_retraining/results/full_run_control/supervisor.json",
+      "Experiments/warm_start_retraining/settings_verification.md",
+      "Experiments/warm_start_retraining/supervisor.py"
+    ],
+    "torch_version": "2.5.1+cu121",
+    "cuda_version": "12.1"
+  },
+  "started": "2026-09-23T18:06:23.381756+02:00"
+}

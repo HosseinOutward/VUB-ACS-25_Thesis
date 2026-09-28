@@ -1,0 +1,6 @@
+{
+  "study": "reduced_epoch_gradient_warm_start",
+  "historical_parent_quantizer_train_repeats": 2,
+  "round_22_candidate_quantizer_train_repeats": 1,
+  "note": "The round-12 production parent used two candidates; all round-22 scratch and warm candidates used one."
+}

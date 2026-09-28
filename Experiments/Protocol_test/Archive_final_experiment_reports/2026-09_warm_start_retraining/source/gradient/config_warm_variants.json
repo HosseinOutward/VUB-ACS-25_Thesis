@@ -1,0 +1,23 @@
+{
+  "name": "svhn_r12_r22_warm_variants30_seed42069_v4",
+  "trace_seed": 42069,
+  "training_repeats": 12,
+  "parent_round": 12,
+  "evaluation_round": 22,
+  "history_rounds": 2,
+  "num_clients": 5,
+  "target_client": 0,
+  "bins_per_plane": 2,
+  "num_planes": 3,
+  "parent_epochs": 120,
+  "reduced_epochs": 30,
+  "rans_lanes": 2048,
+  "bad_convergence_rate_gap_bits": 0.05,
+  "warm_lr_multipliers": [1.0, 0.3, 0.1, 0.03],
+  "warm_initial_taus": [5.5, 1.0, 0.5, 0.1],
+  "gpu_ids": [0, 1],
+  "max_parallel_cases": 2,
+  "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+  "fl_config": "fl_config.json",
+  "output_root": "results/full_run_v4"
+}

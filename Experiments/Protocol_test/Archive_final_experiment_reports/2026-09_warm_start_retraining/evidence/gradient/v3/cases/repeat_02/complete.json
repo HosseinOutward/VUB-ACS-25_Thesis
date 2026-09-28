@@ -1,0 +1,10 @@
+{
+  "repeat": 2,
+  "finished": "2026-09-24T05:08:10.506414+02:00",
+  "conditions_completed": [
+    "scratch120",
+    "scratch30",
+    "warm30"
+  ],
+  "failures": 0
+}
