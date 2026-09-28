@@ -51,9 +51,7 @@ QUANTIZER_SETTINGS = (  # (bins_per_plane, num_planes, reconst_ld)
 )
 EXPERIMENT_CONFIGS = tuple(ExperimentConfig(*setting) for setting in QUANTIZER_SETTINGS)
 RATE_TYPES = {
-    "training_prior_rate": "Jointly trained prior rate",
-    "prior_rate": "Retrained prior rate",
-    "marginal_rate": "Empirical marginal rate",
+    "quantizer_prior_rate": "Jointly trained quantizer-prior rate",
 }
 
 
@@ -187,16 +185,14 @@ def run_single_experiment(
 
     results: list[dict[str, Any]] = []
     for phase, record in zip(("training", "frozen"), protocol_records, strict=True):
-        stage_fields = {
-            field: list(itertools.accumulate(parse_stage_rates(record, field, config.num_planes)))
-            for field in (
-                "training_prior_stage_rates",
-                "prior_stage_rates",
-                "marginal_stage_rates",
-            )
-        }
+        quantizer_prior_rates = list(itertools.accumulate(parse_stage_rates(
+            record, "quantizer_prior_stage_rates", config.num_planes)))
+        native_prior_field = (
+            "temporal_si_prior_rate" if codec_name == "T" else "server_si_prior_rate")
+        native_prior_rate = float(record[native_prior_field])
+        marginal_rate = float(record["marginal_rate"])
         for stage, mse in enumerate(parse_stage_rates(record, "stage_mses", config.num_planes)):
-            training_prior_rate = stage_fields["training_prior_stage_rates"][stage]
+            quantizer_prior_rate = quantizer_prior_rates[stage]
             results.append({
                 "trial_number": trial_idx,
                 "codec": codec_name,
@@ -210,12 +206,12 @@ def run_single_experiment(
                 "data_size": DATA_SIZE,
                 "noise_power": NOISE_POWER,
                 "side_info_count": 1,
-                "training_prior_rate": training_prior_rate,
-                "prior_rate": stage_fields["prior_stage_rates"][stage],
-                "marginal_rate": stage_fields["marginal_stage_rates"][stage],
+                "quantizer_prior_rate": quantizer_prior_rate,
+                "native_si_prior_rate": native_prior_rate,
+                "marginal_rate": marginal_rate,
                 "mse": mse,
-                "training_prior_wz_gap_db": 10 * np.log10(
-                    mse / (NOISE_POWER * 2 ** (-2 * training_prior_rate))
+                "quantizer_prior_wz_gap_db": 10 * np.log10(
+                    mse / (NOISE_POWER * 2 ** (-2 * quantizer_prior_rate))
                 ),
                 "run_label": run_label,
             })
@@ -248,9 +244,10 @@ def run_experiments(
             print(
                 f"[{current_run}/{len(cases)}] phase={result['phase']} | "
                 f"stage={result['num_planes']} | MSE={result['mse']:.6f} | "
-                f"Training prior={result['training_prior_rate']:.3f} | "
-                f"WZ gap={result['training_prior_wz_gap_db']:.2f} dB | "
-                f"Retrained={result['prior_rate']:.3f} | Marginal={result['marginal_rate']:.3f}"
+                f"Quantizer prior={result['quantizer_prior_rate']:.3f} | "
+                f"WZ gap={result['quantizer_prior_wz_gap_db']:.2f} dB | "
+                f"Native SI prior={result['native_si_prior_rate']:.3f} | "
+                f"Marginal={result['marginal_rate']:.3f}"
             )
             append_to_csv(csv_path, result)
         plot_path = plot_rate_comparison(csv_path)
@@ -263,7 +260,7 @@ def plot_rate_comparison(csv_path: Path) -> Path:
     """Plot training and held-out protocol rounds for every selected codec and architecture."""
     numeric_fields = {
         "trial_number", "round_id", "bins_per_plane", "num_planes", "model_num_planes",
-        "reconst_ld", "mse", *RATE_TYPES,
+        "reconst_ld", "mse", "native_si_prior_rate", "marginal_rate", *RATE_TYPES,
     }
     with csv_path.open(newline="") as file:
         records = [
@@ -277,8 +274,8 @@ def plot_rate_comparison(csv_path: Path) -> Path:
     colors = plt.get_cmap("tab10").colors
     multiple_run_labels = len({record["run_label"] for record in records}) > 1
 
-    figure, axes_array = plt.subplots(1, 3, figsize=(18, 5.5))
-    axes = tuple(axes_array.flatten())
+    figure, axes_array = plt.subplots(1, len(RATE_TYPES), figsize=(6 * len(RATE_TYPES), 5.5))
+    axes = tuple(np.atleast_1d(axes_array).flatten())
     minimum_mse = min(cast(float, record["mse"]) for record in records) / 10**0.2
     mse_range = np.geomspace(min(minimum_mse, NOISE_POWER * 0.1), NOISE_POWER, 500)
     bounds = 10 * np.log10(mse_range)

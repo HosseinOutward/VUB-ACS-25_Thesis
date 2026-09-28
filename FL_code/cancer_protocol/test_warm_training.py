@@ -180,8 +180,9 @@ def test_first_five_completed_training_calls_populate_one_shared_pool() -> None:
     protocol = WarmWZCancerProtocol()
     calls = ((0, 5), (1, 5), (0, 10), (2, 10), (1, 15))
     for expected_size, (client_id, round_id) in enumerate(calls, start=1):
-        codec = _codec(T_RoundCodec, warm_training=False)
-        codec.quantizer.training_prior_stage_rates = (0.0, 0.0)
+        codec = _codec(Oracle_RoundCodec, warm_training=False)
+        codec.quantizer.quantizer_prior_stage_rates = (0.0, 0.0)
+        codec.joint_quantizer_state = codec.quantizer.coding_model.state_dict()
         protocol.after_decode(
             torch.zeros(8, dtype=torch.float32), codec.create_r_record(round_id, client_id), codec)
         assert len(protocol.quantizer_pool) == expected_size
@@ -202,6 +203,29 @@ def test_warm_parent_rotation_is_balanced() -> None:
 
     assert selections == [(0, 1), (2, 3), (4, 0), (1, 2), (3, 4)]
     assert [sum(slot in selection for selection in selections) for slot in range(5)] == [2] * 5
+
+
+def test_t_server_si_prior_uses_the_quantizer_parent_slots() -> None:
+    """The T-only server-SI-prior pool follows the quantizer's static lineage selection."""
+    protocol = WarmWZCancerProtocol()
+    _populate_pool(protocol)
+    protocol.server_si_prior_pool = [
+        {"marker": torch.tensor(float(slot))} for slot in range(protocol.pool_size)
+    ]
+    codec = _codec(T_RoundCodec, warm_training=True)
+
+    protocol.quantizer_initial_states(codec, 0, si_size=1)
+    plan = protocol.server_si_prior_training_plan(codec)
+
+    assert codec.warm_parent_slots == plan.parent_slots == (0, 1)
+    assert plan.attempts_per_parent == protocol.warm_retrain_repeats
+    assert [float(state["marker"]) for state in plan.initial_states] == [0.0, 1.0]
+
+
+def test_frozen_prior_refitting_is_opt_in() -> None:
+    """Frozen codecs reuse fitted priors unless the protocol explicitly enables adaptation."""
+    assert WZCancerProtocol().refit_priors_on_frozen is False
+    assert WZCancerProtocol({"refit_priors_on_frozen": True}).refit_priors_on_frozen is True
 
 
 def test_warm_training_keeps_one_winner_per_parent_and_deploys_the_best(
@@ -249,7 +273,7 @@ def test_completed_warm_round_replaces_only_selected_pool_slots() -> None:
     """Pool mutation occurs after decode and preserves both unselected lineages."""
     protocol = WarmWZCancerProtocol()
     _populate_pool(protocol)
-    codec = _codec(T_RoundCodec, warm_training=True)
+    codec = _codec(Oracle_RoundCodec, warm_training=True)
     protocol.quantizer_initial_states(codec, 0, si_size=1)
     replacements = tuple({
         name: tensor.detach().clone() + 10
@@ -284,7 +308,7 @@ def test_cache_results_restore_legacy_cold_and_complete_warm_payloads(
     cold_state = {name: value.detach().clone() for name, value in cold.coding_model.state_dict().items()}
     monkeypatch.setattr(wz_quantizer_module, "cache_call", lambda *args, **kwargs: (cold_state, (0.4, 0.5)))
     cold.train_model(target, side_information)
-    assert cold.training_prior_stage_rates == (0.4, 0.5)
+    assert cold.quantizer_prior_stage_rates == (0.4, 0.5)
     assert cold.warm_retrained_states == ()
 
     warm = WZQuantizerCancer(

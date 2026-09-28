@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from FL_code.FL_core.codec import record_reconstruction_metrics
+from FL_code.FL_core.codec import Access, record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
 from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import (
     OracleSWPayload,
@@ -84,10 +84,10 @@ class QuantizerSWResult:
 
 
 class _SkipReferencePrior:
-    """Avoid training the experiment's separate diagnostic prior a second time."""
+    """Keep the shared trained quantizer fixed across all benchmark transport paths."""
 
-    def add_prior_to_record(self, *args: Any, **kwargs: Any) -> None:
-        """Leave reference-prior fields empty; the shared quantizer prior is measured directly."""
+    _fine_tune_native_prior = False
+    transport_prior_access = Access.SERVER_ONLY
 
 
 class _BaselineCheckCodec(_SkipReferencePrior, Oracle_RoundCodec):

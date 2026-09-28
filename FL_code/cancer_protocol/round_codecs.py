@@ -19,7 +19,7 @@ from FL_code.FL_core.utils import compress_data_list, decompress_data_list
 
 from .brent_wz_models import EncoderDecoderLayeredRNN
 from .history import HistoryVector, ReconstructionHistory
-from .prior_code import PriorCalculator
+from .prior_code import PriorCalculator, PriorTrainingResult
 from .wz_quantizer import (
     DedupedWZQuantizerCancer,
     PreprocessMetadata,
@@ -84,12 +84,11 @@ class CancerRecord(CompressionRecord):
 
     bins_per_plane: int | None = None
     num_planes: int | None = None
-    prior_rate: float | None = None
-    prior_stage_rates: list[float] | None = None
-    training_prior_rate: float | None = None
-    training_prior_stage_rates: list[float] | None = None
+    quantizer_prior_rate: float | None = None
+    quantizer_prior_stage_rates: list[float] | None = None
+    temporal_si_prior_rate: float | None = None
+    server_si_prior_rate: float | None = None
     marginal_rate: float | None = None
-    marginal_stage_rates: list[float] | None = None
     stage_mses: list[float] | None = None
     stage_wmapes: list[float] | None = None
     stage_wmspe_sqrts: list[float] | None = None
@@ -99,9 +98,17 @@ class CancerRecord(CompressionRecord):
     coder_rate: float | None = None
     coder_stage_rates: list[float] | None = None
     coder_overhead_rate: float | None = None
+    temporal_si_rans_rate: float | None = None
+    temporal_si_rans_stage_rates: list[float] | None = None
+    temporal_si_rans_overhead_rate: float | None = None
+    server_si_rans_rate: float | None = None
+    server_si_rans_stage_rates: list[float] | None = None
+    server_si_rans_overhead_rate: float | None = None
     symbol_error_rate: float | None = None
     warm_parent_slots: list[int] | None = None
     warm_deployed_slot: int | None = None
+    server_si_prior_parent_slots: list[int] | None = None
+    server_si_prior_deployed_slot: int | None = None
 
     @property
     def element_metrics(self) -> ElementMetrics | None:
@@ -129,7 +136,7 @@ class F_RoundCodec(BaseRoundCodec):
 
     record_class = CancerRecord
     round_name: ClassVar[str] = "F"
-    can_decode_where: ClassVar[Access] = Access.NONE
+    history_access: ClassVar[Access] = Access.NONE
 
     @staticmethod
     def validate_cfg(**options: Any) -> None:
@@ -142,16 +149,33 @@ def compressed_size(obj: Any) -> float:
     return len(compress_data_list(obj)) / (1024**2)
 
 
+@dataclass(frozen=True)
+class ServerSIPriorTrainingPlan:
+    """Protocol-selected initial lineages for a T codec's full-server-SI prior."""
+
+    initial_states: tuple[Mapping[str, torch.Tensor] | None, ...]
+    parent_slots: tuple[int, ...]
+    attempts_per_parent: int
+
+    def __post_init__(self) -> None:
+        assert self.initial_states and self.attempts_per_parent > 0
+        assert not self.parent_slots or len(self.parent_slots) == len(self.initial_states)
+
+
+@dataclass(frozen=True)
+class PriorEvaluation:
+    """One prior model paired with the exact side information used to evaluate it."""
+
+    model: EncoderDecoderLayeredRNN
+    side_information: SideInfoMatrix | torch.Tensor
+
+
 class _WZRoundCodec(BaseRoundCodec):
     """Shared single-quantizer round mechanics; children own training-data availability policy."""
 
     record_class = CancerRecord
     round_name: ClassVar[str]
-    can_decode_where: ClassVar[Access]
-    # States, without inferring it from a display label such as codec_id, whether the quantizer
-    # trained on temporal (worker-only) or oracle (server-visible) side information.
-    quantizer_training_access: ClassVar[str]
-    retrained_prior_from_scratch: ClassVar[bool] = False
+    history_access: ClassVar[Access]
     quantizer_class: type[DedupedWZQuantizerCancer] = DedupedWZQuantizerCancer
     config_class: type[WZcfgQuant] = WZcfgQuant
 
@@ -159,10 +183,12 @@ class _WZRoundCodec(BaseRoundCodec):
     quantizer: DedupedWZQuantizerCancer
     dump_element_metrics: bool = False
     _original_delta_vec: torch.Tensor | None = None
-    _prior_side_information: list[HistoryVector] | None = None
-    _retrained_prior_model: EncoderDecoderLayeredRNN | None
+    _quantizer_prior_model: EncoderDecoderLayeredRNN | None
     _side_info_columns_cache: SideInfoColumnsCache
     warm_parent_slots: tuple[int, ...] = ()
+    joint_quantizer_state: dict[str, torch.Tensor] | None = None
+    refit_priors_on_frozen: bool = False
+    _fine_tune_native_prior: ClassVar[bool] = True
 
     def options_to_config(
         self,
@@ -176,7 +202,7 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> None:
         """Separate round diagnostics from options that configure the learned quantizer."""
         self.dump_element_metrics = dump_element_metrics
-        self._retrained_prior_model = None
+        self._quantizer_prior_model = None
         self._side_info_columns_cache = SideInfoColumnsCache()
         self.c_cfg = self.config_class(
             bins_per_plane=bins_per_plane,
@@ -219,19 +245,16 @@ class _WZRoundCodec(BaseRoundCodec):
         passed straight through the cooperative chain without filtering it first.
         """
         return {
-            "quantizer_training_access": cls.quantizer_training_access,
-            "oracle_prior_granted": False,
+            "quantizer_si_access": cls.history_access.value,
             "sw_oracle_search": False,
-            "coder_prior_si": None,
-            # T/O's prior_stage_rates follow the protocol-wide retrained_prior_uses_server_si
-            # policy recorded alongside this in config_snapshot; transport mixins override this
-            # when they instead fix the coder prior to the exact decoder-legal SI.
-            "prior_stage_rates_si": "protocol_retrained_prior_uses_server_si_policy",
-            "retrained_prior_policy": "fit_on_trained_round_reuse_on_frozen_rounds",
+            "native_prior_si": cls.history_access.value,
+            "prior_refit_policy": "protocol_refit_priors_on_frozen",
             "rate_fields_available": {
-                "prior_stage_rates": True,
-                "marginal_stage_rates": True,
-                "training_prior_stage_rates": True,
+                "quantizer_prior_rate": True,
+                "quantizer_prior_stage_rates": True,
+                "temporal_si_prior_rate": cls.history_access is Access.TEMPORAL_TOO,
+                "server_si_prior_rate": True,
+                "marginal_rate": True,
                 "coder_rate": False,
                 "coder_stage_rates": False,
                 "coder_overhead_rate": False,
@@ -259,16 +282,6 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> tuple[torch.Tensor | None, list[HistoryVector] | None]:
         """Return data available where this child trains its quantizer."""
         raise NotImplementedError("Subclasses must return the quantizer training data.")
-
-    def set_retrained_prior_si(
-        self, history: ReconstructionHistory, client_id: int
-    ) -> None:
-        """Store server-visible SI for the separate conditional entropy-prior estimate."""
-        self._prior_side_information = [
-            entry.value
-            for client_history in history.view(Access.SERVER_ONLY, client_id).values()
-            for entry in client_history
-        ]
 
     def refresh_side_information(
         self, side_information: Sequence[HistoryVector]
@@ -307,107 +320,84 @@ class _WZRoundCodec(BaseRoundCodec):
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
     ) -> dict[str, Any]:
-        """Quantize a raw delta and attach rate and model-size metrics."""
+        """Quantize a raw delta, fine-tune its native prior, and attach rate metrics."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
         self._original_delta_vec = delta_vec
         bins, soft_codes, metadata = self.quantizer.encoding_process(delta_vec)
-        training_prior = self.quantizer.prior_calculator.compute_prior_from_network(
-            self.quantizer.coding_model,
-            bins,
-            self.quantizer.side_info_tensor(metadata),
+        assert soft_codes is not None, (
+            "Prior fine-tuning needs encoder soft codes; estimator quantizers do not produce them."
         )
-        training_prior_stage_rates = list(self.quantizer.prior_calculator.compute_plane_rates(
-            training_prior, bins, self.c_cfg.num_planes))
+        native_side_info = self.quantizer.side_info_tensor(metadata)
+        if self.round_name_full != "F":
+            self._quantizer_prior_model = self.quantizer.coding_model.copy_for_prior_retraining()
+        assert self._quantizer_prior_model is not None
+        quantizer_prior = self.quantizer.prior_calculator.compute_prior_from_network(
+            self._quantizer_prior_model, bins, native_side_info)
+        quantizer_prior_code_lengths = PriorCalculator.compute_code_lengths(
+            quantizer_prior, bins, self.c_cfg.num_planes)
+        quantizer_prior_stage_rates = quantizer_prior_code_lengths.mean(dim=1).tolist()
+
+        if self._fine_tune_native_prior and (
+            self.round_name_full != "F" or self.refit_priors_on_frozen
+        ):
+            PriorCalculator.fit_prior_model(
+                bins.long(), soft_codes, native_side_info,
+                self.c_cfg.model_copy(update={"marginal_loss": False}),
+                self.quantizer.coding_model,
+                (self.quantizer.coding_model.conditional_state_dict(),),
+                self.c_cfg.prior_train_repeats,
+            )
+        native_prior = self.quantizer.prior_calculator.compute_prior_from_network(
+            self.quantizer.coding_model, bins, native_side_info)
+        native_prior_rate = PriorCalculator.compute_rate_from_prior_tensor(
+            native_prior, bins, self.c_cfg.num_planes)
         assert not self.warm_parent_slots or self.quantizer.warm_deployed_parent is not None, (
             "Warm training completed without selecting a deployed parent.")
-        record.update_record_fields(
-            encoder_size=compressed_size(self.quantizer.coding_model.encoder_state_dict()),
-            decoder_size=compressed_size(self.quantizer.coding_model.decoder_state_dict()),
-            meta_data_size=compressed_size(metadata),
-            training_prior_rate=sum(training_prior_stage_rates),
-            training_prior_stage_rates=training_prior_stage_rates,
+        updates: dict[str, Any] = {
+            "encoder_size": compressed_size(self.quantizer.coding_model.encoder_state_dict()),
+            "decoder_size": compressed_size(self.quantizer.coding_model.decoder_state_dict()),
+            "meta_data_size": compressed_size(metadata),
+            "quantizer_prior_rate": sum(quantizer_prior_stage_rates),
+            "quantizer_prior_stage_rates": quantizer_prior_stage_rates,
             **({
                 "warm_parent_slots": list(self.warm_parent_slots),
                 "warm_deployed_slot": self.warm_parent_slots[self.quantizer.warm_deployed_parent],
             } if self.warm_parent_slots and self.quantizer.warm_deployed_parent is not None else {}),
-        )
-        self.add_prior_to_record(bins, soft_codes, metadata, record)
-        return {"payload_content": (bins, metadata)}
-
-    def conditional_code_lengths(
-        self,
-        quantizer: DedupedWZQuantizerCancer,
-        bins: torch.Tensor,
-        soft_codes: torch.Tensor,
-        side_info: SideInfoMatrix | torch.Tensor,
-        c_cfg: WZcfgQuant,
-    ) -> tuple[torch.Tensor, EncoderDecoderLayeredRNN]:
-        """Fit the retrained prior once, then evaluate that frozen model on refreshed F-round SI."""
-        assert not c_cfg.marginal_loss, (
-            "Retrained conditional priors do not currently support marginal quantizers."
-        )
-        prior_cfg = c_cfg.model_copy(update={"marginal_loss": False})
-        if self.round_name_full == "F":
-            assert self._retrained_prior_model is not None, (
-                "A frozen round requires the retrained prior fitted by its training round.")
-            prior_model = self._retrained_prior_model
-        else:
-            assert self._retrained_prior_model is None, (
-                "A trained round may fit its retrained prior only once.")
-            prior_model = PriorCalculator.make_trained_prior_model(
-                source_model=(
-                    None if self.retrained_prior_from_scratch else quantizer.coding_model),
-                bins_vec=bins.long(),
-                soft_codes=soft_codes,
-                side_info=side_info,
-                c_cfg=prior_cfg,
-            )
-            self._retrained_prior_model = prior_model
-        prior = quantizer.prior_calculator.compute_prior_from_network(
-            prior_model, bins, side_info)
-        return (
-            PriorCalculator.compute_code_lengths(prior, bins, prior_cfg.num_planes),
-            prior_model,
-        )
-
-    def add_prior_to_record(
-        self,
-        bins: torch.Tensor,
-        soft_codes: torch.Tensor | None,
-        metadata: PreprocessMetadata,
-        record: CancerRecord,
-    ) -> None:
-        """Estimate conditional-coder and marginal rates independently of quantization."""
-        assert soft_codes is not None, (
-            "Prior retraining needs encoder soft codes; estimator quantizers do not produce them.")
-        prior_si = (
-            self.quantizer.side_info_list_used
-            if self._prior_side_information is None
-            else self._prior_side_information
-        )
-        assert prior_si is not None
-        side_info = self.quantizer.normalize_side_info_tensor(metadata, prior_si)
-        code_lengths, prior_model = self.conditional_code_lengths(
-            self.quantizer, bins, soft_codes, side_info, self.c_cfg)
-        prior_stage_rates = code_lengths.mean(dim=1).tolist()
-        self.collect_element_rates(code_lengths, bins, prior_model, record)
+        }
+        updates[
+            "temporal_si_prior_rate"
+            if self.history_access is Access.TEMPORAL_TOO else "server_si_prior_rate"
+        ] = native_prior_rate
+        record.update_record_fields(**updates)
+        self.fit_additional_priors(bins, soft_codes, metadata, record)
 
         marginal_prior = PriorCalculator.compute_marginal_prior(
             bins, self.c_cfg.bins_per_plane, self.c_cfg.num_planes)
-        marginal_stage_rates = list(PriorCalculator.compute_plane_rates(
+        record.update_record_fields(marginal_rate=PriorCalculator.compute_rate_from_prior_tensor(
             marginal_prior, bins, self.c_cfg.num_planes))
-        record.update_record_fields(
-            prior_stage_rates=prior_stage_rates,
-            prior_rate=sum(prior_stage_rates),
-            marginal_stage_rates=marginal_stage_rates,
-            marginal_rate=sum(marginal_stage_rates),
-        )
+        self.collect_element_rates(quantizer_prior_code_lengths, bins, record)
+        return {"payload_content": (bins, metadata)}
+
+    def fit_additional_priors(
+        self,
+        bins: torch.Tensor,
+        soft_codes: torch.Tensor,
+        metadata: PreprocessMetadata,
+        record: CancerRecord,
+    ) -> None:
+        """Fit optional priors supplied by mixins; the base codec has only its native prior."""
+
+    def prior_evaluations(self, metadata: PreprocessMetadata) -> dict[Access, PriorEvaluation]:
+        """Return each available prior paired with its matching normalized side information."""
+        assert self.history_access in (Access.TEMPORAL_TOO, Access.SERVER_ONLY)
+        return {self.history_access: PriorEvaluation(
+            self.quantizer.coding_model, self.quantizer.side_info_tensor(metadata)
+        )}
 
     def collect_element_rates(
         self,
         code_lengths: torch.Tensor,
         bins: torch.Tensor,
-        prior_model: EncoderDecoderLayeredRNN,
         record: CancerRecord,
     ) -> None:
         """Populate the optional element artifact with rate arrays and producing models."""
@@ -417,8 +407,8 @@ class _WZRoundCodec(BaseRoundCodec):
         artifact.models = {
             "round_name_full": self.round_name_full,
             "c_cfg": self.c_cfg.model_dump(mode="json", exclude={"norm_slices"}),
-            "coding_model": self.quantizer.coding_model.state_dict(),
-            "prior_model": prior_model.state_dict(),
+            "quantizer_model_after_prior_finetuning": self.quantizer.coding_model.state_dict(),
+            "quantizer_prior_model": self._quantizer_prior_model.state_dict(),
         }
         if artifact.include_arrays:
             artifact.bits = code_lengths.cpu()
@@ -470,13 +460,102 @@ class _WZRoundCodec(BaseRoundCodec):
         return self.decoded_reconstruction(bins, metadata, record)
 
 
-class T_RoundCodec(_WZRoundCodec):
-    """Train at the worker on its raw delta with worker-local temporal SI."""
+class ServerSIPriorMixin:
+    """Add a protocol-initialized prior conditioned on full server-visible history."""
 
-    round_name: ClassVar[str] = "T"
-    can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
-    quantizer_training_access: ClassVar[str] = "temporal"
-    retrained_prior_from_scratch: ClassVar[bool] = True
+    _server_si_prior_side_information: list[HistoryVector]
+    _server_si_prior_training_plan: ServerSIPriorTrainingPlan | None = None
+    _server_si_prior_model: EncoderDecoderLayeredRNN | None = None
+    server_si_prior_training_result: PriorTrainingResult | None = None
+
+    def set_server_si_prior_training(
+        self,
+        history: ReconstructionHistory,
+        client_id: int,
+        plan: ServerSIPriorTrainingPlan | None,
+    ) -> None:
+        """Receive server SI and the protocol's explicit cold or warm initialization plan."""
+        self._server_si_prior_side_information = [
+            entry.value
+            for client_history in history.view(Access.SERVER_ONLY, client_id).values()
+            for entry in client_history
+        ]
+        self._server_si_prior_training_plan = plan
+
+    def fit_additional_priors(
+        self,
+        bins: torch.Tensor,
+        soft_codes: torch.Tensor,
+        metadata: PreprocessMetadata,
+        record: CancerRecord,
+    ) -> None:
+        """Fit or reuse the explicit full-server-SI prior and record its scalar rate."""
+        super().fit_additional_priors(bins, soft_codes, metadata, record)
+        assert self._server_si_prior_side_information
+        side_info = self.quantizer.normalize_side_info_tensor(
+            metadata, self._server_si_prior_side_information)
+        if self.round_name_full != "F":
+            plan = self._server_si_prior_training_plan
+            assert plan is not None, "A trained T round requires a protocol server-SI-prior plan."
+            self.server_si_prior_training_result = PriorCalculator.fit_prior_model(
+                bins.long(), soft_codes, side_info,
+                self.c_cfg.model_copy(update={"marginal_loss": False}),
+                None, plan.initial_states, plan.attempts_per_parent,
+            )
+            self._server_si_prior_model = self.server_si_prior_training_result.model
+            parent_fields = ({
+                "server_si_prior_parent_slots": list(plan.parent_slots),
+                "server_si_prior_deployed_slot": plan.parent_slots[
+                    self.server_si_prior_training_result.deployed_parent],
+            } if plan.parent_slots else {})
+        elif self.refit_priors_on_frozen:
+            assert self._server_si_prior_model is not None
+            self.server_si_prior_training_result = PriorCalculator.fit_prior_model(
+                bins.long(), soft_codes, side_info,
+                self.c_cfg.model_copy(update={"marginal_loss": False}),
+                self._server_si_prior_model,
+                (self._server_si_prior_model.state_dict(),),
+                self.c_cfg.prior_train_repeats,
+            )
+            parent_fields = {}
+        else:
+            assert self._server_si_prior_model is not None, (
+                "A frozen T round requires the server-SI prior fitted by its training round.")
+            parent_fields = {}
+        prior = self.quantizer.prior_calculator.compute_prior_from_network(
+            self._server_si_prior_model, bins, side_info)
+        record.update_record_fields(
+            server_si_prior_rate=PriorCalculator.compute_rate_from_prior_tensor(
+                prior, bins, self.c_cfg.num_planes),
+            **parent_fields,
+        )
+
+    def prior_evaluations(self, metadata: PreprocessMetadata) -> dict[Access, PriorEvaluation]:
+        """Add the full-server-SI prior to the codec's native prior evaluation."""
+        evaluations = super().prior_evaluations(metadata)
+        assert self._server_si_prior_model is not None
+        evaluations[Access.SERVER_ONLY] = PriorEvaluation(
+            self._server_si_prior_model,
+            self.quantizer.normalize_side_info_tensor(
+                metadata, self._server_si_prior_side_information),
+        )
+        return evaluations
+
+    def collect_element_rates(
+        self, code_lengths: torch.Tensor, bins: torch.Tensor, record: CancerRecord,
+    ) -> None:
+        """Include the additional server-SI prior in optional model artifacts."""
+        super().collect_element_rates(code_lengths, bins, record)
+        if record.element_metrics is not None:
+            assert record.element_metrics.models is not None
+            assert self._server_si_prior_model is not None
+            record.element_metrics.models["server_si_prior_model"] = (
+                self._server_si_prior_model.state_dict())
+
+
+class _CurrentTargetWZRoundCodec(_WZRoundCodec):
+    """WZ codec trained on the current raw target immediately before encoding."""
+
     si: list[HistoryVector]
     _send_quantizer_state: bool
 
@@ -498,9 +577,9 @@ class T_RoundCodec(_WZRoundCodec):
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[None, list[HistoryVector]]:
         """Return worker-local history; the raw target arrives during pre-encode training."""
-        entries = given_history.view(self.can_decode_where, client_id)[client_id]
+        entries = given_history.view(self.history_access, client_id)[client_id]
         assert entries[-1].client_id == client_id
-        assert entries[-1].access == self.can_decode_where
+        assert entries[-1].access == self.history_access
         return None, [entry.value for entry in entries]
 
     def build_quantizer(
@@ -524,7 +603,7 @@ class T_RoundCodec(_WZRoundCodec):
         if self.round_name_full == "F":
             assert self.quantizer.side_info_list_used is not None
             assert self.quantizer.vector_size is not None
-            assert self.quantizer.training_prior_stage_rates is not None
+            assert self.quantizer.quantizer_prior_stage_rates is not None
             assert not self._send_quantizer_state
             return
 
@@ -533,7 +612,11 @@ class T_RoundCodec(_WZRoundCodec):
         self.quantizer.train_model(
             delta_vec, self.si, self.extra_training_problems(), self.training_problem_weights())
         assert self.quantizer.vector_size is not None
-        assert self.quantizer.training_prior_stage_rates is not None
+        assert self.quantizer.quantizer_prior_stage_rates is not None
+        self.joint_quantizer_state = {
+            name: value.detach().cpu().clone()
+            for name, value in self.quantizer.coding_model.state_dict().items()
+        }
         gc.collect()
         torch.cuda.empty_cache()
         self._send_quantizer_state = True
@@ -545,7 +628,7 @@ class T_RoundCodec(_WZRoundCodec):
         assert self.quantizer.side_info_list_used is not None, (
             f"{self.round_name_full} must run pre_encode_training_steps before encoding.")
         assert self.quantizer.vector_size is not None
-        assert self.quantizer.training_prior_stage_rates is not None
+        assert self.quantizer.quantizer_prior_stage_rates is not None
         payload = super().get_encod_payload(delta_vec, record)
         if self._send_quantizer_state:
             payload["quantizer_state"] = self.quantizer.coding_model.decoder_state_dict()
@@ -553,18 +636,32 @@ class T_RoundCodec(_WZRoundCodec):
         return payload
 
 
-class Oracle_RoundCodec(T_RoundCodec):
+class T_RoundCodec(ServerSIPriorMixin, _CurrentTargetWZRoundCodec):
+    """Train on the raw target with temporal SI and also fit a server-SI reference prior."""
+
+    round_name: ClassVar[str] = "T"
+    history_access: ClassVar[Access] = Access.TEMPORAL_TOO
+
+    def get_training_data(
+        self, given_history: ReconstructionHistory, client_id: int
+    ) -> tuple[None, list[HistoryVector]]:
+        """Return worker-local history; the raw target arrives during pre-encode training."""
+        entries = given_history.view(self.history_access, client_id)[client_id]
+        assert entries[-1].client_id == client_id
+        assert entries[-1].access == self.history_access
+        return None, [entry.value for entry in entries]
+
+
+class Oracle_RoundCodec(_CurrentTargetWZRoundCodec):
     """Study-only upper bound trained on the current raw delta and server-visible SI."""
 
     round_name: ClassVar[str] = "O"
-    can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
-    quantizer_training_access: ClassVar[str] = "oracle"
-    retrained_prior_from_scratch: ClassVar[bool] = False
+    history_access: ClassVar[Access] = Access.SERVER_ONLY
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
     ) -> tuple[None, list[HistoryVector]]:
         """Return server-visible history while leaving the raw target for pre-encode training."""
-        history = given_history.view(self.can_decode_where, client_id)
+        history = given_history.view(self.history_access, client_id)
         return None, [
             entry.value for client_history in history.values() for entry in client_history]

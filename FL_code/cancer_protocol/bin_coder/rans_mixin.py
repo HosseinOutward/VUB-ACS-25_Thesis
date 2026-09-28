@@ -6,6 +6,9 @@ from typing import Any
 
 import torch
 
+from FL_code.FL_core.codec import Access
+
+from ..round_codecs import CancerRecord
 from ..wz_quantizer import PreprocessMetadata
 from .rans_coder import HEADER, RansConfig, decode, encode
 from .staged_transport import StagedIndexTransportMixin
@@ -50,10 +53,19 @@ class RansRoundMixin(StagedIndexTransportMixin):
             "rans_lanes": RansConfig().lanes if rans_lanes is None else rans_lanes,
             "rans_precision": RansConfig().precision,
         }
+        facts["rate_fields_available"] = facts["rate_fields_available"] | {
+            "temporal_si_rans_rate": cls.history_access is Access.TEMPORAL_TOO,
+            "temporal_si_rans_stage_rates": cls.history_access is Access.TEMPORAL_TOO,
+            "temporal_si_rans_overhead_rate": cls.history_access is Access.TEMPORAL_TOO,
+            "server_si_rans_rate": True,
+            "server_si_rans_stage_rates": True,
+            "server_si_rans_overhead_rate": True,
+        }
         return facts
 
-    def _rans_prior(self, metadata: PreprocessMetadata) -> Any:
-        side_info = self.quantizer.side_info_tensor(metadata)
+    def _rans_prior(self, metadata: PreprocessMetadata, access: Access | None = None) -> Any:
+        evaluation = self.prior_evaluations(metadata)[access or self.transport_prior_access]
+        side_info = evaluation.side_information
 
         def prior(decoded_stages: torch.Tensor, stage: int) -> torch.Tensor:
             context = torch.zeros(
@@ -63,34 +75,75 @@ class RansRoundMixin(StagedIndexTransportMixin):
             )
             context[:decoded_stages.shape[0]] = decoded_stages
             return self.quantizer.prior_calculator.compute_prior_from_network(
-                self.coder_prior_model(), context, side_info
+                evaluation.model, context, side_info
             )[stage]
 
         return prior
 
     def encode_staged_indices(self, bins: torch.Tensor, metadata: PreprocessMetadata) -> bytes:
-        """Encode all stages against their causal conditional prior."""
-        return encode(bins, self._rans_prior(metadata), self.rans_config)
+        """Encode every available SI-specific report and return the declared transport payload."""
+        self._rans_payloads = {
+            access: encode(bins, self._rans_prior(metadata, access), self.rans_config)
+            for access in self.prior_evaluations(metadata)
+        }
+        self._rans_metrics = {
+            access: self._rans_rate_fields(bins, metadata, payload, access)
+            for access, payload in self._rans_payloads.items()
+        }
+        return self._rans_payloads[self.transport_prior_access]
 
     def decode_staged_indices(self, payload: bytes, metadata: PreprocessMetadata) -> torch.Tensor:
         """Losslessly recover all stages against the decoder's matching prior."""
         assert isinstance(payload, bytes)
-        return decode(payload, self._rans_prior(metadata))
+        return decode(payload, self._rans_prior(metadata, self.transport_prior_access))
+
+    def _rans_rate_fields(
+        self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: bytes, access: Access,
+    ) -> tuple[float, list[float], float]:
+        """Return total, incremental-stage, and included-overhead rates for one SI source."""
+        overhead_bits = 8 * (HEADER.size + 4 * self.rans_config.lanes)
+        prior = self._rans_prior(metadata, access)
+        prefix_bits = [
+            8 * len(encode(bins[:stage], prior, self.rans_config)) - overhead_bits
+            for stage in range(1, bins.shape[0])
+        ] + [8 * len(payload) - overhead_bits]
+        stage_bits = [
+            current - previous
+            for current, previous in zip(prefix_bits, (0, *prefix_bits[:-1]), strict=True)
+        ]
+        positions = bins.shape[1]
+        stage_rates = [
+            (bits + (overhead_bits if stage == 0 else 0)) / positions
+            for stage, bits in enumerate(stage_bits)
+        ]
+        return sum(stage_rates), stage_rates, overhead_bits / positions
 
     def payload_bits(
         self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: bytes
     ) -> tuple[list[int], int]:
         """Separate each stage's stream growth from the fixed header and lane flush."""
-        overhead_bits = 8 * (HEADER.size + 4 * self.rans_config.lanes)
-        prior = self._rans_prior(metadata)
-        prefix_bits = [
-            8 * len(encode(bins[:stage], prior, self.rans_config)) - overhead_bits
-            for stage in range(1, bins.shape[0])
-        ] + [8 * len(payload) - overhead_bits]
-        return [
-            current - previous
-            for current, previous in zip(prefix_bits, (0, *prefix_bits[:-1]), strict=True)
-        ], overhead_bits
+        total, stage_rates, overhead_rate = self._rans_metrics[self.transport_prior_access]
+        positions = bins.shape[1]
+        overhead_bits = round(overhead_rate * positions)
+        stage_bits = [round(rate * positions) for rate in stage_rates]
+        stage_bits[0] -= overhead_bits
+        assert abs(total - sum(stage_rates)) < 1e-9
+        return stage_bits, overhead_bits
+
+    def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:
+        """Add separate temporal- and server-SI rANS measurements to the selected payload."""
+        payload = super().get_encod_payload(delta_vec, record)
+        updates: dict[str, Any] = {}
+        for access, (rate, stage_rates, overhead_rate) in self._rans_metrics.items():
+            prefix = "temporal_si" if access is Access.TEMPORAL_TOO else "server_si"
+            updates |= {
+                f"{prefix}_rans_rate": rate,
+                f"{prefix}_rans_stage_rates": stage_rates,
+                f"{prefix}_rans_overhead_rate": overhead_rate,
+            }
+        # Server-SI rANS on T/TR is an oracle comparison: the temporal encoder lacks this SI.
+        record.update_record_fields(**updates)
+        return payload
 
     def symbol_error_rate(
         self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: bytes

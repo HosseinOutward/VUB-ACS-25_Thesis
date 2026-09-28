@@ -13,6 +13,8 @@ from .round_codecs import (
     CancerRecord,
     F_RoundCodec,
     Oracle_RoundCodec,
+    ServerSIPriorTrainingPlan,
+    ServerSIPriorMixin,
     T_RoundCodec,
     _WZRoundCodec,
 )
@@ -38,7 +40,7 @@ class _WZProtocol(BaseProtocol):
     protocol_name: ClassVar[str]
 
     refresh_frozen_si: bool = True
-    retrained_prior_uses_server_si: bool = True
+    refit_priors_on_frozen: bool = False
     last_trained_codec: dict[int, _WZRoundCodec]
 
     def __init__(
@@ -71,7 +73,7 @@ class _WZProtocol(BaseProtocol):
     ) -> None:
         """Commit the round's reconstruction under the access level that codec decodes with."""
         for history in self.histories:
-            history.commit(reconst, record, round_codec.can_decode_where)
+            history.commit(reconst, record, round_codec.history_access)
 
     def training_problem(
         self, codec: _WZRoundCodec, round_id: int, client_id: int
@@ -88,6 +90,15 @@ class _WZProtocol(BaseProtocol):
     def quantizer_config_overrides(self, round_id: int, client_id: int) -> Mapping[str, Any]:
         """Return protocol-owned quantizer options for this training call."""
         return {}
+
+    def server_si_prior_training_plan(
+        self, codec: ServerSIPriorMixin,
+    ) -> ServerSIPriorTrainingPlan:
+        """Explicitly request a cold server-SI prior for an ordinary trained T round."""
+        return ServerSIPriorTrainingPlan(
+            initial_states=(None,), parent_slots=(),
+            attempts_per_parent=codec.c_cfg.prior_train_repeats,
+        )
 
     def create_round_codec(self, round_id: int, client_id: int) -> BaseRoundCodec:
         """Create the scheduled codec with only the history and model state its policy requests."""
@@ -126,12 +137,15 @@ class _WZProtocol(BaseProtocol):
         assert isinstance(codec, _WZRoundCodec)
 
         target, side_information = self.training_problem(codec, round_id, client_id)
-        if self.retrained_prior_uses_server_si:
-            codec.set_retrained_prior_si(self._recons_history, client_id)
+        initial_states = self.quantizer_initial_states(codec, client_id, len(side_information))
+        codec.refit_priors_on_frozen = self.refit_priors_on_frozen
+        if isinstance(codec, ServerSIPriorMixin):
+            codec.set_server_si_prior_training(
+                self._recons_history, client_id, self.server_si_prior_training_plan(codec))
         codec.build_quantizer(
             target,
             side_information,
-            self.quantizer_initial_states(codec, client_id, len(side_information)),
+            initial_states,
         )
         self.last_trained_codec[client_id] = codec
         return codec
@@ -144,7 +158,7 @@ class _WZProtocol(BaseProtocol):
         assert previous.quantizer.vector_size is not None, (
             f"Client {client_id}'s previous codec has not completed pre-encode training and encoding.")
         assert previous.quantizer.side_info_list_used is not None
-        assert previous.quantizer.training_prior_stage_rates is not None
+        assert previous.quantizer.quantizer_prior_stage_rates is not None
         assert not getattr(previous, "_send_quantizer_state", False), (
             f"Client {client_id}'s trained decoder state has not been transmitted yet.")
         side_information = None
@@ -154,7 +168,7 @@ class _WZProtocol(BaseProtocol):
             side_information = [
                 entry.value
                 for client_history in \
-                     self._recons_history.view(previous.can_decode_where, client_id).values()
+                     self._recons_history.view(previous.history_access, client_id).values()
                 for entry in client_history
             ]
             assert len(side_information) == previous.quantizer.side_info_size, (
@@ -163,10 +177,11 @@ class _WZProtocol(BaseProtocol):
         previous.dump_element_metrics = False
         previous.warm_parent_slots = ()
         previous._original_delta_vec = None
+        previous.refit_priors_on_frozen = self.refit_priors_on_frozen
         if side_information is not None:
             previous.refresh_side_information(side_information)
-        if self.retrained_prior_uses_server_si:
-            previous.set_retrained_prior_si(self._recons_history, client_id)
+        if isinstance(previous, ServerSIPriorMixin):
+            previous.set_server_si_prior_training(self._recons_history, client_id, None)
         return previous
 
     def config_snapshot(self) -> dict[str, Any]:
@@ -187,7 +202,7 @@ class _WZProtocol(BaseProtocol):
         )
         snapshot["max_per_client_recons_history"] = self.max_per_client_recons_history
         snapshot["refresh_frozen_si"] = self.refresh_frozen_si
-        snapshot["retrained_prior_uses_server_si"] = self.retrained_prior_uses_server_si
+        snapshot["refit_priors_on_frozen"] = self.refit_priors_on_frozen
         snapshot["history"] = self._recons_history.config_snapshot()
         # Codec facts and resolved transport settings, so D/E read oracle grants and rate-field
         # availability from here rather than inferring them from a display label like codec_id.
@@ -219,13 +234,13 @@ class WZCancerProtocol(_WZProtocol):
     def options_to_config(
         self,
         refresh_frozen_si: bool = True,
-        retrained_prior_uses_server_si: bool = True,
+        refit_priors_on_frozen: bool = False,
     ) -> None:
-        """Configure the SI policies used by frozen and retrained codecs."""
+        """Configure side-information refresh and optional fixed-symbol F-round adaptation."""
         assert isinstance(refresh_frozen_si, bool)
-        assert isinstance(retrained_prior_uses_server_si, bool)
+        assert isinstance(refit_priors_on_frozen, bool)
         self.refresh_frozen_si = refresh_frozen_si
-        self.retrained_prior_uses_server_si = retrained_prior_uses_server_si
+        self.refit_priors_on_frozen = refit_priors_on_frozen
 
 
 class WarmWZCancerProtocol(WZCancerProtocol):
@@ -246,11 +261,11 @@ class WarmWZCancerProtocol(WZCancerProtocol):
     def options_to_config(
         self,
         refresh_frozen_si: bool = True,
-        retrained_prior_uses_server_si: bool = True,
+        refit_priors_on_frozen: bool = False,
         warm_retrain_repeats: int = 2,
     ) -> None:
         """Configure SI policies and the number of retraining attempts per selected parent."""
-        super().options_to_config(refresh_frozen_si, retrained_prior_uses_server_si)
+        super().options_to_config(refresh_frozen_si, refit_priors_on_frozen)
         assert type(warm_retrain_repeats) is int and warm_retrain_repeats > 0
         self.warm_retrain_repeats = warm_retrain_repeats
 
@@ -265,6 +280,7 @@ class WarmWZCancerProtocol(WZCancerProtocol):
         super().__init__(options, protocol_name_full, sd_slices, cache_dir, cache_overwrite)
         self.quantizer_pool: list[dict[str, torch.Tensor]] = []
         self.quantizer_pool_si_size: int | None = None
+        self.server_si_prior_pool: list[dict[str, torch.Tensor]] = []
         self.warm_refresh_count: int = 0
 
     def quantizer_config_overrides(self, round_id: int, client_id: int) -> Mapping[str, Any]:
@@ -297,6 +313,24 @@ class WarmWZCancerProtocol(WZCancerProtocol):
         )
         return tuple(self.quantizer_pool[slot] for slot in codec.warm_parent_slots)
 
+    def server_si_prior_training_plan(
+        self, codec: ServerSIPriorMixin,
+    ) -> ServerSIPriorTrainingPlan:
+        """Use aligned cold or warm server-SI-prior lineages for a T codec."""
+        if not codec.c_cfg.warm_training:
+            return super().server_si_prior_training_plan(codec)
+        assert len(self.server_si_prior_pool) == self.pool_size, (
+            f"Warm server-SI-prior training requires {self.pool_size} base priors; "
+            f"completed training calls produced {len(self.server_si_prior_pool)}."
+        )
+        assert len(codec.warm_parent_slots) == self.parents_per_refresh
+        return ServerSIPriorTrainingPlan(
+            initial_states=tuple(
+                self.server_si_prior_pool[slot] for slot in codec.warm_parent_slots),
+            parent_slots=codec.warm_parent_slots,
+            attempts_per_parent=self.warm_retrain_repeats,
+        )
+
     def after_decode(
         self, reconst: torch.Tensor, record: CompressionRecord, round_codec: BaseRoundCodec
     ) -> None:
@@ -312,13 +346,23 @@ class WarmWZCancerProtocol(WZCancerProtocol):
                 self.quantizer_pool[slot] = {
                     name: value.detach().cpu().clone() for name, value in state.items()
                 }
+            if isinstance(round_codec, ServerSIPriorMixin):
+                result = round_codec.server_si_prior_training_result
+                assert result is not None
+                assert len(result.lineage_states) == len(round_codec.warm_parent_slots)
+                for slot, state in zip(
+                    round_codec.warm_parent_slots, result.lineage_states, strict=True,
+                ):
+                    self.server_si_prior_pool[slot] = {
+                        name: value.detach().cpu().clone() for name, value in state.items()
+                    }
             self.warm_refresh_count += 1
             return
 
         if record.round_id < len(self.history_prep_round_codecs):
             return
         quantizer = round_codec.quantizer
-        assert quantizer.training_prior_stage_rates is not None
+        assert quantizer.quantizer_prior_stage_rates is not None
         assert len(self.quantizer_pool) < self.pool_size, (
             "A cold training call completed after the shared warm pool was already full."
         )
@@ -328,10 +372,18 @@ class WarmWZCancerProtocol(WZCancerProtocol):
             assert self.quantizer_pool_si_size == quantizer.side_info_size, (
                 f"Base quantizer {len(self.quantizer_pool)} has incompatible SI width."
             )
+        assert round_codec.joint_quantizer_state is not None
         self.quantizer_pool.append({
             name: value.detach().cpu().clone()
-            for name, value in quantizer.coding_model.state_dict().items()
+            for name, value in round_codec.joint_quantizer_state.items()
         })
+        if isinstance(round_codec, ServerSIPriorMixin):
+            result = round_codec.server_si_prior_training_result
+            assert result is not None
+            self.server_si_prior_pool.append({
+                name: value.detach().cpu().clone()
+                for name, value in result.model.state_dict().items()
+            })
 
     def config_snapshot(self) -> dict[str, Any]:
         """Record the fixed pool construction and balanced parent-selection policy."""
@@ -342,6 +394,7 @@ class WarmWZCancerProtocol(WZCancerProtocol):
             "selection": "balanced_rotating_window_v1",
             "warm_retrain_repeats": self.warm_retrain_repeats,
             "history_readiness": "warmup_schedule_asserted_at_warm_entry",
+            "server_si_prior_pool": "aligned_parent_slots_for_T",
         }
         return snapshot
 
@@ -350,6 +403,8 @@ __all__ = [
     "CancerRecord",
     "F_RoundCodec",
     "Oracle_RoundCodec",
+    "ServerSIPriorTrainingPlan",
+    "ServerSIPriorMixin",
     "T_RoundCodec",
     "WZCancerProtocol",
     "WarmWZCancerProtocol",

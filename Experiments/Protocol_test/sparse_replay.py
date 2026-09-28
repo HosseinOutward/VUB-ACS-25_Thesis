@@ -175,6 +175,7 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
             "history_replacement": "decoded_updates_after_start",
             "client_order": "normal",
             "frozen_si_refresh": protocol.refresh_frozen_si,
+            "frozen_prior_refit": protocol.refit_priors_on_frozen,
             "server_history": "decoder_visible_reconstructions",
         },
     }

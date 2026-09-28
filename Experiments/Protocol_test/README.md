@@ -5,6 +5,16 @@ placed at selected points in one deterministic, uncompressed FL trajectory. It d
 run compressed FL: the full client population always trains and advances the trajectory,
 independent of which clients are measured for compression.
 
+## Prior and coder columns
+
+`quantizer_prior_rate` and `quantizer_prior_stage_rates` measure the prior produced by joint
+quantizer training, before fixed-symbol fine-tuning. The fine-tuned model is identified by its SI:
+`temporal_si_prior_rate` or `server_si_prior_rate`, both scalar averages. `marginal_rate` is also a
+scalar average. Rounds with rANS retain the selected transport in `coder_rate` and
+`coder_stage_rates`; SI-specific comparisons are recorded separately as `temporal_si_rans_*` and
+`server_si_rans_*`. O/OR use server SI natively, while T/TR use temporal SI natively; T/TR may also
+report the separately trained server-SI comparison.
+
 ## Flow
 
 1. **Trace.** `Trace` (`FL_code/FL_core/trace.py`) generates or resumes the raw, uncompressed
@@ -20,12 +30,13 @@ independent of which clients are measured for compression.
    runner uses it to decide reuse; the analysis path uses it to read finished cases.
 4. **Analysis.** `plot.py` reads every finished case through `records.read_completed_case` and
    writes `analysis/stage_points.csv`, `comparison_gaps.csv`, `timing_summary.csv`, and one figure
-   directory per rate source (`analysis/prior_stage_rates/`, `analysis/coder_stage_rates/`) plus
+   directory per rate source (`analysis/quantizer_prior_stage_rates/`,
+   `analysis/coder_stage_rates/`) plus
    `analysis/combined_rate_sources/`, which draws both staged sources against one shared x axis.
    Every directory holds the same `rd_overall`, `rd_by_start`, `rd_by_phase` (trained round beside
    the frozen-round average) and, for multi-cycle plans, `rd_cycle_<n>` views. Workers count equally: stage WMAPE is the mean worker ratio (records store
    percentages), then `20*log10(mean)` dB; stage rates are mean worker rates, then cumulative. Rate sources
-   (`prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
+   (`quantizer_prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
    another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
    single-stage, non-overlapping,
    or non-monotone curves are reported as unavailable rather than aborting.

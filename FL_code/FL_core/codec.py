@@ -155,14 +155,14 @@ class BaseRoundCodec:
 
     record_class: ClassVar[type[CompressionRecord]]
     round_name: ClassVar[str]
-    can_decode_where: ClassVar[Access]
+    history_access: ClassVar[Access]
     round_name_full: str
 
     def __init_subclass__(cls) -> None:
         """Require concrete round codecs to declare their record type and round acronym.
 
         Underscore-prefixed subclasses are abstract intermediates and skip validation.
-        can_decode_where may instead be declared as an instance annotation when the
+        history_access may instead be declared as an instance annotation when the
         access level is only known per instance.
         """
         super().__init_subclass__()
@@ -170,8 +170,8 @@ class BaseRoundCodec:
             return
         assert issubclass(cls.record_class, CompressionRecord)
         assert cls.round_name
-        assert (isinstance(getattr(cls, "can_decode_where", None), Access)
-                or "can_decode_where" in getattr(cls, "__annotations__", {}))
+        assert (isinstance(getattr(cls, "history_access", None), Access)
+                or "history_access" in getattr(cls, "__annotations__", {}))
 
     def __init__(
         self,
@@ -221,7 +221,7 @@ class IdentityRoundCodec(BaseRoundCodec):
 
     record_class = IdentityRecord
     round_name = "I"
-    can_decode_where = Access.TEMPORAL_TOO
+    history_access = Access.TEMPORAL_TOO
 
     def options_to_config(self, **options: Any) -> None:
         """Reject identity-round options."""

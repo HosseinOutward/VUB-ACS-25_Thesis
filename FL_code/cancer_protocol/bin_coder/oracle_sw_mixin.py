@@ -110,13 +110,14 @@ class OracleSWRoundMixin(StagedIndexTransportMixin):
 
     def _sw_context(self, metadata: PreprocessMetadata) -> tuple[torch.Tensor, ConditionalPrior]:
         """Return decoder side information and the coder's causal stage prior."""
-        side_info = self.quantizer.side_info_tensor(metadata)
+        evaluation = self.prior_evaluations(metadata)[self.transport_prior_access]
+        side_info = evaluation.side_information
 
         def prior_provider(
             decoded_stages: torch.Tensor, decoder_side_info: torch.Tensor, stage: int
         ) -> torch.Tensor:
             return self.quantizer.prior_calculator.compute_prior_from_network(
-                self.coder_prior_model(), decoded_stages, decoder_side_info
+                evaluation.model, decoded_stages, decoder_side_info
             )[stage].to(decoder_side_info.device)
 
         return side_info, prior_provider

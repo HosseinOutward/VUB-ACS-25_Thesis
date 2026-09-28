@@ -30,7 +30,7 @@ import pandas as pd
 from Experiments.Protocol_test import records
 from Experiments.Protocol_test.rd_metrics import GAP_METRIC_NAME, mean_wmape_db, rd_curve_gap, wmape_to_db
 
-RATE_FIELDS = ("prior_stage_rates", "coder_stage_rates", "final_bytes")
+RATE_FIELDS = ("quantizer_prior_stage_rates", "coder_stage_rates", "final_bytes")
 RATE_LABELS = (
     "Cumulative estimated conditional rate",
     "Cumulative entropy-coder rate",
@@ -38,14 +38,17 @@ RATE_LABELS = (
 )
 # Only staged rate sources give a multi-point curve; `final_bytes` is one point, not a curve.
 _CURVE_RATE_FIELDS = RATE_FIELDS[:2]
-_RATE_SHORT_LABELS = {"prior_stage_rates": "prior", "coder_stage_rates": "coder"}
+_RATE_SHORT_LABELS = {
+    "quantizer_prior_stage_rates": "quantizer prior",
+    "coder_stage_rates": "coder",
+}
 # One figure directory per x axis, plus one drawing both staged sources against a shared x axis.
 COMBINED_RATE_DIR = "combined_rate_sources"
 GLOBAL_ANALYSIS_DIR = "_global_analysis"
 _FIGURE_DIRECTORIES = {field: (field,) for field in _CURVE_RATE_FIELDS} | {COMBINED_RATE_DIR: _CURVE_RATE_FIELDS}
 _DIRECTORY_LABELS = dict(zip(RATE_FIELDS, RATE_LABELS, strict=True)) | {COMBINED_RATE_DIR: "Cumulative staged rate"}
 # Marker separates the two rate sources wherever they share an axis; dashes separate experiments.
-_RATE_MARKERS = {"prior_stage_rates": "o", "coder_stage_rates": "s"}
+_RATE_MARKERS = {"quantizer_prior_stage_rates": "o", "coder_stage_rates": "s"}
 _EXPERIMENT_LINESTYLES = ("-", "--", "-.", ":", (0, (5, 1, 1, 1)), (0, (1, 1)))
 # Fixed categorical hues, validated for colorblind and normal-vision separation on a light surface.
 _CODEC_HUES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
@@ -294,8 +297,8 @@ def _plot_view(
 
     Each single-source directory is a separate x axis, so its curves are only ever compared within
     that source. `COMBINED_RATE_DIR` deliberately overlays both staged sources on one axis: they
-    share the bits/coordinate unit, and the prior rate is the estimate the coder rate is judged
-    against, so seeing the pair together is the point.
+    share the bits/coordinate unit, and the jointly trained quantizer-prior estimate is the
+    baseline the coder rate is judged against, so seeing the pair together is the point.
     """
     curves = {title: averaged_curves(points, group_keys) for title, points in panels if not points.empty}
     curves = {title: frame for title, frame in curves.items() if not frame.empty}

@@ -35,7 +35,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from FL_code.FL_core.codec import record_reconstruction_metrics
+from FL_code.FL_core.codec import Access, record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, set_global_seed
 from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import OracleSWPayload, OracleSWRoundMixin
 from Experiments.slepian_wolf.practical_sw_mixin import (
@@ -77,10 +77,10 @@ class MethodResult:
 
 
 class _SkipReferencePrior:
-    """Avoid retraining the diagnostic prior four times; the shared quantizer prior is measured once."""
+    """Keep the shared trained quantizer fixed across all benchmark transport paths."""
 
-    def add_prior_to_record(self, *args: Any, **kwargs: Any) -> None:
-        """Leave reference-prior fields empty."""
+    _fine_tune_native_prior = False
+    transport_prior_access = Access.SERVER_ONLY
 
 
 class _CaptureBins:

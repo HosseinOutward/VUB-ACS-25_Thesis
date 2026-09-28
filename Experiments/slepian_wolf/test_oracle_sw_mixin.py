@@ -8,7 +8,8 @@ import pytest
 import torch
 
 from FL_code.FL_core.utils import compress_data_list
-from FL_code.cancer_protocol.round_codecs import CancerRecord
+from FL_code.FL_core.codec import Access
+from FL_code.cancer_protocol.round_codecs import CancerRecord, PriorEvaluation
 from FL_code.cancer_protocol.bin_coder.oracle_sw_mixin import OracleSWRoundMixin
 from FL_code.cancer_protocol.bin_coder.sw_coder import SWCoderConfig
 from Experiments.slepian_wolf.oracle_index_mapping_mixin import (
@@ -61,7 +62,13 @@ class _UniformPrior:
 
 
 class _MappedOracleHost(OracleValueOrderedIndexMixin, OracleSWRoundMixin, _FakeIndexRoundCodec):
-    pass
+    transport_prior_access = Access.SERVER_ONLY
+
+    def prior_evaluations(self, metadata: object) -> dict[Access, PriorEvaluation]:
+        """Pair the fake model with the exact side information used by this test host."""
+        return {Access.SERVER_ONLY: PriorEvaluation(
+            self.quantizer.coding_model, self.quantizer.side_info_tensor(metadata)
+        )}
 
 
 def test_mapped_oracle_rate_includes_the_transmitted_mapping() -> None:

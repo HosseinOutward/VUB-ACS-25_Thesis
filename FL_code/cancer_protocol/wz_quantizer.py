@@ -790,8 +790,8 @@ class WZQuantizerCancer:
         # A quantizer built outside a round codec owns its cache and releases it with itself.
         self.side_info_columns_cache = side_info_columns_cache or SideInfoColumnsCache()
         self.vector_size: int | None = None
-        self.training_prior_stage_rates: tuple[float, ...] | None = None
-        self.training_prior_rate: float | None = None
+        self.quantizer_prior_stage_rates: tuple[float, ...] | None = None
+        self.quantizer_prior_rate: float | None = None
         self._warm_start_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_losses: tuple[float, ...] = ()
@@ -934,10 +934,10 @@ class WZQuantizerCancer:
             **({"warm_start_states": self._warm_start_states} if self._warm_start_states else {}),
         )
         if self._warm_start_states:
-            state_dict, training_prior_stage_rates, warm_states, warm_losses, deployed_parent = training_result
+            state_dict, quantizer_prior_stage_rates, warm_states, warm_losses, deployed_parent = training_result
         else:
             # Preserve the established two-item cold-cache payload and its existing entries.
-            state_dict, training_prior_stage_rates = training_result
+            state_dict, quantizer_prior_stage_rates = training_result
             warm_states, warm_losses, deployed_parent = (), (), None
         # Cache only portable training results; bind the current decoder-available
         # side information to this fresh quantizer instance.
@@ -950,8 +950,8 @@ class WZQuantizerCancer:
             self.set_side_information(si_raw_list)
         self.vector_size = x_raw.numel()
         self.coding_model.load_state_dict(state_dict)
-        self.training_prior_stage_rates = training_prior_stage_rates
-        self.training_prior_rate = sum(training_prior_stage_rates)
+        self.quantizer_prior_stage_rates = quantizer_prior_stage_rates
+        self.quantizer_prior_rate = sum(quantizer_prior_stage_rates)
         self.warm_retrained_states = warm_states
         self.warm_retrained_losses = warm_losses
         self.warm_deployed_parent = deployed_parent
@@ -989,9 +989,9 @@ class WZQuantizerCancer:
         bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
         prior = self.prior_calculator.compute_prior_from_network(
             self.coding_model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
-        self.training_prior_stage_rates = self.prior_calculator.compute_plane_rates(
+        self.quantizer_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             prior, bins, self.c_cfg.num_planes)
-        self.training_prior_rate = sum(self.training_prior_stage_rates)
+        self.quantizer_prior_rate = sum(self.quantizer_prior_stage_rates)
 
     def _stack_training_pairs(
         self,
@@ -1305,12 +1305,12 @@ def _train_quantizer_parameters(
         if warm_start_states:
             quantizer.load_warm_start_states(warm_start_states)
         quantizer._train_model_uncached(x_raw, side_information, extra_training_pairs, problem_weights)
-    assert quantizer.training_prior_stage_rates is not None
+    assert quantizer.quantizer_prior_stage_rates is not None
     if not warm_start_states:
-        return quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates
+        return quantizer.coding_model.state_dict(), quantizer.quantizer_prior_stage_rates
     assert quantizer.warm_deployed_parent is not None
     return (
-        quantizer.coding_model.state_dict(), quantizer.training_prior_stage_rates,
+        quantizer.coding_model.state_dict(), quantizer.quantizer_prior_stage_rates,
         quantizer.warm_retrained_states, quantizer.warm_retrained_losses,
         quantizer.warm_deployed_parent,
     )
