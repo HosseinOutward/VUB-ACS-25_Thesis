@@ -1,0 +1,5 @@
+experiment,codec_id,initial_si,case_id,start_round,round_id,relative_round,cycle,phase,client_ids,trace_identity_digest,rate_field,stage,rate,wmape_db,is_final_payload
+resnet18_svhn_30c,O,raw,raw_start5,5,5,0,0,trained,"(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)",e52da75b3ab7b066,prior_stage_rates,1,0.36359628662467003,-3.533645901062915,False
+resnet18_svhn_30c,O,raw,raw_start5,5,5,0,0,trained,"(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)",e52da75b3ab7b066,prior_stage_rates,2,0.37208075822391606,-3.573131678498553,False
+resnet18_svhn_30c,O,raw,raw_start5,5,5,0,0,trained,"(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)",e52da75b3ab7b066,prior_stage_rates,3,0.38701452036448813,-3.644974441293404,False
+resnet18_svhn_30c,O,raw,raw_start5,5,5,0,0,trained,"(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)",e52da75b3ab7b066,final_bytes,1,5.262658292941233,-3.644974441293404,True

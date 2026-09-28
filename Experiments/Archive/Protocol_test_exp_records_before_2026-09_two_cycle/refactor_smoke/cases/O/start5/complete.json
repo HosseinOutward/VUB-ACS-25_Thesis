@@ -1,0 +1,286 @@
+{
+  "identity": {
+    "experiment_semantics_version": 1,
+    "trace": {
+      "trace_version": 2,
+      "fl_config": {
+        "model_name": "resnet56",
+        "dataset_name": "SVHN",
+        "num_classes": 10,
+        "image_size": 32,
+        "num_clients": 3,
+        "num_loader_workers": 0,
+        "local_epochs": 1,
+        "batch_size": 128,
+        "lr": 0.1,
+        "seed": 43,
+        "server_momentum": 0.0,
+        "server_nesterov": false,
+        "augment": false,
+        "label_smoothing": 0.0,
+        "grad_clip_norm": 0.0,
+        "non_iid_partition": false,
+        "dirichlet_alpha": 0.5,
+        "server_lr": 1.0,
+        "channels_last": true,
+        "fused_optimizer": true,
+        "mixed_precision": true,
+        "dataset_fraction": 0.05
+      },
+      "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+      "device": {
+        "type": "cuda",
+        "name": "NVIDIA GeForce RTX 3090",
+        "capability": [
+          8,
+          6
+        ],
+        "torch": "2.5.1+cu121",
+        "cuda": "12.1",
+        "cudnn_deterministic": true,
+        "cudnn_benchmark": false
+      }
+    },
+    "seed": 43,
+    "codec_seed_policy": "content_hash(seed,start_round,round_id,client_id)[:8]/v1",
+    "case": {
+      "protocol": "wz_cancer",
+      "start_round": 5,
+      "client_ids": [
+        0,
+        2
+      ],
+      "round_codecs": [
+        "O|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43",
+        "F",
+        "F"
+      ]
+    },
+    "protocol_snapshot": {
+      "implementation": "FL_code.cancer_protocol.cancer_protocol.WZCancerProtocol",
+      "protocol_name_full": "wz_cancer",
+      "options": null,
+      "warmup_round_codecs": [
+        "I",
+        "I",
+        "I",
+        "I",
+        "I",
+        "O|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43"
+      ],
+      "routine_round_codecs": [
+        "F"
+      ],
+      "round_codecs": {
+        "F": {
+          "implementation": "FL_code.cancer_protocol.round_codecs.F_RoundCodec",
+          "options": null
+        },
+        "I": {
+          "implementation": "FL_code.FL_core.codec.IdentityRoundCodec",
+          "options": null
+        },
+        "O|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43": {
+          "implementation": "FL_code.cancer_protocol.round_codecs.Oracle_RoundCodec",
+          "options": {
+            "bins_per_plane": 2,
+            "num_planes": 3,
+            "hidden_dim": 32,
+            "train_epochs": 2,
+            "train_sample_size": 2000,
+            "quantizer_train_repeats": 2,
+            "prior_train_repeats": 1,
+            "training_seed": 43
+          },
+          "codec_provenance": {
+            "quantizer_training_access": "oracle",
+            "oracle_prior_granted": false,
+            "sw_oracle_search": false,
+            "coder_prior_si": null,
+            "prior_stage_rates_si": "protocol_retrained_prior_uses_server_si_policy",
+            "rate_fields_available": {
+              "prior_stage_rates": true,
+              "marginal_stage_rates": true,
+              "training_prior_stage_rates": true,
+              "coder_rate": false,
+              "coder_stage_rates": false,
+              "coder_overhead_rate": false,
+              "symbol_error_rate": false
+            }
+          }
+        }
+      },
+      "quantizer_defaults": {
+        "outlier_threshold": null,
+        "marginal_loss": false,
+        "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+        "train_epochs": 140,
+        "reconst_ld": 72.31601255189986,
+        "train_sample_size": 550000,
+        "train_batch_size": 6250,
+        "lr": 0.0056728196862653865,
+        "lr_step": 43,
+        "tau": 5.5,
+        "quantizer_train_repeats": 2,
+        "prior_train_repeats": 2,
+        "training_seed": null,
+        "training_progress_bar": false,
+        "training_log_every_epochs": null,
+        "tf32": false,
+        "fused_optimizer": true,
+        "mixed_precision": false,
+        "deduplicate_training": true,
+        "training_match_bits": 26,
+        "source_perturbation": "none",
+        "shared_heads": true,
+        "prior_context": "hard",
+        "prior_probabilities": "categorical",
+        "hidden_dim": 74,
+        "layers": 6
+      },
+      "max_per_client_recons_history": 5,
+      "refresh_frozen_si": true,
+      "retrained_prior_uses_server_si": true,
+      "history": {
+        "implementation": "FL_code.cancer_protocol.cancer_protocol.ReconstructionHistory",
+        "max_per_client": 5,
+        "dtype": "torch.float32"
+      }
+    },
+    "history_representation": "exact_raw",
+    "oracle_assumptions": {
+      "history_source": "raw_updates",
+      "history_replacement": "raw_after_measurement",
+      "client_order": "normal",
+      "frozen_si_refresh": true,
+      "server_history": "exact_raw_granted"
+    }
+  },
+  "provenance": {
+    "git_head": "6c0821f12d590ddc22d90d160d5e086dc4169596",
+    "dirty_source_fingerprint": "f97561d4d1c0b2063832093288696932f5fb27f89175c08b7ff34b4443d3c206",
+    "dirty_source_paths": [
+      "Experiments/Protocol_test/README.md",
+      "Experiments/Protocol_test/benchmark_optimized_history.py",
+      "Experiments/Protocol_test/coder_rounds.py",
+      "Experiments/Protocol_test/generate_sparse_trace.py",
+      "Experiments/Protocol_test/plot.py",
+      "Experiments/Protocol_test/plot_coder_dots.py",
+      "Experiments/Protocol_test/plot_prior_rates.py",
+      "Experiments/Protocol_test/plot_rd_rounds.py",
+      "Experiments/Protocol_test/replay.py",
+      "Experiments/Protocol_test/replay_fl_config.json",
+      "Experiments/Protocol_test/sparse_replay.py",
+      "Experiments/Protocol_test/tests/test_history.py",
+      "Experiments/Protocol_test/tests/test_optimized_history.py",
+      "Experiments/Protocol_test/tests/test_sparse_replay.py",
+      "FL_code/FL_core/client.py",
+      "FL_code/FL_core/codec.py",
+      "FL_code/FL_core/server.py",
+      "FL_code/FL_core/utils.py",
+      "FL_code/cancer_protocol/bin_coder/oracle_sw_mixin.py",
+      "FL_code/cancer_protocol/bin_coder/rans_mixin.py",
+      "FL_code/cancer_protocol/cancer_protocol.py",
+      "FL_code/cancer_protocol/optimized_history.py",
+      "FL_code/cancer_protocol/prior_code.py",
+      "FL_code/cancer_protocol/round_codecs.py",
+      "FL_code/cancer_protocol/wz_quantizer.py",
+      "Experiments/Protocol_test/records.py",
+      "Experiments/Protocol_test/tests/test_codec_lifecycle.py",
+      "Experiments/Protocol_test/tests/test_plot.py",
+      "Experiments/Protocol_test/tests/test_trace.py",
+      "FL_code/FL_core/trace.py",
+      "FL_code/cancer_protocol/bin_coder/coded_rounds.py",
+      "FL_code/cancer_protocol/bin_coder/staged_transport.py"
+    ],
+    "torch_version": "2.5.1+cu121",
+    "cuda_version": "12.1",
+    "gpu_names": [
+      "NVIDIA GeForce RTX 3090"
+    ],
+    "plan_path": "Experiments/Protocol_test/plans/smoke.json",
+    "output_root": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/Experiments/Protocol_test/exp_records/refactor_smoke",
+    "cache_root": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/_/data/protocol_cache/refactor_smoke",
+    "gpu_ids": [
+      0
+    ],
+    "cache_overwrite": false,
+    "plan": {
+      "name": "refactor_smoke",
+      "fl_config": "smoke_fl_config.json",
+      "trace": "../../../_/data/federated_learning/refactor_smoke",
+      "trace_device": "cuda:0",
+      "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+      "output_root": "../exp_records/refactor_smoke",
+      "cache_root": "../../../_/data/protocol_cache/refactor_smoke",
+      "gpu_ids": [
+        0
+      ],
+      "seed": 43,
+      "cases": [
+        {
+          "case_id": "start5",
+          "codec_id": "T",
+          "start_round": 5,
+          "client_ids": [
+            0,
+            2
+          ],
+          "round_codecs": [
+            "T|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43",
+            "F",
+            "F"
+          ]
+        },
+        {
+          "case_id": "start5",
+          "codec_id": "O",
+          "start_round": 5,
+          "client_ids": [
+            0,
+            2
+          ],
+          "round_codecs": [
+            "O|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43",
+            "F",
+            "F"
+          ]
+        },
+        {
+          "case_id": "start8",
+          "codec_id": "T",
+          "start_round": 8,
+          "client_ids": [
+            0,
+            2
+          ],
+          "round_codecs": [
+            "T|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43",
+            "F",
+            "F"
+          ]
+        },
+        {
+          "case_id": "start8",
+          "codec_id": "O",
+          "start_round": 8,
+          "client_ids": [
+            0,
+            2
+          ],
+          "round_codecs": [
+            "O|bins_per_plane=2|num_planes=3|hidden_dim=32|train_epochs=2|train_sample_size=2000|quantizer_train_repeats=2|prior_train_repeats=1|training_seed=43",
+            "F",
+            "F"
+          ]
+        }
+      ],
+      "comparisons": [
+        [
+          "O",
+          "T"
+        ]
+      ]
+    }
+  }
+}

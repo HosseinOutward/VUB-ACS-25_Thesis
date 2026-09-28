@@ -1,0 +1,9 @@
+candidate,reference,relative_round,rate_gap_bits,rate_gap_percent,distortion_gap_db,distortion_gap_percent
+O_oracle_sw_retrained,T_rans_retrained,,,,,
+O_oracle_sw_retrained,T_rans_retrained,0.0,,,,
+O,T,,,,,
+O,T,0.0,,,,
+T_rans_retrained,T,,,,,
+T_rans_retrained,T,0.0,,,,
+O_oracle_sw_retrained,O,,,,,
+O_oracle_sw_retrained,O,0.0,,,,

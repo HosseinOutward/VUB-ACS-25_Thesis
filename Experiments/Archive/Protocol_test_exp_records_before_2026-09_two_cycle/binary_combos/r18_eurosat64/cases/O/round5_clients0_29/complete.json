@@ -1,0 +1,46 @@
+{
+  "case": {
+    "case_id": "round5_clients0_29",
+    "codec_id": "O",
+    "protocol": "wz_cancer|train_at_round=5",
+    "start_round": 5,
+    "client_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29
+    ],
+    "round_codecs": [
+      "O|bins_per_plane=2|num_planes=1|hidden_dim=256|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=3|prior_train_repeats=1"
+    ]
+  },
+  "context_source": "raw_deltas",
+  "replace_selected_with_raw": true,
+  "seed": 43
+}

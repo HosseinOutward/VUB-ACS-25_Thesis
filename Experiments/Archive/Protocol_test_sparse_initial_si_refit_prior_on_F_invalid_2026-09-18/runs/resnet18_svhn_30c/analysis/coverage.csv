@@ -1,0 +1,13 @@
+codec_id,initial_si,case_id,rows,expected_rows,complete
+O,raw,raw_start5,8,210,False
+T,raw,raw_start5,0,210,False
+O,nsplit,nsplit_start5,0,210,False
+T,nsplit,nsplit_start5,0,210,False
+O,raw,raw_start10,0,210,False
+T,raw,raw_start10,0,210,False
+O,nsplit,nsplit_start10,0,210,False
+T,nsplit,nsplit_start10,0,210,False
+O,raw,raw_start20,0,210,False
+T,raw,raw_start20,0,210,False
+O,nsplit,nsplit_start20,0,210,False
+T,nsplit,nsplit_start20,0,210,False

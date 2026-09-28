@@ -1,0 +1,89 @@
+{
+  "trial": 17,
+  "seed": 45017,
+  "clients": [
+    0
+  ],
+  "params": {
+    "bins_per_plane": 3,
+    "reconst_ld": 900.0,
+    "tau": 0.3,
+    "lr": 0.001,
+    "train_epochs": 80,
+    "train_sample_size": 600000,
+    "train_batch_size": 100000,
+    "lr_step_fraction": 0.25,
+    "hidden_dim": 100,
+    "layers": 4,
+    "training_match_bits": 24,
+    "source_perturbation": "draw_discard"
+  },
+  "resolved_config": {
+    "bins_per_plane": 3,
+    "num_planes": 3,
+    "outlier_threshold": null,
+    "marginal_loss": false,
+    "max_side_info_count": 5,
+    "train_epochs": 80,
+    "reconst_ld": 900.0,
+    "train_sample_size": 600000,
+    "train_batch_size": 100000,
+    "lr": 0.001,
+    "lr_step": 20,
+    "tau": 0.3,
+    "quantizer_train_repeats": 2,
+    "prior_train_repeats": 2,
+    "training_progress_bar": false,
+    "training_log_every_epochs": null,
+    "tf32": false,
+    "fused_optimizer": true,
+    "mixed_precision": false,
+    "deduplicate_training": true,
+    "training_match_bits": 24,
+    "source_perturbation": "draw_discard",
+    "shared_heads": true,
+    "prior_context": "hard",
+    "prior_probabilities": "categorical",
+    "hidden_dim": 100,
+    "layers": 4,
+    "cache_dir": null,
+    "cache_overwrite": false
+  },
+  "stages": [
+    {
+      "stage": 1,
+      "rate": 0.2518773078918457,
+      "wmape_percent": 30.40390630240241,
+      "distortion_db": -10.341412290594088,
+      "mse": 1.4183744456719438e-10,
+      "delta_rate": 0.055762436985969555,
+      "delta_distortion_db": -0.03564478194003584,
+      "perpendicular_gap": 0.05249265194130502,
+      "rate_equivalent_gap": 0.05268759847862608
+    },
+    {
+      "stage": 2,
+      "rate": 0.3947713077068329,
+      "wmape_percent": 26.353199290081957,
+      "distortion_db": -11.583333074162478,
+      "mse": 1.0391178889568309e-10,
+      "delta_rate": 0.09312796592712402,
+      "delta_distortion_db": -0.10343526810745374,
+      "perpendicular_gap": 0.08389372913589123,
+      "rate_equivalent_gap": 0.08420529259083498
+    },
+    {
+      "stage": 3,
+      "rate": 0.45710447803139687,
+      "wmape_percent": 26.115641150494223,
+      "distortion_db": -11.66198615150535,
+      "mse": 1.0515375375996783e-10,
+      "delta_rate": 0.003921902924776066,
+      "delta_distortion_db": 1.645265847911638,
+      "perpendicular_gap": 0.1453084116539706,
+      "rate_equivalent_gap": 0.14584805616892554
+    }
+  ],
+  "objective_rate_gap": 0.09424698241279554,
+  "seconds": 196.01303024124354
+}

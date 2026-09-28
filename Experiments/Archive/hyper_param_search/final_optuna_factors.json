@@ -1,0 +1,42 @@
+[
+  {
+    "name": "reconst_ld",
+    "levels": [109.0659390066617, 72.31601255189986, 150.0]
+  },
+  {
+    "name": "tau",
+    "levels": [8.10774486896899, 5.5, 11.0]
+  },
+  {
+    "name": "lr",
+    "levels": [0.0056728196862653865, 0.003, 0.009]
+  },
+  {
+    "name": "train_epochs",
+    "levels": [160, 140, 200]
+  },
+  {
+    "name": "train_sample_size",
+    "levels": [550000, 350000, 700000]
+  },
+  {
+    "name": "train_batch_size",
+    "levels": [12500, 6250, 25000]
+  },
+  {
+    "name": "lr_step_fraction",
+    "levels": [0.3075161942517416, 0.25, 0.4]
+  },
+  {
+    "name": "hidden_dim",
+    "levels": [74, 62, 96]
+  },
+  {
+    "name": "layers",
+    "levels": [6, 5, 7]
+  },
+  {
+    "name": "source_perturbation",
+    "levels": ["draw_discard", "none", "add"]
+  }
+]

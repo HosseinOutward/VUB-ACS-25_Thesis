@@ -1,0 +1,255 @@
+{
+  "schema_version": 2,
+  "protocol_factory": "Experiments.Protocol_test.coder_rounds:optimized_coder_protocol_factory",
+  "plan": {
+    "name": "r18_eurosat64_coder_rounds",
+    "dataset_name": "EUROSAT",
+    "model_name": "resnet18",
+    "fl_config": "Experiments/Protocol_test/coder_round_plans/../../../_/data/federated_learning/r18_eurosat64_30c/fl_config.json",
+    "deltas": "Experiments/Protocol_test/coder_round_plans/../../../_/data/federated_learning/r18_eurosat64_30c",
+    "context": "Experiments/Protocol_test/coder_round_plans/../../../_/data/federated_learning/r18_eurosat64_30c",
+    "output_root": "Experiments/Protocol_test/coder_round_plans/../exp_records/r18_coder_rounds/eurosat64",
+    "cache_root": "Experiments/Protocol_test/coder_round_plans/../../../_/data/protocol_cache/r18_coder_rounds/eurosat64",
+    "cases": [
+      {
+        "case_id": "round5_clients0_29",
+        "codec_id": "T",
+        "protocol": "wz_cancer|replace_O_with='T'|retrained_prior_uses_server_si=False|train_at_round=5",
+        "start_round": 5,
+        "client_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "round_codecs": [
+          "T|bins_per_plane=2|num_planes=3|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=1|prior_train_repeats=1"
+        ]
+      },
+      {
+        "case_id": "round5_clients0_29",
+        "codec_id": "T_rans",
+        "protocol": "wz_cancer|replace_O_with='TR'|retrained_prior_uses_server_si=False|train_at_round=5",
+        "start_round": 5,
+        "client_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "round_codecs": [
+          "TR|bins_per_plane=2|num_planes=3|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=1|prior_train_repeats=1"
+        ]
+      },
+      {
+        "case_id": "round5_clients0_29",
+        "codec_id": "O",
+        "protocol": "wz_cancer|train_at_round=5",
+        "start_round": 5,
+        "client_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "round_codecs": [
+          "O|bins_per_plane=2|num_planes=3|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=1|prior_train_repeats=1"
+        ]
+      },
+      {
+        "case_id": "round5_clients0_29",
+        "codec_id": "O_oracle_sw",
+        "protocol": "wz_cancer|replace_O_with='OSW'|train_at_round=5",
+        "start_round": 5,
+        "client_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "round_codecs": [
+          "OSW|bins_per_plane=2|num_planes=3|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=1|prior_train_repeats=1"
+        ]
+      },
+      {
+        "case_id": "round5_clients0_29",
+        "codec_id": "O_oracle_sw_retrained",
+        "protocol": "wz_cancer|replace_O_with='OSWR'|train_at_round=5",
+        "start_round": 5,
+        "client_ids": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "round_codecs": [
+          "OSWR|bins_per_plane=2|num_planes=3|train_epochs=20|train_sample_size=200000|quantizer_train_repeats=1|prior_train_repeats=1"
+        ]
+      }
+    ],
+    "comparisons": [
+      [
+        "O_oracle_sw_retrained",
+        "T_rans"
+      ],
+      [
+        "O_oracle_sw",
+        "T_rans"
+      ],
+      [
+        "O_oracle_sw_retrained",
+        "O_oracle_sw"
+      ],
+      [
+        "T_rans",
+        "T"
+      ],
+      [
+        "O_oracle_sw",
+        "O"
+      ]
+    ],
+    "context_source": "raw_deltas",
+    "replace_selected_with_raw": false,
+    "codec_packages": [
+      "Experiments.Protocol_test.coder_rounds"
+    ],
+    "protocol_factory": "Experiments.Protocol_test.coder_rounds:optimized_coder_protocol_factory",
+    "seed": 43,
+    "gpu_ids": [
+      0
+    ],
+    "workers_per_gpu": 1,
+    "cache_overwrite": false
+  }
+}

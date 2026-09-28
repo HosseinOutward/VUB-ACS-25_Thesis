@@ -18,7 +18,15 @@
 *.rar
 
 # Generated training and experiment records
-/Experiments/Archive/
+# Archive source, configs, summaries, and plots are versioned; duplicated aggregate records and
+# heavyweight training/database artifacts remain local.
+/Experiments/Archive/**/records/
+/Experiments/Archive/**/*.db
+/Experiments/Archive/**/*.pt
+/Experiments/Archive/**/*.pth
+/Experiments/Archive/**/*.ckpt
+/Experiments/Archive/**/elements/
+/Experiments/Archive/**/raw_elements/
 /Experiments/Protocol_test/analysis_plots/**/*.png
 /Experiments/hyper_param_search/final_*_factors.json
 /Experiments/hyper_param_search/results/

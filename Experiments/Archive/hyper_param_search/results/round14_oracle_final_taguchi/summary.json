@@ -1,0 +1,687 @@
+{
+  "best_observed": {
+    "trial": 14,
+    "seed": 75014,
+    "clients": [
+      0
+    ],
+    "params": {
+      "reconst_ld": 72.31601255189986,
+      "tau": 11.0,
+      "lr": 0.0056728196862653865,
+      "train_epochs": 200,
+      "train_sample_size": 550000,
+      "train_batch_size": 6250,
+      "lr_step_fraction": 0.3075161942517416,
+      "hidden_dim": 62,
+      "layers": 7,
+      "source_perturbation": "none"
+    },
+    "resolved_config": {
+      "bins_per_plane": 3,
+      "num_planes": 3,
+      "outlier_threshold": null,
+      "marginal_loss": false,
+      "max_side_info_count": 5,
+      "train_epochs": 200,
+      "reconst_ld": 72.31601255189986,
+      "train_sample_size": 550000,
+      "train_batch_size": 6250,
+      "lr": 0.0056728196862653865,
+      "lr_step": 62,
+      "tau": 11.0,
+      "quantizer_train_repeats": 2,
+      "prior_train_repeats": 2,
+      "training_progress_bar": false,
+      "training_log_every_epochs": null,
+      "tf32": false,
+      "fused_optimizer": true,
+      "mixed_precision": false,
+      "deduplicate_training": true,
+      "training_match_bits": 26,
+      "source_perturbation": "none",
+      "shared_heads": true,
+      "prior_context": "hard",
+      "prior_probabilities": "categorical",
+      "hidden_dim": 62,
+      "layers": 7,
+      "cache_dir": null,
+      "cache_overwrite": false
+    },
+    "stages": [
+      {
+        "stage": 1,
+        "rate": 0.26137682795524597,
+        "wmape_percent": 27.170294619363816,
+        "distortion_db": -11.318113046238985,
+        "mse": 1.1888774686941161e-10,
+        "delta_rate": 0.06526195704936982,
+        "delta_distortion_db": -1.0123455375849328,
+        "perpendicular_gap": -0.021984719694319515,
+        "rate_equivalent_gap": -0.0220663662642656
+      },
+      {
+        "stage": 2,
+        "rate": 0.5585567057132721,
+        "wmape_percent": 16.84425223323352,
+        "distortion_db": -15.47096527773399,
+        "mse": 4.060753816537144e-11,
+        "delta_rate": 0.25691336393356323,
+        "delta_distortion_db": -3.9910674716789654,
+        "perpendicular_gap": -0.08704623824376441,
+        "rate_equivalent_gap": -0.08736950944658761
+      },
+      {
+        "stage": 3,
+        "rate": 0.8636061251163483,
+        "wmape_percent": 10.163673438220242,
+        "distortion_db": -19.858985948107012,
+        "mse": 1.4233935211049875e-11,
+        "delta_rate": 0.41042355000972747,
+        "delta_distortion_db": -6.551733948690025,
+        "perpendicular_gap": -0.15417842095165013,
+        "rate_equivalent_gap": -0.15475100679333637
+      }
+    ],
+    "objective_rate_gap": -0.0880622941680632,
+    "seconds": 1299.4227539543062
+  },
+  "recommended_params": {
+    "reconst_ld": 72.31601255189986,
+    "tau": 5.5,
+    "lr": 0.0056728196862653865,
+    "train_epochs": 140,
+    "train_sample_size": 550000,
+    "train_batch_size": 6250,
+    "lr_step_fraction": 0.3075161942517416,
+    "hidden_dim": 74,
+    "layers": 6,
+    "source_perturbation": "none"
+  },
+  "factor_effects": [
+    {
+      "factor": "reconst_ld",
+      "levels": [
+        109.0659390066617,
+        72.31601255189986,
+        150.0
+      ],
+      "mean_responses": [
+        -0.06494614836133025,
+        -0.07220689381849782,
+        -0.06513911386917275
+      ],
+      "selected_level": 72.31601255189986,
+      "effect_range": 0.007260745457167567
+    },
+    {
+      "factor": "tau",
+      "levels": [
+        8.10774486896899,
+        5.5,
+        11.0
+      ],
+      "mean_responses": [
+        -0.06934582294885004,
+        -0.07105893954704554,
+        -0.06188739355310527
+      ],
+      "selected_level": 5.5,
+      "effect_range": 0.009171545993940267
+    },
+    {
+      "factor": "lr",
+      "levels": [
+        0.0056728196862653865,
+        0.003,
+        0.009
+      ],
+      "mean_responses": [
+        -0.07223786896563775,
+        -0.0589181975767659,
+        -0.07113608950659718
+      ],
+      "selected_level": 0.0056728196862653865,
+      "effect_range": 0.01331967138887185
+    },
+    {
+      "factor": "train_epochs",
+      "levels": [
+        160,
+        140,
+        200
+      ],
+      "mean_responses": [
+        -0.06875706902996487,
+        -0.06959996193725276,
+        -0.06393512508178321
+      ],
+      "selected_level": 140,
+      "effect_range": 0.005664836855469549
+    },
+    {
+      "factor": "train_sample_size",
+      "levels": [
+        550000,
+        350000,
+        700000
+      ],
+      "mean_responses": [
+        -0.07410136229328695,
+        -0.056675993954787875,
+        -0.07151479980092601
+      ],
+      "selected_level": 550000,
+      "effect_range": 0.01742536833849908
+    },
+    {
+      "factor": "train_batch_size",
+      "levels": [
+        12500,
+        6250,
+        25000
+      ],
+      "mean_responses": [
+        -0.06758799435657864,
+        -0.0706080197971734,
+        -0.06409614189524876
+      ],
+      "selected_level": 6250,
+      "effect_range": 0.006511877901924645
+    },
+    {
+      "factor": "lr_step_fraction",
+      "levels": [
+        0.3075161942517416,
+        0.25,
+        0.4
+      ],
+      "mean_responses": [
+        -0.07565958028800542,
+        -0.06350724815744907,
+        -0.06312532760354635
+      ],
+      "selected_level": 0.3075161942517416,
+      "effect_range": 0.012534252684459068
+    },
+    {
+      "factor": "hidden_dim",
+      "levels": [
+        74,
+        62,
+        96
+      ],
+      "mean_responses": [
+        -0.06873284680145998,
+        -0.06843979630188336,
+        -0.06511951294565749
+      ],
+      "selected_level": 74,
+      "effect_range": 0.0036133338558024947
+    },
+    {
+      "factor": "layers",
+      "levels": [
+        6,
+        5,
+        7
+      ],
+      "mean_responses": [
+        -0.07061541916752631,
+        -0.06644610217475397,
+        -0.06523063470672055
+      ],
+      "selected_level": 6,
+      "effect_range": 0.005384784460805758
+    },
+    {
+      "factor": "source_perturbation",
+      "levels": [
+        "draw_discard",
+        "none",
+        "add"
+      ],
+      "mean_responses": [
+        -0.06601335514664126,
+        -0.0726286557536946,
+        -0.06365014514866497
+      ],
+      "selected_level": "none",
+      "effect_range": 0.008978510605029619
+    }
+  ],
+  "trials_by_objective": [
+    {
+      "trial": 14,
+      "objective_rate_gap": -0.0880622941680632,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 11.0,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 200,
+        "train_sample_size": 550000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 62,
+        "layers": 7,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 11,
+      "objective_rate_gap": -0.0878095591881528,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 11.0,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 140,
+        "train_sample_size": 700000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 96,
+        "layers": 6,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 13,
+      "objective_rate_gap": -0.08404718923460537,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 5.5,
+        "lr": 0.003,
+        "train_epochs": 200,
+        "train_sample_size": 700000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 74,
+        "layers": 6,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 24,
+      "objective_rate_gap": -0.08297823887631034,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 5.5,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 160,
+        "train_sample_size": 700000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 74,
+        "layers": 7,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 2,
+      "objective_rate_gap": -0.07953286007710555,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 5.5,
+        "lr": 0.009,
+        "train_epochs": 160,
+        "train_sample_size": 350000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 62,
+        "layers": 7,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 12,
+      "objective_rate_gap": -0.07938301398964054,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 8.10774486896899,
+        "lr": 0.009,
+        "train_epochs": 140,
+        "train_sample_size": 550000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 74,
+        "layers": 7,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 18,
+      "objective_rate_gap": -0.07825116792245922,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 8.10774486896899,
+        "lr": 0.009,
+        "train_epochs": 160,
+        "train_sample_size": 700000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 62,
+        "layers": 6,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 5,
+      "objective_rate_gap": -0.07790382945146014,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 5.5,
+        "lr": 0.009,
+        "train_epochs": 140,
+        "train_sample_size": 700000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 74,
+        "layers": 5,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 27,
+      "objective_rate_gap": -0.07596051386355523,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 5.5,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 140,
+        "train_sample_size": 550000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 96,
+        "layers": 5,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 25,
+      "objective_rate_gap": -0.07517025342243829,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 11.0,
+        "lr": 0.009,
+        "train_epochs": 140,
+        "train_sample_size": 350000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 74,
+        "layers": 6,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 1,
+      "objective_rate_gap": -0.07443629480175744,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 8.10774486896899,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 160,
+        "train_sample_size": 550000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 74,
+        "layers": 6,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 22,
+      "objective_rate_gap": -0.07431141450013845,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 11.0,
+        "lr": 0.009,
+        "train_epochs": 160,
+        "train_sample_size": 550000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 62,
+        "layers": 5,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 15,
+      "objective_rate_gap": -0.07430481327627207,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 8.10774486896899,
+        "lr": 0.009,
+        "train_epochs": 200,
+        "train_sample_size": 350000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 96,
+        "layers": 5,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 20,
+      "objective_rate_gap": -0.07388438463231424,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 8.10774486896899,
+        "lr": 0.003,
+        "train_epochs": 200,
+        "train_sample_size": 550000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 74,
+        "layers": 5,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 16,
+      "objective_rate_gap": -0.07122176642542143,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 5.5,
+        "lr": 0.003,
+        "train_epochs": 160,
+        "train_sample_size": 550000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 96,
+        "layers": 7,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 7,
+      "objective_rate_gap": -0.06958488823521981,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 8.10774486896899,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 200,
+        "train_sample_size": 700000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 62,
+        "layers": 5,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 8,
+      "objective_rate_gap": -0.06773113136798556,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 5.5,
+        "lr": 0.009,
+        "train_epochs": 200,
+        "train_sample_size": 550000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 96,
+        "layers": 6,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 3,
+      "objective_rate_gap": -0.06528283545196,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 11.0,
+        "lr": 0.003,
+        "train_epochs": 160,
+        "train_sample_size": 700000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 96,
+        "layers": 5,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 4,
+      "objective_rate_gap": -0.06419853647830291,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 8.10774486896899,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 140,
+        "train_sample_size": 350000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 96,
+        "layers": 7,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 26,
+      "objective_rate_gap": -0.06413916829629167,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 8.10774486896899,
+        "lr": 0.003,
+        "train_epochs": 140,
+        "train_sample_size": 700000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.3075161942517416,
+        "hidden_dim": 62,
+        "layers": 7,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 6,
+      "objective_rate_gap": -0.06192144689070639,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 11.0,
+        "lr": 0.003,
+        "train_epochs": 140,
+        "train_sample_size": 550000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 62,
+        "layers": 6,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 21,
+      "objective_rate_gap": -0.06024159077223918,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 5.5,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 200,
+        "train_sample_size": 350000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 62,
+        "layers": 6,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 17,
+      "objective_rate_gap": -0.0468689043071388,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 11.0,
+        "lr": 0.0056728196862653865,
+        "train_epochs": 160,
+        "train_sample_size": 350000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 74,
+        "layers": 5,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 23,
+      "objective_rate_gap": -0.045930138907392504,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 8.10774486896899,
+        "lr": 0.003,
+        "train_epochs": 160,
+        "train_sample_size": 350000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 96,
+        "layers": 6,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 10,
+      "objective_rate_gap": -0.03991333585472689,
+      "params": {
+        "reconst_ld": 72.31601255189986,
+        "tau": 5.5,
+        "lr": 0.003,
+        "train_epochs": 140,
+        "train_sample_size": 350000,
+        "train_batch_size": 6250,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 62,
+        "layers": 5,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 19,
+      "objective_rate_gap": -0.03363632155187479,
+      "params": {
+        "reconst_ld": 150.0,
+        "tau": 11.0,
+        "lr": 0.009,
+        "train_epochs": 200,
+        "train_sample_size": 700000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.4,
+        "hidden_dim": 96,
+        "layers": 7,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 9,
+      "objective_rate_gap": -0.023923512497474635,
+      "params": {
+        "reconst_ld": 109.0659390066617,
+        "tau": 11.0,
+        "lr": 0.003,
+        "train_epochs": 200,
+        "train_sample_size": 350000,
+        "train_batch_size": 12500,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 74,
+        "layers": 7,
+        "source_perturbation": "add"
+      }
+    }
+  ]
+}

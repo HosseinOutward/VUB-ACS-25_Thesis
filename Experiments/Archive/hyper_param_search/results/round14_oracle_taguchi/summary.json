@@ -1,0 +1,775 @@
+{
+  "best_observed": {
+    "trial": 13,
+    "seed": 45013,
+    "clients": [
+      0
+    ],
+    "params": {
+      "bins_per_plane": 3,
+      "reconst_ld": 300.0,
+      "tau": 1.0,
+      "lr": 0.009,
+      "train_epochs": 120,
+      "train_sample_size": 600000,
+      "train_batch_size": 25000,
+      "lr_step_fraction": 0.25,
+      "hidden_dim": 50,
+      "layers": 3,
+      "training_match_bits": 26,
+      "source_perturbation": "draw_discard"
+    },
+    "resolved_config": {
+      "bins_per_plane": 3,
+      "num_planes": 3,
+      "outlier_threshold": null,
+      "marginal_loss": false,
+      "max_side_info_count": 5,
+      "train_epochs": 120,
+      "reconst_ld": 300.0,
+      "train_sample_size": 600000,
+      "train_batch_size": 25000,
+      "lr": 0.009,
+      "lr_step": 30,
+      "tau": 1.0,
+      "quantizer_train_repeats": 2,
+      "prior_train_repeats": 2,
+      "training_progress_bar": false,
+      "training_log_every_epochs": null,
+      "tf32": false,
+      "fused_optimizer": true,
+      "mixed_precision": false,
+      "deduplicate_training": true,
+      "training_match_bits": 26,
+      "source_perturbation": "draw_discard",
+      "shared_heads": true,
+      "prior_context": "hard",
+      "prior_probabilities": "categorical",
+      "hidden_dim": 50,
+      "layers": 3,
+      "cache_dir": null,
+      "cache_overwrite": false
+    },
+    "stages": [
+      {
+        "stage": 1,
+        "rate": 0.1732012778520584,
+        "wmape_percent": 29.970875906479538,
+        "distortion_db": -10.466011290041386,
+        "mse": 1.4175764728729945e-10,
+        "delta_rate": -0.022913593053817738,
+        "delta_distortion_db": -0.16024378138733475,
+        "perpendicular_gap": -0.036600831685195,
+        "rate_equivalent_gap": -0.03673675938433425
+      },
+      {
+        "stage": 2,
+        "rate": 0.31578217446804047,
+        "wmape_percent": 24.64314820198185,
+        "distortion_db": -12.16607622283818,
+        "mse": 9.250960414375342e-11,
+        "delta_rate": 0.014138832688331604,
+        "delta_distortion_db": -0.6861784167831555,
+        "perpendicular_gap": -0.044886521242606385,
+        "rate_equivalent_gap": -0.04505322022932205
+      },
+      {
+        "stage": 3,
+        "rate": 0.3787399083375931,
+        "wmape_percent": 22.423537485525774,
+        "distortion_db": -12.98591746082012,
+        "mse": 7.408795799079826e-11,
+        "delta_rate": -0.07444266676902772,
+        "delta_distortion_db": 0.3213345385968669,
+        "perpendicular_gap": -0.04655039287942638,
+        "rate_equivalent_gap": -0.04672327113128011
+      }
+    ],
+    "objective_rate_gap": -0.042837750248312136,
+    "seconds": 166.08848698809743
+  },
+  "recommended_params": {
+    "bins_per_plane": 3,
+    "reconst_ld": 300.0,
+    "tau": 1.0,
+    "lr": 0.003,
+    "train_epochs": 120,
+    "train_sample_size": 600000,
+    "train_batch_size": 50000,
+    "lr_step_fraction": 1.0,
+    "hidden_dim": 150,
+    "layers": 4,
+    "training_match_bits": 28,
+    "source_perturbation": "add"
+  },
+  "factor_effects": [
+    {
+      "factor": "bins_per_plane",
+      "levels": [
+        2,
+        3,
+        4
+      ],
+      "mean_responses": [
+        0.14485158172394236,
+        0.06072257068464837,
+        0.10055446387753761
+      ],
+      "selected_level": 3,
+      "effect_range": 0.08412901103929399
+    },
+    {
+      "factor": "reconst_ld",
+      "levels": [
+        100.0,
+        300.0,
+        900.0
+      ],
+      "mean_responses": [
+        0.16531181775985326,
+        0.048707339987280135,
+        0.09210945853899498
+      ],
+      "selected_level": 300.0,
+      "effect_range": 0.11660447777257313
+    },
+    {
+      "factor": "tau",
+      "levels": [
+        0.3,
+        1.0,
+        3.0
+      ],
+      "mean_responses": [
+        0.16369350828193158,
+        0.06586338509666576,
+        0.07657172290753098
+      ],
+      "selected_level": 1.0,
+      "effect_range": 0.09783012318526582
+    },
+    {
+      "factor": "lr",
+      "levels": [
+        0.001,
+        0.003,
+        0.009
+      ],
+      "mean_responses": [
+        0.2024388853732613,
+        0.036288377448039234,
+        0.06740135346482778
+      ],
+      "selected_level": 0.003,
+      "effect_range": 0.16615050792522207
+    },
+    {
+      "factor": "train_epochs",
+      "levels": [
+        40,
+        80,
+        120
+      ],
+      "mean_responses": [
+        0.22030950396117835,
+        0.0537964603911172,
+        0.03202265193383279
+      ],
+      "selected_level": 120,
+      "effect_range": 0.18828685202734557
+    },
+    {
+      "factor": "train_sample_size",
+      "levels": [
+        100000,
+        300000,
+        600000
+      ],
+      "mean_responses": [
+        0.23602584945835497,
+        0.05816357552374867,
+        0.011939191304024703
+      ],
+      "selected_level": 600000,
+      "effect_range": 0.22408665815433026
+    },
+    {
+      "factor": "train_batch_size",
+      "levels": [
+        25000,
+        50000,
+        100000
+      ],
+      "mean_responses": [
+        0.11002806985735128,
+        0.08877230794179365,
+        0.10732823848698338
+      ],
+      "selected_level": 50000,
+      "effect_range": 0.021255761915557628
+    },
+    {
+      "factor": "lr_step_fraction",
+      "levels": [
+        0.25,
+        0.5,
+        1.0
+      ],
+      "mean_responses": [
+        0.1925964347234533,
+        0.08356952411705555,
+        0.029962657445619472
+      ],
+      "selected_level": 1.0,
+      "effect_range": 0.16263377727783385
+    },
+    {
+      "factor": "hidden_dim",
+      "levels": [
+        50,
+        100,
+        150
+      ],
+      "mean_responses": [
+        0.16741543540613857,
+        0.0965688383110379,
+        0.042144342568951845
+      ],
+      "selected_level": 150,
+      "effect_range": 0.12527109283718674
+    },
+    {
+      "factor": "layers",
+      "levels": [
+        2,
+        3,
+        4
+      ],
+      "mean_responses": [
+        0.18097562323899613,
+        0.06444060851419581,
+        0.0607123845329364
+      ],
+      "selected_level": 4,
+      "effect_range": 0.12026323870605973
+    },
+    {
+      "factor": "training_match_bits",
+      "levels": [
+        24,
+        26,
+        28
+      ],
+      "mean_responses": [
+        0.1310305348883728,
+        0.11820431941693638,
+        0.056893761980819205
+      ],
+      "selected_level": 28,
+      "effect_range": 0.07413677290755359
+    },
+    {
+      "factor": "source_perturbation",
+      "levels": [
+        "none",
+        "draw_discard",
+        "add"
+      ],
+      "mean_responses": [
+        0.16403643144971375,
+        0.077810513592301,
+        0.0642816712441136
+      ],
+      "selected_level": "add",
+      "effect_range": 0.09975476020560015
+    }
+  ],
+  "trials_by_objective": [
+    {
+      "trial": 13,
+      "objective_rate_gap": -0.042837750248312136,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 300.0,
+        "tau": 1.0,
+        "lr": 0.009,
+        "train_epochs": 120,
+        "train_sample_size": 600000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 50,
+        "layers": 3,
+        "training_match_bits": 26,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 7,
+      "objective_rate_gap": -0.02397103163379924,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 100.0,
+        "tau": 0.3,
+        "lr": 0.009,
+        "train_epochs": 120,
+        "train_sample_size": 600000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 100,
+        "layers": 4,
+        "training_match_bits": 28,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 19,
+      "objective_rate_gap": -0.023912954124581855,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 900.0,
+        "tau": 3.0,
+        "lr": 0.009,
+        "train_epochs": 120,
+        "train_sample_size": 600000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 150,
+        "layers": 2,
+        "training_match_bits": 24,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 2,
+      "objective_rate_gap": -0.0189913045657059,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 300.0,
+        "tau": 3.0,
+        "lr": 0.001,
+        "train_epochs": 80,
+        "train_sample_size": 600000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 150,
+        "layers": 2,
+        "training_match_bits": 26,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 26,
+      "objective_rate_gap": -0.015138121565014928,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 100.0,
+        "tau": 1.0,
+        "lr": 0.003,
+        "train_epochs": 120,
+        "train_sample_size": 100000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 150,
+        "layers": 4,
+        "training_match_bits": 24,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 3,
+      "objective_rate_gap": -0.003236115604605442,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 900.0,
+        "tau": 1.0,
+        "lr": 0.001,
+        "train_epochs": 120,
+        "train_sample_size": 300000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 100,
+        "layers": 2,
+        "training_match_bits": 28,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 4,
+      "objective_rate_gap": 0.0020063769236520986,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 100.0,
+        "tau": 0.3,
+        "lr": 0.003,
+        "train_epochs": 80,
+        "train_sample_size": 300000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 150,
+        "layers": 3,
+        "training_match_bits": 26,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 15,
+      "objective_rate_gap": 0.005217036705847051,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 100.0,
+        "tau": 3.0,
+        "lr": 0.009,
+        "train_epochs": 80,
+        "train_sample_size": 100000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 100,
+        "layers": 3,
+        "training_match_bits": 24,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 10,
+      "objective_rate_gap": 0.008505344848501122,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 300.0,
+        "tau": 1.0,
+        "lr": 0.003,
+        "train_epochs": 80,
+        "train_sample_size": 300000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 100,
+        "layers": 2,
+        "training_match_bits": 24,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 25,
+      "objective_rate_gap": 0.009422192201813045,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 900.0,
+        "tau": 3.0,
+        "lr": 0.003,
+        "train_epochs": 80,
+        "train_sample_size": 300000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 50,
+        "layers": 4,
+        "training_match_bits": 28,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 27,
+      "objective_rate_gap": 0.010079967652410529,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 300.0,
+        "tau": 0.3,
+        "lr": 0.003,
+        "train_epochs": 40,
+        "train_sample_size": 600000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 100,
+        "layers": 4,
+        "training_match_bits": 26,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 23,
+      "objective_rate_gap": 0.014925369844472925,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 100.0,
+        "tau": 1.0,
+        "lr": 0.001,
+        "train_epochs": 80,
+        "train_sample_size": 600000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 50,
+        "layers": 3,
+        "training_match_bits": 28,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 8,
+      "objective_rate_gap": 0.015208874679402776,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 300.0,
+        "tau": 3.0,
+        "lr": 0.009,
+        "train_epochs": 40,
+        "train_sample_size": 300000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 50,
+        "layers": 4,
+        "training_match_bits": 24,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 14,
+      "objective_rate_gap": 0.027012672247149802,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 900.0,
+        "tau": 0.3,
+        "lr": 0.009,
+        "train_epochs": 40,
+        "train_sample_size": 300000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 150,
+        "layers": 3,
+        "training_match_bits": 28,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 24,
+      "objective_rate_gap": 0.037921206637296805,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 300.0,
+        "tau": 0.3,
+        "lr": 0.001,
+        "train_epochs": 120,
+        "train_sample_size": 300000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 150,
+        "layers": 3,
+        "training_match_bits": 24,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 6,
+      "objective_rate_gap": 0.038502392508528764,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 900.0,
+        "tau": 1.0,
+        "lr": 0.003,
+        "train_epochs": 40,
+        "train_sample_size": 600000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 50,
+        "layers": 3,
+        "training_match_bits": 24,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 12,
+      "objective_rate_gap": 0.05941104989041371,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 100.0,
+        "tau": 3.0,
+        "lr": 0.003,
+        "train_epochs": 40,
+        "train_sample_size": 600000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 150,
+        "layers": 2,
+        "training_match_bits": 28,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 17,
+      "objective_rate_gap": 0.09424698241279554,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 900.0,
+        "tau": 0.3,
+        "lr": 0.001,
+        "train_epochs": 80,
+        "train_sample_size": 600000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 100,
+        "layers": 4,
+        "training_match_bits": 24,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 5,
+      "objective_rate_gap": 0.09983180022891643,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 300.0,
+        "tau": 3.0,
+        "lr": 0.003,
+        "train_epochs": 120,
+        "train_sample_size": 100000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 100,
+        "layers": 3,
+        "training_match_bits": 28,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 11,
+      "objective_rate_gap": 0.11397439434313235,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 900.0,
+        "tau": 0.3,
+        "lr": 0.003,
+        "train_epochs": 120,
+        "train_sample_size": 100000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 50,
+        "layers": 2,
+        "training_match_bits": 26,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 16,
+      "objective_rate_gap": 0.13540096659084477,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 300.0,
+        "tau": 1.0,
+        "lr": 0.001,
+        "train_epochs": 40,
+        "train_sample_size": 100000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 1.0,
+        "hidden_dim": 150,
+        "layers": 4,
+        "training_match_bits": 28,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 18,
+      "objective_rate_gap": 0.1455724393714631,
+      "params": {
+        "bins_per_plane": 3,
+        "reconst_ld": 100.0,
+        "tau": 3.0,
+        "lr": 0.001,
+        "train_epochs": 120,
+        "train_sample_size": 300000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 50,
+        "layers": 4,
+        "training_match_bits": 26,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 9,
+      "objective_rate_gap": 0.17558919108651208,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 900.0,
+        "tau": 1.0,
+        "lr": 0.009,
+        "train_epochs": 80,
+        "train_sample_size": 100000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 150,
+        "layers": 4,
+        "training_match_bits": 26,
+        "source_perturbation": "none"
+      }
+    },
+    {
+      "trial": 21,
+      "objective_rate_gap": 0.19324695406216677,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 300.0,
+        "tau": 0.3,
+        "lr": 0.009,
+        "train_epochs": 80,
+        "train_sample_size": 100000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 50,
+        "layers": 2,
+        "training_match_bits": 28,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 20,
+      "objective_rate_gap": 0.28105918840906474,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 100.0,
+        "tau": 1.0,
+        "lr": 0.009,
+        "train_epochs": 40,
+        "train_sample_size": 300000,
+        "train_batch_size": 100000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 100,
+        "layers": 2,
+        "training_match_bits": 26,
+        "source_perturbation": "add"
+      }
+    },
+    {
+      "trial": 22,
+      "objective_rate_gap": 0.39738637178021047,
+      "params": {
+        "bins_per_plane": 4,
+        "reconst_ld": 900.0,
+        "tau": 3.0,
+        "lr": 0.001,
+        "train_epochs": 40,
+        "train_sample_size": 100000,
+        "train_batch_size": 50000,
+        "lr_step_fraction": 0.5,
+        "hidden_dim": 100,
+        "layers": 3,
+        "training_match_bits": 26,
+        "source_perturbation": "draw_discard"
+      }
+    },
+    {
+      "trial": 1,
+      "objective_rate_gap": 1.0187240518925795,
+      "params": {
+        "bins_per_plane": 2,
+        "reconst_ld": 100.0,
+        "tau": 0.3,
+        "lr": 0.001,
+        "train_epochs": 40,
+        "train_sample_size": 100000,
+        "train_batch_size": 25000,
+        "lr_step_fraction": 0.25,
+        "hidden_dim": 50,
+        "layers": 2,
+        "training_match_bits": 24,
+        "source_perturbation": "none"
+      }
+    }
+  ]
+}
