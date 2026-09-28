@@ -20,9 +20,10 @@ independent of which clients are measured for compression.
    runner uses it to decide reuse; the analysis path uses it to read finished cases.
 4. **Analysis.** `plot.py` reads every finished case through `records.read_completed_case` and
    writes `analysis/stage_points.csv`, `comparison_gaps.csv`, `timing_summary.csv`, and one figure
-   directory per rate source (`analysis/prior_stage_rates/`, `analysis/coder_stage_rates/`) holding
-   that source's `rd_overall`, `rd_by_start`, `rd_by_phase` (trained round beside the frozen-round
-   average) and, for multi-cycle plans, `rd_cycle_<n>` views. Workers count equally: stage WMAPE is the mean worker ratio (records store
+   directory per rate source (`analysis/prior_stage_rates/`, `analysis/coder_stage_rates/`) plus
+   `analysis/combined_rate_sources/`, which draws both staged sources against one shared x axis.
+   Every directory holds the same `rd_overall`, `rd_by_start`, `rd_by_phase` (trained round beside
+   the frozen-round average) and, for multi-cycle plans, `rd_cycle_<n>` views. Workers count equally: stage WMAPE is the mean worker ratio (records store
    percentages), then `20*log10(mean)` dB; stage rates are mean worker rates, then cumulative. Rate sources
    (`prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
    another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
@@ -35,34 +36,54 @@ Run a plan with:
 .venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
 ```
 
+## Global view
+
+`plot.py --global <container>` discovers every experiment output root under `<container>` that has
+written case records and draws them all into `<container>/_global_analysis`: the same figure
+directories and views as one experiment's `analysis/`, plus the pooled `stage_points.csv`, with
+every experiment on one axis. Coverage, timing and gap tables stay with the experiment that owns
+them. Codec is the line hue, sparse start an ordinal shade of that hue (also written at each curve
+end), experiment the dash pattern, and rate source the marker; `initial_si` is named in the legend
+only. O, OR, T, and TR use a stable color lexicon; other codec names use the remaining palette in
+sorted order.
+
+```bash
+.venv/bin/python -m Experiments.Protocol_test.plot Experiments/Protocol_test/Runs_exp --global
+```
+
+Keep it live with its own watcher, launched independently of any run, since experiments under the
+container start and finish at different times. It refreshes on change and runs until stopped:
+
+```bash
+systemd-run --user --collect --unit=fl-wz-global-plot --service-type=exec \
+  --working-directory=$PWD .venv/bin/python -u -m Experiments.Protocol_test.live_plot \
+  Experiments/Protocol_test/Runs_exp --global
+```
+
 ## Tracked plans
 
-- `plans/smoke.json` (+ `plans/smoke_fl_config.json`): a tiny SVHN/resnet56/3-client plan for
-  validating the pipeline end to end. Two windows (starts 5 and 8), workers `[0, 2]`, codecs `T`
-  and `O` only, tiny quantizer settings. Output under
-  `Experiments/Protocol_test/exp_records/refactor_smoke`.
-- `plans/frozen_schedule.json` (+ `plans/frozen_schedule_fl_config.json`): the retained
-  study (ResNet-56/CIFAR-10, 30 clients, starts 5 and 12, all 30 workers, codecs `T`, `TR`, `TRR`,
-  `O`, `OSW`, `OSWR`). Its settings were recovered from
-  `exp_records/binary_frozen/r56_cifar10/test_config.json`. **This is a new study, not a reproduction
-  of `binary_frozen`**: schedule placement (`protocol.set_schedule`), record identity
-  (`complete.json`'s identity/provenance split), and trace generation (`Trace`, a new directory
-  `r56_cifar10_30c_frozen_v2`) all differ from that run. Do not run this plan casually - it
-  trains real ResNet-56 quantizers over 30 clients and two 13-round windows.
+- `plans/or_svhn_30c_f9.json` and `plans/tr_svhn_30c_f9.json` share the seed-43
+  SVHN/ResNet-18 trace. Each measures all 30 clients at starts 5, 12, and 20 with one trained round
+  followed by nine frozen rounds.
+- `plans/o_svhn_30c_f9_warm.json` and `plans/t_svhn_30c_f9_warm.json` use those placements with the
+  warm-pool protocol. Within each trained round, the first five workers build the shared cold pool
+  and the remaining workers use warm starts; worker curves remain intentionally aggregated.
+- `plans/or_tr_svhn_30c_start12_seed44.json` (+ `plans/svhn_30c_fl_config_seed44.json`) regenerates
+  an independent seed-44 FL trajectory and compares OR with TR at start 12.
+
+These plans train real 30-client quantizers and are not smoke tests.
 
 ## Validation commands
 
 ```bash
-.venv/bin/python -m pytest -q --import-mode=importlib tests/test_codec_lifecycle.py tests/test_history.py tests/test_trace.py tests/test_staged_transport.py tests/test_oracle_sw_mixin.py Experiments/Protocol_test/tests/test_plot.py Experiments/Protocol_test/tests/test_sparse_replay.py Experiments/slepian_wolf/test_oracle_sw_mixin.py Experiments/slepian_wolf/test_practical_sw.py
-.venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
-.venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
-.venv/bin/python -m Experiments.Protocol_test.plot Experiments/Protocol_test/exp_records/refactor_smoke
+.venv/bin/python -m pytest -q Experiments/Protocol_test/test_records.py Experiments/Protocol_test/test_rd_metrics.py FL_code/cancer_protocol/test_round_prior_integration.py FL_code/cancer_protocol/test_warm_training.py
 ```
 
-The second `sparse_replay` invocation reuses every completed case (identity match) without
-recompression. Quantizer and conditional-prior training are deliberately uncached; a case that has
-not reached `complete.json` starts cleanly in a new output directory. Seeded reruns reproduce
-trained weights, symbols, rates, and WMAPE exactly, but
+A repeated `sparse_replay` invocation reuses every completed case (identity match) without
+recompression. Quantizer and conditional-prior training are deliberately uncached. An interrupted
+case is recovered only when its pre-run identity matches and its full CSV validates; other partial
+output requires inspection or a new output directory. Seeded reruns reproduce trained weights,
+symbols, rates, and WMAPE exactly, but
 `encoder_size`, `decoder_size`, and `final_bytes` jitter by ~0.1%: they are gzip'd pickles, and
 pickling bitwise-equal torch tensors does not yield identical bytes.
 
@@ -79,9 +100,13 @@ parts:
   case and the differing top-level keys - it never silently retrains or overwrites.
 - **`provenance`**: git `HEAD`, a fingerprint (and file list) of relevant uncommitted source under
   `FL_code/` and `Experiments/Protocol_test/`, torch/CUDA versions, the GPU names actually used,
-  the plan path, output root, compressed-history cache root, `gpu_ids`, the explicit disabled model-
-  training-cache policy, and the original plan JSON. This half is never compared for reuse: changing
-  `gpu_ids`, output location, or compressed-history cache location does not alter codec semantics.
+  the plan path, output root, `gpu_ids`, the explicit disabled model-training-cache policy, and the
+  original plan JSON. This half is never compared for reuse: changing `gpu_ids` or output location
+  does not alter codec semantics.
+
+Each case also writes a small atomic `pre_run_identity.json` before replay starts. If a replay is
+interrupted after its CSV is complete but before `complete.json`, recovery compares this sidecar
+with the freshly computed identity before marking the case complete.
 
 ## Oracle assumptions
 

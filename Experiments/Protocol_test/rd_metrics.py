@@ -9,6 +9,20 @@ from numpy.typing import NDArray
 GAP_METRIC_NAME = "mean_interpolated_equal_distortion_gap"
 
 
+def wmape_to_db(wmape_percent: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Convert positive linear WMAPE percentages to the repository's amplitude-ratio dB scale."""
+    values = np.asarray(wmape_percent, dtype=np.float64)
+    assert np.isfinite(values).all() and (values > 0).all(), "WMAPE must be finite and positive."
+    return 20 * np.log10(values / 100)
+
+
+def mean_wmape_db(wmape_percent: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Average equal-weight WMAPE observations in linear space, then convert their curve to dB."""
+    values = np.asarray(wmape_percent, dtype=np.float64)
+    assert values.ndim >= 2, "Expected observations by stage before averaging WMAPE."
+    return wmape_to_db(values.mean(axis=0))
+
+
 def _mean_curve_gap(
     x: NDArray[np.float64],
     y: NDArray[np.float64],

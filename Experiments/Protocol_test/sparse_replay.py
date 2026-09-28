@@ -144,6 +144,18 @@ def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> i
     return int(content_hash((seed, start_round, round_id, client_id), {})[:8], 16)
 
 
+def _case_metadata(case: ReplayCase, protocol: _WZProtocol) -> dict[str, Any]:
+    """Return the schedule contract shared by case and experiment identities."""
+    return {
+        "protocol": case.protocol,
+        "start_round": case.start_round,
+        "initial_si": case.initial_si,
+        "client_ids": list(case.client_ids),
+        "round_codecs": list(case.round_codecs),
+        "warm_retrain_repeats": getattr(protocol, "warm_retrain_repeats", None),
+    }
+
+
 def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any],
                     protocol: _WZProtocol) -> dict[str, Any]:
     """Build the part of `complete.json` that decides whether a case can be reused."""
@@ -154,11 +166,7 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "seed": plan.seed,
         "codec_seed_policy": _CODEC_SEED_POLICY,
         "raw_update_cache": "disabled",
-        "case": {
-            "protocol": case.protocol, "start_round": case.start_round,
-            "initial_si": case.initial_si, "client_ids": list(case.client_ids),
-            "round_codecs": list(case.round_codecs),
-        },
+        "case": _case_metadata(case, protocol),
         "protocol_snapshot": protocol_snapshot,
         "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
@@ -183,10 +191,8 @@ def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[
         "raw_update_cache": "disabled",
         "trace": trace_identity,
         "cases": [
-            {"case_id": case.case_id, "codec_id": case.codec_id, "protocol": case.protocol,
-             "start_round": case.start_round, "initial_si": case.initial_si,
-             "client_ids": list(case.client_ids),
-             "round_codecs": list(case.round_codecs)}
+            {"case_id": case.case_id, "codec_id": case.codec_id}
+            | _case_metadata(case, case_protocol(plan, case))
             for case in plan.cases
         ],
         "comparisons": [list(pair) for pair in plan.comparisons],
@@ -251,12 +257,27 @@ def run_case(
     records_path = case_dir / "compression_records.csv"
     identity = _case_identity(plan, case, trace_identity, protocol)
     completion = case_dir / "complete.json"
+    pre_run_identity = case_dir / "pre_run_identity.json"
+    if pre_run_identity.exists():
+        stored = json.loads(pre_run_identity.read_text())
+        mismatched = records.identity_mismatches(identity, stored["identity"])
+        assert not mismatched, f"Pre-run case identity differs at {case_dir}: {mismatched}."
     if completion.exists():
         records.read_completed_case(case_dir, expected_identity=identity)
         return records_path
-    assert not case_dir.exists(), (
-        f"Incomplete case output: {case_dir}. Use a new output root or remove that case before retrying.")
+    if case_dir.exists():
+        assert pre_run_identity.is_file(), (
+            f"Existing case output lacks pre_run_identity.json, so recovery is unsafe: {case_dir}."
+        )
+        records.validate_case_records(records_path, identity["case"])
+        temporary = completion.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
+        temporary.replace(completion)
+        return records_path
     case_dir.mkdir(parents=True)
+    temporary = pre_run_identity.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"identity": identity}, indent=2))
+    temporary.replace(pre_run_identity)
 
     checkpoint_rounds = {candidate.start_round for candidate in plan.cases}
     history_name = "raw_history" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_history"
