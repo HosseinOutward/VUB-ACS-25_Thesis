@@ -23,7 +23,10 @@ class FLConfig(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid", validate_assignment=True)
 
-    protocol: str = Field(description="Compression protocol to run.")
+    protocol: str = Field(
+        "wz_cancer_warm",
+        description="Compression protocol to run; wz_cancer selects the explicit cold-training schedule.",
+    )
     run_name: str | None = Field(None, description="Optional name for this run.")
 
     model_name: str = Field(

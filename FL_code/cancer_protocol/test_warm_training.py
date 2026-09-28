@@ -6,6 +6,8 @@ import pytest
 import torch
 
 from FL_code.FL_core.cache import model_training_hash
+from FL_code.FL_core.codec import create_protocol
+from FL_code.run_fl import FLConfig
 
 from . import wz_quantizer as wz_quantizer_module
 from .cancer_protocol import WarmWZCancerProtocol, WZCancerProtocol
@@ -37,6 +39,24 @@ def _codec(codec_class: type[T_RoundCodec | Oracle_RoundCodec], *, warm_training
     )
     codec.quantizer = WZQuantizerCancer(codec.c_cfg, si_size=1)
     return codec
+
+
+def test_warm_protocol_and_three_cold_attempts_are_the_production_defaults() -> None:
+    """Default FL uses the pool protocol while explicit cold training keeps its legacy name."""
+    config = _config()
+
+    assert FLConfig().protocol == WarmWZCancerProtocol.protocol_name == "wz_cancer_warm"
+    assert isinstance(create_protocol(FLConfig().protocol), WarmWZCancerProtocol)
+    assert isinstance(create_protocol("wz_cancer"), WZCancerProtocol)
+    assert config.quantizer_train_repeats == config.prior_train_repeats == 3
+    assert config.warm_retrain_repeats == 2
+    assert config.training_cache_payload()["quantizer_train_repeats"] == 3
+    assert config.training_cache_payload()["prior_train_repeats"] == 3
+    historical_payload = config.model_copy(
+        update={"quantizer_train_repeats": 2, "prior_train_repeats": 2}
+    ).training_cache_payload()
+    assert "quantizer_train_repeats" not in historical_payload
+    assert historical_payload["prior_train_repeats"] == 2
 
 
 def test_warm_start_state_is_loaded_once_and_copied() -> None:

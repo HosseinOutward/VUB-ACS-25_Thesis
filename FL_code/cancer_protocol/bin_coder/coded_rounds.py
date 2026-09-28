@@ -10,15 +10,25 @@ from .rans_mixin import RansRoundMixin
 
 
 class TRansRoundCodec(RansRoundMixin, T_RoundCodec):
-    """Temporal WZ quantization followed by lossless conditional rANS."""
+    """Temporal WZ quantization followed by rANS using the granted oracle prior.
+
+    The prior is fitted from the transmitted symbols and supplied to the decoder out of band;
+    its parameters are therefore excluded from the staged payload byte count.
+    """
 
     round_name: ClassVar[str] = "TR"
+    code_with_oracle_prior = True
 
 
 class OracleRansRoundCodec(RansRoundMixin, Oracle_RoundCodec):
-    """Oracle WZ quantization followed by lossless conditional rANS."""
+    """Oracle WZ quantization followed by rANS using the granted oracle prior.
+
+    The prior is fitted from the transmitted symbols and supplied to the decoder out of band;
+    its parameters are therefore excluded from the staged payload byte count.
+    """
 
     round_name: ClassVar[str] = "OR"
+    code_with_oracle_prior = True
 
 
 class TRansOraclePriorRoundCodec(RansRoundMixin, T_RoundCodec):

@@ -111,25 +111,26 @@ class PriorCalculator:
         soft_codes: torch.Tensor,
         side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
         c_cfg: WZcfgQuant,
-        source_model: EncoderDecoderLayeredRNN,
+        source_model: EncoderDecoderLayeredRNN | None,
         batch_size: int = 50_000,
     ) -> EncoderDecoderLayeredRNN:
-        """Fine-tune an independent copy of a quantizer's conditional prior on fixed bins."""
+        """Fit a prior from a quantizer copy, or from scratch when no source model is supplied."""
         assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
         )
-        assert source_model.num_planes == c_cfg.num_planes
-        assert source_model.bins_per_plane == c_cfg.bins_per_plane
-        assert source_model.marginal == c_cfg.marginal_loss, (
-            "Retrained prior configuration must match the source quantizer's marginal architecture."
-        )
-        if not source_model.marginal:
+        if source_model is not None:
+            assert source_model.num_planes == c_cfg.num_planes
+            assert source_model.bins_per_plane == c_cfg.bins_per_plane
+            assert source_model.marginal == c_cfg.marginal_loss, (
+                "Retrained prior configuration must match the source quantizer's marginal architecture."
+            )
             # Copy-based retraining intentionally preserves the quantizer prior architecture;
             # schedules using different T/O visibility policies must not change its SI width.
-            assert source_model.conditionalRNN.input_dim == (
-                c_cfg.bins_per_plane + side_info.shape[1]
-            ), "Retrained prior side-information width must match the quantizer prior architecture."
+            if not source_model.marginal:
+                assert source_model.conditionalRNN.input_dim == (
+                    c_cfg.bins_per_plane + side_info.shape[1]
+                ), "Retrained prior side-information width must match the quantizer prior architecture."
         retrain_cfg = c_cfg.warm_retraining_config(c_cfg.prior_retrain_epochs)
         if c_cfg.cache_dir is None:
             return _train_prior_model(
@@ -145,12 +146,31 @@ class PriorCalculator:
             side_info=side_info,
             c_cfg=retrain_cfg,
             source_model=source_model,
-            source_prior_state=source_model.conditional_state_dict(),
+            source_prior_state=(
+                None if source_model is None else source_model.conditional_state_dict()),
             batch_size=batch_size,
         )
-        model = source_model.copy_for_prior_retraining()
+        model = (
+            _new_prior_model(retrain_cfg, side_info.shape[1])
+            if source_model is None else source_model.copy_for_prior_retraining()
+        )
         model.load_state_dict(state_dict, strict=True)
         return model
+
+
+def _new_prior_model(c_cfg: WZcfgQuant, side_info_size: int) -> EncoderDecoderLayeredRNN:
+    """Construct the independent full-SI architecture used by scratch prior retraining."""
+    from .wz_quantizer import new_rnn_model
+
+    return new_rnn_model(
+        c_cfg.num_planes,
+        c_cfg.bins_per_plane,
+        side_info_size,
+        c_cfg.marginal_loss,
+        c_cfg.hidden_dim,
+        c_cfg.layers,
+        c_cfg.shared_heads,
+    ).copy_for_prior_retraining()
 
 
 def _train_prior_model(
@@ -158,7 +178,7 @@ def _train_prior_model(
     soft_codes: torch.Tensor,
     side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     c_cfg: WZcfgQuant,
-    source_model: EncoderDecoderLayeredRNN,
+    source_model: EncoderDecoderLayeredRNN | None,
     batch_size: int,
 ) -> EncoderDecoderLayeredRNN:
     from .wz_quantizer import wz_model_training_loop
@@ -172,7 +192,10 @@ def _train_prior_model(
     for attempt_index in range(c_cfg.prior_train_repeats + 2):
         if len(attempts) == c_cfg.prior_train_repeats:
             break
-        candidate = source_model.copy_for_prior_retraining()
+        candidate = (
+            _new_prior_model(c_cfg, side_info.shape[1])
+            if source_model is None else source_model.copy_for_prior_retraining()
+        )
         prior_heads = (
             candidate.conditionalPriors
             if not candidate.shared_priors else (candidate.conditionalPrior,))
@@ -198,8 +221,8 @@ def _train_prior_parameters(
     soft_codes: torch.Tensor,
     side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
     c_cfg: WZcfgQuant,
-    source_model: EncoderDecoderLayeredRNN,
-    source_prior_state: dict[str, torch.Tensor],
+    source_model: EncoderDecoderLayeredRNN | None,
+    source_prior_state: dict[str, torch.Tensor] | None,
     batch_size: int,
 ) -> dict[str, torch.Tensor]:
     # See _train_quantizer_parameters: seeded on a cache miss, forked so hits and misses match.

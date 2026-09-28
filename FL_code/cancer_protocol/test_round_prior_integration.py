@@ -6,9 +6,10 @@ import torch
 
 from . import prior_code as prior_code_module
 from . import wz_quantizer as wz_quantizer_module
+from .bin_coder.coded_rounds import OracleRansRoundCodec, TRansRoundCodec
 from .prior_code import PriorCalculator, _prior_training_hash
 from .brent_wz_models import EncoderDecoderLayeredRNN
-from .round_codecs import T_RoundCodec
+from .round_codecs import Oracle_RoundCodec, T_RoundCodec
 from .wz_quantizer import WZcfgQuant
 
 
@@ -37,7 +38,7 @@ def test_retrained_prior_is_initialized_from_quantizer_and_reused_by_frozen_roun
         staticmethod(lambda prior, bins, num_planes: torch.zeros((num_planes, bins.shape[1]))),
     )
 
-    codec = T_RoundCodec(None, "T")
+    codec = Oracle_RoundCodec(None, "O")
     codec.c_cfg = WZcfgQuant(bins_per_plane=2, num_planes=2)
     codec._retrained_prior_model = None
     codec.quantizer = SimpleNamespace(
@@ -189,6 +190,54 @@ def test_prior_retraining_rejects_incompatible_side_information_width() -> None:
     soft_codes = torch.zeros((2, 3, 2))
     with pytest.raises(AssertionError, match="side-information width"):
         PriorCalculator.make_trained_prior_model(bins, soft_codes, torch.zeros(3, 2), config, source)
+
+
+def test_scratch_prior_retraining_builds_for_full_side_information(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T's independent retrained prior is constructed for its wider server-side SI."""
+    config = WZcfgQuant(
+        bins_per_plane=2,
+        num_planes=2,
+        hidden_dim=4,
+        layers=1,
+        prior_train_repeats=1,
+        prior_retrain_epochs=1,
+    )
+    monkeypatch.setattr(wz_quantizer_module, "wz_model_training_loop", lambda *args, **kwargs: 0.0)
+
+    prior = PriorCalculator.make_trained_prior_model(
+        torch.zeros((2, 3), dtype=torch.long),
+        torch.zeros((2, 3, 2)),
+        torch.zeros((3, 2)),
+        config,
+        source_model=None,
+    )
+
+    assert prior.conditionalRNN.input_dim == 4
+    assert all(name.startswith("conditional") for name in prior.state_dict())
+
+
+def test_t_retrained_prior_starts_from_scratch_while_oracle_copies_quantizer() -> None:
+    """Only temporal quantizers need a new architecture for the server-wide prior."""
+    assert T_RoundCodec.retrained_prior_from_scratch is True
+    assert Oracle_RoundCodec.retrained_prior_from_scratch is False
+
+
+def test_rans_temporal_and_oracle_codecs_use_an_out_of_band_oracle_prior() -> None:
+    """TR and OR code symbols with the study prior, whose grant is outside payload bytes."""
+    for codec_class in (TRansRoundCodec, OracleRansRoundCodec):
+        codec = object.__new__(codec_class)
+        retrained_prior, quantizer_prior = object(), object()
+        codec._oracle_prior = retrained_prior
+        codec.quantizer = SimpleNamespace(coding_model=quantizer_prior)
+        provenance = codec_class.codec_provenance()
+        assert codec_class.code_with_oracle_prior is True
+        assert codec.coder_prior_model() is retrained_prior
+        assert provenance["oracle_prior_granted"] is True
+        assert provenance["coder_prior_si"] == "decoder_legal_exact_oracle_grant"
+        assert provenance["prior_stage_rates_si"] == "decoder_legal_exact_oracle_grant"
+        assert provenance["oracle_prior_grant_channel"] == "out_of_band_not_in_final_bytes"
 
 
 def test_prior_retraining_rejects_incompatible_marginal_architecture() -> None:

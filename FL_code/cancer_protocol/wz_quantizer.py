@@ -674,8 +674,8 @@ class WZcfgQuant(BaseModel):
     tau: float = 5.5
     warm_training: bool = False
     warm_retrain_repeats: int = Field(default=2, ge=1, strict=True)
-    quantizer_train_repeats: int = 2
-    prior_train_repeats: int = 2
+    quantizer_train_repeats: int = 3
+    prior_train_repeats: int = 3
     prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)
     # Distinguishes stochastic training outcomes for otherwise-identical (target, SI, config)
     # inputs, e.g. a sparse-replay case seeding torch's RNG per client-round. Omitted from the
@@ -716,6 +716,8 @@ class WZcfgQuant(BaseModel):
             "training_log_every_epochs": None,
             "tf32": False,
         }
+        # Two was the omitted historical default. Every other value, including today's default,
+        # must remain explicit so it cannot reuse a legacy two-repeat cache entry.
         if self.quantizer_train_repeats != 2:
             payload["quantizer_train_repeats"] = self.quantizer_train_repeats
         if self.warm_training:

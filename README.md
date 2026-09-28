@@ -10,7 +10,7 @@ This repository studies two-step compression: a learned Wyner–Ziv quantizer fo
 - `Paper_doc/` — paper sources.
 - `.claude/` and `.vscode/` — local agent and editor configuration.
 
-The `.venv` entry is a shared environment symlink. From the repository root, invoke FL with `python -m FL_code.run_fl` (supply the required `--protocol`; use `python -m FL_code.run_fl --help` to inspect options); experiment modules use the same `python -m FL_code...` form. Run the sparse study with:
+The `.venv` entry is a shared environment symlink. From the repository root, invoke FL with `python -m FL_code.run_fl`; it defaults to the warm-pool `wz_cancer_warm` protocol, while `--protocol wz_cancer` explicitly selects cold quantizer training. Use `python -m FL_code.run_fl --help` to inspect the remaining options. Experiment modules use the same `python -m FL_code...` form. Run the sparse study with:
 
 ```bash
 .venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json

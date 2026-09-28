@@ -69,7 +69,7 @@ class StagedIndexTransportMixin:
             super().add_prior_to_record(*args, **kwargs)
             return
         # A protocol may estimate diagnostics with wider server SI. An actual coder must evaluate
-        # the same model with the same SI shape at both ends, including temporal TRR rounds.
+        # the same model with the same SI shape at both ends, including temporal rounds.
         diagnostic_side_information = self._prior_side_information
         self._prior_side_information = None
         try:
@@ -128,9 +128,8 @@ class StagedIndexTransportMixin:
             symbol_error_rate=self.symbol_error_rate(bins, metadata, payload),
         )
         outer_payload["payload_content"] = (payload, metadata)
-        # The oracle prior is granted out-of-band (see `oracle_prior_grant`): it must not be
-        # serialized here, or TRR/OSWR's final_bytes would silently include a whole prior model's
-        # weights and stop being comparable to TR/OSW's.
+        # The source-fitted prior is granted out of band (see `oracle_prior_grant`): serializing
+        # its weights here would silently fold model transport into the staged-symbol payload.
         return outer_payload
 
     def decode(self, payload: bytes, record: CancerRecord) -> torch.Tensor:
@@ -156,8 +155,7 @@ class StagedIndexTransportMixin:
         facts["coder_prior_si"] = (
             "decoder_legal_exact_oracle_grant" if cls.code_with_oracle_prior else "quantizer_decoder_si"
         )
-        # Non-oracle transports keep the base policy: their retrained prior is a diagnostic
-        # reference, not the model the coder conditions on.
+        # Transports that do not select the source-fitted prior keep the base diagnostic policy.
         if cls.code_with_oracle_prior:
             facts["prior_stage_rates_si"] = "decoder_legal_exact_oracle_grant"
         facts["oracle_prior_grant_channel"] = (

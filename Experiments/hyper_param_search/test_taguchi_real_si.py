@@ -54,7 +54,7 @@ def test_main_effect_recommendation_uses_lowest_mean_response() -> None:
 
 
 def test_non_searched_parameters_keep_protocol_defaults() -> None:
-    """Only searched values, stage count, slices, schedule, and cache policy differ from defaults."""
+    """Only searched values and the settled search controls differ from current defaults."""
     values = {
         "reconst_ld": 900.0,
         "tau": 3.0,
@@ -72,6 +72,7 @@ def test_non_searched_parameters_keep_protocol_defaults() -> None:
     searched = set(values) - {"lr_step_fraction"}
     intentionally_resolved = searched | {
         "bins_per_plane", "num_planes", "training_match_bits",
+        "quantizer_train_repeats", "prior_train_repeats",
         "norm_slices", "lr_step", "cache_dir",
     }
     assert {

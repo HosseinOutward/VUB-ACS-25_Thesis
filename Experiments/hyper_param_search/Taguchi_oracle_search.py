@@ -29,6 +29,7 @@ from Experiments.hyper_param_search.Taguchi_real_si import (  # noqa: E402
     main_effects,
     recommended_values,
 )
+from Experiments.Protocol_test.rd_metrics import wmape_to_db  # noqa: E402
 from FL_code.FL_core.codec import Access, CompressionRecord  # noqa: E402
 from FL_code.FL_core.models import initialize_model  # noqa: E402
 from FL_code.FL_core.utils import StateDictManager, set_global_seed  # noqa: E402
@@ -261,6 +262,9 @@ def quantizer_config(trial_values: dict[str, Level], norm_slices: tuple[slice, .
         bins_per_plane=BINS_PER_PLANE,
         num_planes=NUM_PLANES,
         training_match_bits=TRAINING_MATCH_BITS,
+        # This settled search declared two attempts before the production default became three.
+        quantizer_train_repeats=2,
+        prior_train_repeats=2,
         norm_slices=norm_slices,
         lr_step=max(1, round(train_epochs * lr_step_fraction)),
         cache_dir=None,
@@ -315,7 +319,7 @@ def aggregate_stages(records: list[CancerRecord]) -> tuple[StageResult, ...]:
 
     mean_rates = rates.mean(axis=0)
     mean_wmapes = wmapes.mean(axis=0)
-    distortions_db = 20 * np.log10(mean_wmapes / 100)
+    distortions_db = wmape_to_db(mean_wmapes)
     mean_mses = mses.mean(axis=0)
     return tuple(
         StageResult(

@@ -151,6 +151,7 @@ class _WZRoundCodec(BaseRoundCodec):
     # States, without inferring it from a display label such as codec_id, whether the quantizer
     # trained on temporal (worker-only) or oracle (server-visible) side information.
     quantizer_training_access: ClassVar[str]
+    retrained_prior_from_scratch: ClassVar[bool] = False
     quantizer_class: type[DedupedWZQuantizerCancer] = DedupedWZQuantizerCancer
     config_class: type[WZcfgQuant] = WZcfgQuant
 
@@ -354,7 +355,8 @@ class _WZRoundCodec(BaseRoundCodec):
             assert self._retrained_prior_model is None, (
                 "A trained round may fit its retrained prior only once.")
             prior_model = PriorCalculator.make_trained_prior_model(
-                source_model=quantizer.coding_model,
+                source_model=(
+                    None if self.retrained_prior_from_scratch else quantizer.coding_model),
                 bins_vec=bins.long(),
                 soft_codes=soft_codes,
                 side_info=side_info,
@@ -474,6 +476,7 @@ class T_RoundCodec(_WZRoundCodec):
     round_name: ClassVar[str] = "T"
     can_decode_where: ClassVar[Access] = Access.TEMPORAL_TOO
     quantizer_training_access: ClassVar[str] = "temporal"
+    retrained_prior_from_scratch: ClassVar[bool] = True
     si: list[HistoryVector]
     _send_quantizer_state: bool
 
@@ -556,6 +559,7 @@ class Oracle_RoundCodec(T_RoundCodec):
     round_name: ClassVar[str] = "O"
     can_decode_where: ClassVar[Access] = Access.SERVER_ONLY
     quantizer_training_access: ClassVar[str] = "oracle"
+    retrained_prior_from_scratch: ClassVar[bool] = False
 
     def get_training_data(
         self, given_history: ReconstructionHistory, client_id: int
