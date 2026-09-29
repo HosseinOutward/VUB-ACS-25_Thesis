@@ -640,11 +640,11 @@ class WZcfgQuant(BaseModel):
     marginal_loss: bool = False
     pretrain_pth_dir: Path = Path("FL_code/data/pre_trained_pth")
 
-    train_epochs: int = 120
+    train_epochs: int = 140
     reconst_ld: float = 72.31601255189986
     train_sample_size: int = 550_000
     train_batch_size: int = 6_250
-    lr: float = 0.0056728196862653865
+    lr: float = 0.0028364098431326932
     lr_step: int = 43
     tau: float = 5.5
     warm_training: bool = False
@@ -664,7 +664,7 @@ class WZcfgQuant(BaseModel):
     prior_context: Literal["hard", "soft"] = "hard"
     prior_probabilities: Literal["categorical", "gumbel"] = "categorical"
     hidden_dim: int = 128
-    layers: int = 6
+    layers: int = 4
 
     def warm_retraining_config(self, train_epochs: int | None = None) -> WZcfgQuant:
         """Return the shared lower-rate, lower-temperature configuration for warm fitting."""
