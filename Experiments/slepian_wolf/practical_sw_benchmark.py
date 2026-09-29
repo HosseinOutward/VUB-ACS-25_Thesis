@@ -76,7 +76,7 @@ class MethodResult:
         return sum(self.stage_rates) + self.overhead_rate
 
 
-class _SkipReferencePrior:
+class _FixedNativePrior:
     """Keep the shared trained quantizer fixed across all benchmark transport paths."""
 
     _fine_tune_native_prior = False
@@ -94,19 +94,19 @@ class _CaptureBins:
         return self.decoded_bins
 
 
-class _BaselineCodec(_SkipReferencePrior, Oracle_RoundCodec):
+class _BaselineCodec(_FixedNativePrior, Oracle_RoundCodec):
     """Ordinary staged-index payload, the distortion every SW variant is compared against."""
 
 
-class _OracleSWCodec(_CaptureBins, OracleSWRoundMixin, _SkipReferencePrior, Oracle_RoundCodec):
+class _OracleSWCodec(_CaptureBins, OracleSWRoundMixin, _FixedNativePrior, Oracle_RoundCodec):
     """The cheating search: rate chosen by trial-decoding the vector it is about to send."""
 
 
-class _PracticalSWCodec(_CaptureBins, PracticalSWRoundMixin, _SkipReferencePrior, Oracle_RoundCodec):
+class _PracticalSWCodec(_CaptureBins, PracticalSWRoundMixin, _FixedNativePrior, Oracle_RoundCodec):
     """The feedback controller: rate chosen at the decoder, from data or from the prior alone."""
 
 
-class _LDPCASWCodec(_CaptureBins, LDPCASWRoundMixin, _SkipReferencePrior, Oracle_RoundCodec):
+class _LDPCASWCodec(_CaptureBins, LDPCASWRoundMixin, _FixedNativePrior, Oracle_RoundCodec):
     """The rate-adaptive ladder: every block climbs until its own hash verifies."""
 
 

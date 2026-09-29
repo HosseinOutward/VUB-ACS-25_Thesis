@@ -18,7 +18,6 @@ from FL_code.FL_core.utils import (
     OutlierMetadata,
     PreprocessMetadata,
     create_training_progress_bar,
-    fork_torch_rng,
     normalization_params,
     outlier_metadata,
 )
@@ -653,8 +652,6 @@ class WZcfgQuant(BaseModel):
     quantizer_train_repeats: int = 3
     prior_train_repeats: int = 3
     prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)
-    # Allows a replay to make an individual model fit deterministic without changing later RNG use.
-    training_seed: int | None = None
 
     training_progress_bar: bool = False
     training_log_every_epochs: int | None = None
@@ -734,7 +731,6 @@ class WZQuantizerCancer:
         self.side_info_columns_cache = side_info_columns_cache or SideInfoColumnsCache()
         self.vector_size: int | None = None
         self.quantizer_prior_stage_rates: tuple[float, ...] | None = None
-        self.quantizer_prior_rate: float | None = None
         self._warm_start_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_losses: tuple[float, ...] = ()
@@ -861,13 +857,11 @@ class WZQuantizerCancer:
             assert si_raw_list
             self.set_side_information(si_raw_list)
 
-        # Forked so a seeded fit leaves the caller's RNG untouched for its later stochastic steps.
-        with fork_torch_rng(self.training_seed):
-            x_prep, metadata = self.preprocess_x(x_raw)
-            x_prep, side_info = self._stack_training_pairs(
-                x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []),
-                extra_pairs, problem_weights)
-            self._fit_prepared(x_prep, side_info)
+        x_prep, metadata = self.preprocess_x(x_raw)
+        x_prep, side_info = self._stack_training_pairs(
+            x_prep, self.normalize_side_info_tensor(metadata, self.side_info_list_used or []),
+            extra_pairs, problem_weights)
+        self._fit_prepared(x_prep, side_info)
 
     def _fit_prepared(
         self, x_prep: torch.Tensor, side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor
@@ -883,7 +877,6 @@ class WZQuantizerCancer:
             self.coding_model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
         self.quantizer_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             prior, bins, self.c_cfg.num_planes)
-        self.quantizer_prior_rate = sum(self.quantizer_prior_stage_rates)
 
     def _stack_training_pairs(
         self,

@@ -15,10 +15,13 @@ from .staged_transport import StagedIndexTransportMixin
 
 
 class RansRoundMixin(StagedIndexTransportMixin):
-    """Replace staged indices with rANS coded against encoder-and-decoder-visible SI.
+    """Replace staged indices with rANS coded against the codec's decoder-visible SI prior.
 
-    ``rans_config=`` is the direct-construction path used by tests that build this mixin without
-    a round-token protocol (bypassing ``options_to_config`` entirely). Whenever a round token is
+    T/TR additionally report a server-SI rANS rate; the T decoder lacks that SI, so it is a
+    comparison figure only and never the transported payload.
+
+    ``rans_config=`` sets the lanes when the mixin is built without a round token (bypassing
+    ``options_to_config`` entirely). Whenever a round token is
     parsed instead, ``options_to_config`` is the single source of truth for ``lanes``: an explicit
     ``rans_lanes`` option always wins, and omitting it keeps whatever ``rans_config`` already held
     (``RansConfig()``'s default of 2048 unless the constructor was given a different one) rather
@@ -122,12 +125,11 @@ class RansRoundMixin(StagedIndexTransportMixin):
         self, bins: torch.Tensor, metadata: PreprocessMetadata, payload: bytes
     ) -> tuple[list[int], int]:
         """Separate each stage's stream growth from the fixed header and lane flush."""
-        total, stage_rates, overhead_rate = self._rans_metrics[self.transport_prior_access]
+        _, stage_rates, overhead_rate = self._rans_metrics[self.transport_prior_access]
         positions = bins.shape[1]
         overhead_bits = round(overhead_rate * positions)
         stage_bits = [round(rate * positions) for rate in stage_rates]
         stage_bits[0] -= overhead_bits
-        assert abs(total - sum(stage_rates)) < 1e-9
         return stage_bits, overhead_bits
 
     def get_encod_payload(self, delta_vec: torch.Tensor, record: CancerRecord) -> dict[str, Any]:

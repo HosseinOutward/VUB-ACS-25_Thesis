@@ -83,14 +83,14 @@ class QuantizerSWResult:
     direct_core_decode_equal: bool
 
 
-class _SkipReferencePrior:
+class _FixedNativePrior:
     """Keep the shared trained quantizer fixed across all benchmark transport paths."""
 
     _fine_tune_native_prior = False
     transport_prior_access = Access.SERVER_ONLY
 
 
-class _BaselineCheckCodec(_SkipReferencePrior, Oracle_RoundCodec):
+class _BaselineCheckCodec(_FixedNativePrior, Oracle_RoundCodec):
     """Ordinary staged-index payload used as the A/B wire-rate baseline."""
 
 
@@ -122,7 +122,7 @@ class _CaptureIndexBoundary:
 class _OracleSWCheckCodec(
     _CaptureIndexBoundary,
     OracleSWRoundMixin,
-    _SkipReferencePrior,
+    _FixedNativePrior,
     Oracle_RoundCodec,
 ):
     """The same round codec with only its staged indices replaced by oracle SW data."""
@@ -132,7 +132,7 @@ class _MappedOracleSWCheckCodec(
     _CaptureIndexBoundary,
     OracleValueOrderedIndexMixin,
     OracleSWRoundMixin,
-    _SkipReferencePrior,
+    _FixedNativePrior,
     Oracle_RoundCodec,
 ):
     """The oracle SW codec with reconstruction-ordered Gray labeling added."""

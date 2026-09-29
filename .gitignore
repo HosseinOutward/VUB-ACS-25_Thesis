@@ -28,20 +28,17 @@
 /Experiments/Archive/**/elements/
 /Experiments/Archive/**/raw_elements/
 /Experiments/Protocol_test/analysis_plots/**/*.png
-/Experiments/hyper_param_search/final_*_factors.json
-/Experiments/hyper_param_search/results/
 /Experiments/statistical_relation_boosting/results/logs/
-/Experiments/Protocol_test/final_experiment_reports/**/results/raw_elements/
-/Experiments/Protocol_test/final_experiment_reports/**/results/archive/
-/Experiments/Protocol_test/final_experiment_reports/**/results/records/
-/Experiments/Protocol_test/final_experiment_reports/**/results/*/records/
-/Experiments/Protocol_test/final_experiment_reports/**/runs/
+/Experiments/Protocol_test/Archive_final_experiment_reports/**/results/raw_elements/
+/Experiments/Protocol_test/Archive_final_experiment_reports/**/results/archive/
+/Experiments/Protocol_test/Archive_final_experiment_reports/**/results/records/
+/Experiments/Protocol_test/Archive_final_experiment_reports/**/results/*/records/
+/Experiments/Protocol_test/Archive_final_experiment_reports/**/runs/
 /Experiments/Protocol_test/Runs_exp/
 
 # Intentionally local source and test files
 Experiments/statistical_relation_boosting/results/history/*/logs/*
 
-Experiments/Protocol_test/exp_records/**
 /.claude/
 /.pytest_cache/
 /archived_tests/

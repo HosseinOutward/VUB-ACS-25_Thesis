@@ -1656,13 +1656,10 @@ def main() -> None:
     assert soft_codes is not None
     side_info = quantizer.normalize_side_info_tensor(metadata, [HistoryVector(si)])
     prior_config = quantizer_config.model_copy(update={"marginal_loss": False})
-    prior_model = PriorCalculator.make_trained_prior_model(
-        source_model=quantizer.coding_model,
-        bins_vec=bins.long(),
-        soft_codes=soft_codes,
-        side_info=side_info,
-        c_cfg=prior_config,
-    )
+    prior_model = PriorCalculator.fit_prior_model(
+        bins.long(), soft_codes, side_info, prior_config,
+        quantizer.coding_model, (None,), quantizer_config.prior_train_repeats,
+    ).model
 
     def prior_provider(decoded_stages: torch.Tensor, decoder_side_info: torch.Tensor, stage: int) -> torch.Tensor:
         return PriorCalculator.compute_prior_from_network(

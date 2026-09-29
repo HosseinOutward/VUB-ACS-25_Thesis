@@ -22,8 +22,7 @@ from .utils import StateDictManager
 
 # Bump whenever `_run`'s algorithm changes in a way that could produce different deltas for the
 # same configuration, so completed experiments and saved continuation states cannot be mistaken
-# for the same trajectory.
-# Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
+# for the same trajectory. Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
 # current CUDA device rather than the requested one) and added the fixed cudnn determinism policy.
 _TRACE_VERSION = 2
 # `data_folder` is excluded: a path is not data identity, `dataset_revision` is.
@@ -189,9 +188,7 @@ class Trace:
                     for name, value in model.named_buffers():
                         value.copy_(buffers[client_id][name].to(device=value.device))
                 with _seeded(self.cfg.seed + round_id * self.cfg.num_clients + client_id + 1, self.device):
-                    delta = train_client_update(
-                        model, loader, optimizer, scaler, manager, self.cfg, round_id, client_id
-                    )
+                    delta = train_client_update(model, loader, optimizer, scaler, manager, self.cfg)
                 buffers[client_id] = {
                     name: value.detach().cpu().clone() for name, value in model.named_buffers()
                 }

@@ -26,7 +26,6 @@ class PriorTrainingResult:
 
     model: EncoderDecoderLayeredRNN
     lineage_states: tuple[dict[str, torch.Tensor], ...]
-    lineage_losses: tuple[float, ...]
     deployed_parent: int
 
 
@@ -116,24 +115,6 @@ class PriorCalculator:
         return stage_mean / c_cfg.num_planes
 
     @staticmethod
-    def make_trained_prior_model(
-        bins_vec: torch.Tensor,
-        soft_codes: torch.Tensor,
-        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
-        c_cfg: WZcfgQuant,
-        source_model: EncoderDecoderLayeredRNN | None,
-        batch_size: int = 50_000,
-    ) -> EncoderDecoderLayeredRNN:
-        """Fit fixed-symbol prior attempts and install the winner into the supplied model."""
-        initial_states: tuple[Mapping[str, torch.Tensor] | None, ...] = (
-            (None,) if source_model is None else (source_model.conditional_state_dict(),)
-        )
-        return PriorCalculator.fit_prior_model(
-            bins_vec, soft_codes, side_info, c_cfg, source_model, initial_states,
-            c_cfg.prior_train_repeats, batch_size,
-        ).model
-
-    @staticmethod
     def fit_prior_model(
         bins_vec: torch.Tensor,
         soft_codes: torch.Tensor,
@@ -144,7 +125,11 @@ class PriorCalculator:
         attempts_per_parent: int,
         batch_size: int = 50_000,
     ) -> PriorTrainingResult:
-        """Train each explicit prior lineage and install the best result into `target_model`."""
+        """Train each explicit prior lineage and install the best result into `target_model`.
+
+        A lineage with no initial state starts from `target_model`'s own prior, or from scratch when
+        there is no target; only a scratch fit uses the quantizer's full training schedule.
+        """
         assert bins_vec.shape == (c_cfg.num_planes, side_info.shape[0])
         assert soft_codes.shape == (
             c_cfg.num_planes, side_info.shape[0], c_cfg.bins_per_plane
@@ -163,9 +148,10 @@ class PriorCalculator:
         lineage_models: list[EncoderDecoderLayeredRNN] = []
         lineage_losses: list[float] = []
         for parent_index, initial_state in enumerate(initial_states):
+            from_scratch = target_model is None and initial_state is None
             model, loss = _train_prior_lineage(
                 bins_vec, soft_codes, side_info,
-                c_cfg.warm_retraining_config(c_cfg.prior_retrain_epochs),
+                c_cfg if from_scratch else c_cfg.warm_retraining_config(c_cfg.prior_retrain_epochs),
                 target_model, initial_state, attempts_per_parent, batch_size,
                 f"parent {parent_index}",
             )
@@ -176,14 +162,14 @@ class PriorCalculator:
             name: value.detach().cpu().clone()
             for name, value in lineage_models[deployed_parent].state_dict().items()
         }
-        model = target_model or _new_prior_model(c_cfg, side_info.shape[1])
-        model.load_state_dict(deployed_state, strict=target_model is None)
+        model = _new_prior_model(c_cfg, side_info.shape[1]) if target_model is None else target_model
+        # A supplied target keeps its encoder/decoder, which the prior-only state does not carry.
+        assert not model.load_state_dict(deployed_state, strict=target_model is None).unexpected_keys
         return PriorTrainingResult(
             model=model,
             lineage_states=tuple({
                 name: value.detach().cpu().clone() for name, value in candidate.state_dict().items()
             } for candidate in lineage_models),
-            lineage_losses=tuple(lineage_losses),
             deployed_parent=deployed_parent,
         )
 

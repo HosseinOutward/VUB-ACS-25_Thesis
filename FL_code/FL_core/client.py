@@ -23,8 +23,6 @@ def train_client_update(
     scaler: torch.amp.GradScaler,
     sd_manager: StateDictManager,
     cfg: FLConfig,
-    round_id: int,
-    client_id: int,
 ) -> torch.Tensor:
     """Train one local round and return its flattened update."""
     pre_train_state = sd_manager.clone_trainable(model.state_dict())
@@ -87,13 +85,7 @@ def run_federated_client(
 
         # ---- Train the local model ----
         print(f"[Client {client_id}] Starting local training for {cfg.local_epochs} epoch(s)")
-        pre_train_state = sd_manager.clone_trainable(model.state_dict())
-
-        delta_vec = train_client_update(
-            model, train_loader, optimizer, scaler, sd_manager, cfg, curr_rnd_i, client_id,
-        )
-
-        post_train_state = sd_manager.clone_trainable(model.state_dict())
+        delta_vec = train_client_update(model, train_loader, optimizer, scaler, sd_manager, cfg)
 
         # ---- Evaluate local model post-training (skipped rounds report NaN) ----
         run_local_eval = (curr_rnd_i % cfg.client_eval_every_n_rounds == 0) or (curr_rnd_i == cfg.rounds - 1)
@@ -105,10 +97,6 @@ def run_federated_client(
         else:
             train_metrics = dict.fromkeys(EVAL_METRIC_KEYS, float("nan"))
             test_metrics = dict.fromkeys(EVAL_METRIC_KEYS, float("nan"))
-
-        # ---- Send model delta to server ----
-        delta = sd_manager.compute_delta(post_train_state, pre_train_state)
-        delta_vec = sd_manager.flatten(delta).cpu().contiguous()
 
         # Flatten worker eval metrics (train first, then test)
         worker_metrics_list = [train_metrics[k] for k in EVAL_METRIC_KEYS] + \

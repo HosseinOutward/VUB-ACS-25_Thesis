@@ -19,7 +19,7 @@
         20, 21, 22, 23, 24, 25, 26, 27, 28, 29
       ],
       "round_codecs": [
-        "OR|bins_per_plane=2|num_planes=3|training_seed=44|rans_lanes=2048",
+        "OR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
         "F", "F", "F", "F", "F", "F", "F", "F", "F"
       ]
     },
@@ -33,7 +33,7 @@
         20, 21, 22, 23, 24, 25, 26, 27, 28, 29
       ],
       "round_codecs": [
-        "TR|bins_per_plane=2|num_planes=3|training_seed=44|rans_lanes=2048",
+        "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
         "F", "F", "F", "F", "F", "F", "F", "F", "F"
       ]
     }

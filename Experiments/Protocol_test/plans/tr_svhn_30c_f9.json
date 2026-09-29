@@ -48,7 +48,7 @@
         29
       ],
       "round_codecs": [
-        "TR|bins_per_plane=2|num_planes=3|training_seed=43|rans_lanes=2048",
+        "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
         "F",
         "F",
         "F",
@@ -97,7 +97,7 @@
         29
       ],
       "round_codecs": [
-        "TR|bins_per_plane=2|num_planes=3|training_seed=43|rans_lanes=2048",
+        "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
         "F",
         "F",
         "F",
@@ -146,7 +146,7 @@
         29
       ],
       "round_codecs": [
-        "TR|bins_per_plane=2|num_planes=3|training_seed=43|rans_lanes=2048",
+        "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
         "F",
         "F",
         "F",

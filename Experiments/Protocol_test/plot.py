@@ -126,13 +126,16 @@ def stage_points(case_records: pd.DataFrame) -> pd.DataFrame:
     """Produce one explicit rate/distortion point per case, absolute round, rate source and stage.
 
     Every case/start-round/absolute-round stays independent (never pooled across start rounds or
-    worker sets). Availability is decided per case: a rate source absent from the whole case is
-    unavailable for that codec, while one missing from only some rounds fails in `round_curve`.
+    worker sets). Every case must carry the quantizer-prior rate and payload size; the coder rate
+    exists only for codecs with an entropy-coder transport. Records from before the current rate
+    columns fail here instead of silently vanishing from the figures.
     """
     keys = ["experiment", "codec_id", "initial_si", "case_id", "start_round", "round_id"]
     meta_keys = ["relative_round", "cycle", "phase", "client_ids", "trace_identity_digest"]
     points = []
     for _, case_rows in case_records.groupby(["experiment", "codec_id", "case_id"], sort=True):
+        missing = {"quantizer_prior_stage_rates", "final_bytes"} - set(case_rows.columns[case_rows.notna().any()])
+        assert not missing, f"Case records lack {sorted(missing)}: {case_rows.records_path.iloc[0]}."
         fields = [field for field in RATE_FIELDS if field in case_rows.columns and case_rows[field].notna().any()]
         for identity, rows in case_rows.groupby(keys, sort=True):
             meta = {key: rows[key].iloc[0] for key in meta_keys}
@@ -369,8 +372,10 @@ def discover_experiment_roots(container: Path) -> list[Path]:
 def timing_summary(case_records: pd.DataFrame) -> pd.DataFrame:
     """Summarize runtime separately for costly trained tokens and cheaper frozen reuse."""
     assert "total_seconds" in case_records and case_records.total_seconds.notna().all()
-    timed = case_records.assign(round_token=case_records.round_name_full.str.split("|").str[0])
-    return timed.groupby(["codec_id", "round_token", "phase"], as_index=False).agg(
+    timed = case_records.assign(
+        round_token=case_records.round_name_full.str.split("|").str[0],
+        warm_training=case_records.round_name_full.str.contains("|warm_training", regex=False))
+    return timed.groupby(["codec_id", "round_token", "warm_training", "phase"], as_index=False).agg(
         rows=("total_seconds", "size"), mean_seconds=("total_seconds", "mean"),
         median_seconds=("total_seconds", "median"), total_hours=("total_seconds", lambda values: values.sum() / 3600),
     )

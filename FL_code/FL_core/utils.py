@@ -1,6 +1,5 @@
 from __future__ import annotations
 from collections.abc import Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
 import ast
 import gzip
@@ -10,7 +9,7 @@ from pathlib import Path
 import random
 import sys
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 import torch.nn as nn
@@ -30,18 +29,6 @@ if TYPE_CHECKING:
 # metrics as a flat tensor, so both sides must agree on this exact order.
 EVAL_METRIC_KEYS: tuple[str, ...] = ("loss", "acc", "f1", "auc")
 OUTLIER_CHUNK = 2**8
-
-
-@contextmanager
-def fork_torch_rng(seed: int | None) -> Iterator[None]:
-    """Apply an optional deterministic training seed without changing the caller's RNG state."""
-    if seed is None:
-        yield
-        return
-    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
-    with torch.random.fork_rng(devices=devices):
-        torch.manual_seed(seed)
-        yield
 
 
 class OutlierMetadata(NamedTuple):

@@ -35,18 +35,13 @@ def _expected_rows(case_metadata: Mapping[str, Any]) -> list[tuple[int, int, str
 def _matches_schedule(
     actual: tuple[int, int, str], expected: tuple[int, int, str], case_metadata: Mapping[str, Any],
 ) -> bool:
-    """Match a recorded token to its schedule and the one suffix owned by the warm protocol."""
+    """Match a recorded token to its schedule and the warm flag the warm protocol may add."""
     actual_round, actual_client, actual_token = actual
     expected_round, expected_client, expected_token = expected
     allowed_tokens = {expected_token}
     protocol = parse_configurable_name(case_metadata["protocol"], "protocol").name
     if protocol == "wz_cancer_warm" and expected_token != "F":
-        assert "warm_retrain_repeats" in case_metadata, (
-            "Warm case identity must record its effective warm_retrain_repeats."
-        )
-        allowed_tokens.add(
-            expected_token + f"|warm_training|warm_retrain_repeats={case_metadata['warm_retrain_repeats']}"
-        )
+        allowed_tokens.add(expected_token + "|warm_training")
     return (
         (actual_round, actual_client) == (expected_round, expected_client)
         and actual_token in allowed_tokens
@@ -56,20 +51,6 @@ def _matches_schedule(
 def identity_mismatches(expected: Mapping[str, Any], stored: Mapping[str, Any]) -> list[str]:
     """Return the top-level identity keys whose values differ or exist on only one side."""
     return sorted(key for key in expected.keys() | stored.keys() if expected.get(key) != stored.get(key))
-
-
-def _validation_case_metadata(identity: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Resolve and cross-check protocol-owned record fields from one stored identity."""
-    case_metadata = identity["case"]
-    protocol = parse_configurable_name(case_metadata["protocol"], "protocol").name
-    if protocol != "wz_cancer_warm" or "protocol_snapshot" not in identity:
-        return case_metadata
-    snapshot_repeats = identity["protocol_snapshot"]["warm_quantizer_pool"]["warm_retrain_repeats"]
-    stored_repeats = case_metadata.get("warm_retrain_repeats", snapshot_repeats)
-    assert stored_repeats == snapshot_repeats, (
-        "Case and protocol snapshot disagree on warm_retrain_repeats."
-    )
-    return case_metadata | {"warm_retrain_repeats": snapshot_repeats}
 
 
 def validate_case_records(path: Path, case_metadata: Mapping[str, Any]) -> pd.DataFrame:
@@ -109,7 +90,7 @@ def read_completed_case(case_dir: Path, expected_identity: Mapping[str, Any] | N
         mismatched = identity_mismatches(expected_identity, identity)
         assert not mismatched, f"Case identity differs from expected at {case_dir}: {mismatched}."
 
-    case_metadata = _validation_case_metadata(identity)
+    case_metadata = identity["case"]
     records = validate_case_records(case_dir / "compression_records.csv", case_metadata).copy()
     return _enrich(records, case_dir, identity, complete=True)
 
@@ -118,7 +99,7 @@ def read_available_case(case_dir: Path, identity: Mapping[str, Any]) -> pd.DataF
     """Read the valid ordered prefix of an unfinished case for explicitly incomplete previews."""
     path = case_dir / "compression_records.csv"
     assert path.is_file(), f"Missing case records: {path}."
-    case_metadata = _validation_case_metadata(identity)
+    case_metadata = identity["case"]
     case_records = pd.read_csv(path)
     assert set(_ROW_COLUMNS) <= set(case_records.columns), (
         f"Case records at {path} are missing required columns {_ROW_COLUMNS}.")

@@ -1,7 +1,8 @@
 """Content hashing, atomic publication, and caches explicitly declared at their call site.
 
-No operation is cached today. A future call site supplies the directory and the complete
-semantic match value itself, e.g. ``CacheEntry(directory, match).resolve(compute)``.
+Each call site supplies the directory and the complete semantic match value itself, e.g.
+``CacheEntry(directory, match).resolve(compute)``. The one use today is sparse replay's per-trace
+continuation state (see ``Trace.stream``); the rest is kept for future call sites.
 """
 
 from __future__ import annotations

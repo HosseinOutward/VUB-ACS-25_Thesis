@@ -134,14 +134,10 @@ class EncoderDecoderLayeredRNN(nn.Module):
         """Encoder-side parameters: the encoder RNN plus the per-plane binner heads."""
         return self._transmission_state_dict(self.state_dict(), ('encoder.', 'binner'))
 
-    def decoder_state_dict(self) -> dict[str, torch.Tensor]:
-        """Decoder-side parameters: decoder RNN, reconstructor heads, and the conditional prior network."""
-        return self._transmission_state_dict(
-            self.state_dict(), ('decoder.', 'reconstructor', 'conditional'))
-
-    def conditional_state_dict(self) -> dict[str, torch.Tensor]:
-        """Return only conditional-prior parameters used to initialize prior retraining."""
-        return self._transmission_state_dict(self.state_dict(), ('conditional',))
+    def decoder_state_dict(self, include_prior: bool = False) -> dict[str, torch.Tensor]:
+        """Return decoder parameters, optionally including the conditional prior network."""
+        prefixes = ('decoder.', 'reconstructor', 'conditional') if include_prior else ('decoder.', 'reconstructor')
+        return self._transmission_state_dict(self.state_dict(), prefixes)
 
     def copy_for_prior_retraining(self) -> EncoderDecoderLayeredRNN:
         """Copy this quantizer's conditional prior and release unrelated network parameters."""

@@ -8,7 +8,9 @@ independent of which clients are measured for compression.
 ## Prior and coder columns
 
 `quantizer_prior_rate` and `quantizer_prior_stage_rates` measure the prior produced by joint
-quantizer training, before fixed-symbol fine-tuning. The fine-tuned model is identified by its SI:
+quantizer training, before fixed-symbol fine-tuning. Prior weights are never part of the payload:
+the prior stands in for the conditional entropy coder and is treated as decoder-available. The
+fine-tuned model is identified by its SI:
 `temporal_si_prior_rate` or `server_si_prior_rate`, both scalar averages. `marginal_rate` is also a
 scalar average. Rounds with rANS retain the selected transport in `coder_rate` and
 `coder_stage_rates`; SI-specific comparisons are recorded separately as `temporal_si_rans_*` and
@@ -25,13 +27,17 @@ report the separately trained server-SI comparison.
 2. **Cases.** `sparse_replay.py` seeds each case's preceding raw history, then replays its window:
    every selected client's decoded reconstruction advances decoder-visible history in normal
    server order, while unselected clients advance it with raw deltas. Records land under
-   `<output_root>/cases/<codec_id>/<case_id>/`.
+   `<output_root>/cases/<codec_id>/<case_id>/`. Before each measured client-round the global RNG is
+   reseeded from the plan seed, start round, round, and client, so fits are reproducible yet
+   differ across clients and rounds.
 3. **Records.** `records.py` is the shared completion contract: `validate_case_records` checks a
    case's CSV holds exactly its scheduled rows, and `read_completed_case` reads a finished case's
-   `complete.json`, checks its identity, and enriches its rows with placement/phase metadata. The
-   runner uses it to decide reuse; the analysis path uses it to read finished cases.
-4. **Analysis.** `plot.py` reads every finished case through `records.read_completed_case` and
-   writes `analysis/stage_points.csv`, `comparison_gaps.csv`, `timing_summary.csv`, and one figure
+   `complete.json`, checks its identity, and enriches its rows with placement/phase metadata;
+   `read_available_case` reads the validated prefix of an unfinished case. The runner uses them
+   to decide reuse; the analysis path uses them to read cases.
+4. **Analysis.** `plot.py` reads every finished case, plus the prefix of unfinished ones (figures
+   then carry an `_INCOMPLETE` suffix and `coverage.csv` lists what is missing), and writes
+   `analysis/stage_points.csv`, `comparison_gaps.csv`, `timing_summary.csv`, and one figure
    directory per rate source (`analysis/quantizer_prior_stage_rates/`,
    `analysis/coder_stage_rates/`) plus
    `analysis/combined_rate_sources/`, which draws both staged sources against one shared x axis.
@@ -39,14 +45,15 @@ report the separately trained server-SI comparison.
    the frozen-round average) and, for multi-cycle plans, `rd_cycle_<n>` views. Workers count equally: stage WMAPE is the mean worker ratio (records store
    percentages), then `20*log10(mean)` dB; stage rates are mean worker rates, then cumulative. Rate sources
    (`quantizer_prior_stage_rates`, `coder_stage_rates`, `final_bytes`) are never substituted for one
-   another. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
+   another; a case lacking the quantizer-prior rate or payload size fails, so records from an older
+   column layout cannot silently drop out of the figures. The gap is the existing interpolation-based `mean_interpolated_equal_distortion_gap`;
    single-stage, non-overlapping,
    or non-monotone curves are reported as unavailable rather than aborting.
 
 Run a plan with:
 
 ```bash
-.venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/smoke.json
+.venv/bin/python -m Experiments.Protocol_test.sparse_replay Experiments/Protocol_test/plans/tr_svhn_30c_f9.json
 ```
 
 ## Global view
@@ -130,11 +137,11 @@ display label:
 - `client_order = "normal"`: clients are processed in ascending id order each round; a client sees
   its own preceding rounds and earlier clients' current-round updates, never a later client's or
   its own future update.
-- `frozen_si_refresh`: whether a frozen round's side information is refreshed from advancing raw
-  history (`protocol.refresh_frozen_si`); the quantizer's parameters stay frozen either way.
+- `frozen_prior_refit`: whether frozen rounds refit their priors (`protocol.refit_priors_on_frozen`).
+  Frozen rounds always code with the most recent side information; only parameters stay frozen.
 - `server_history = "decoder_visible_reconstructions"`: after the raw prefix, the server-visible
   ledger holds the decoded values the protocol actually produced.
 
-Quantizer-training oracle access, source-fitted prior grants, and SW oracle search are per-token
+Quantizer SI access, prior-weight transmission, and SW oracle search are per-token
 facts and already live in `protocol_snapshot`'s `round_codecs[token]["codec_provenance"]`
 (supplied by the codec/transport package); they are not duplicated here.

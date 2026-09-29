@@ -21,7 +21,7 @@ from FL_code.FL_core.explicit_cache import CacheEntry, TorchCodec, atomic_output
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
 from FL_code.FL_core.models import initialize_model
 from FL_code.FL_core.trace import Trace
-from FL_code.FL_core.utils import StateDictManager, parse_configurable_name, set_global_seed
+from FL_code.FL_core.utils import StateDictManager, set_global_seed
 from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
 from FL_code.run_fl import FLConfig
 from temp_nsplit import nsplit_quantize
@@ -29,8 +29,8 @@ from temp_nsplit import nsplit_quantize
 # Bump whenever this module's execution semantics change in a way that could produce different
 # records for an unchanged plan/trace, so a completed case cannot be silently reused as if it
 # still matched.
-_EXPERIMENT_SEMANTICS_VERSION = 10
-_CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v1"
+_EXPERIMENT_SEMANTICS_VERSION = 11
+_CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v2"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -94,15 +94,6 @@ class ReplayPlan(BaseModel):
         codecs = {case.codec_id for case in self.cases}
         for candidate, reference in self.comparisons:
             assert candidate != reference and {candidate, reference} <= codecs, "Invalid comparison."
-        for case in self.cases:
-            for token in case.round_codecs:
-                if token == "F":
-                    continue
-                options = parse_configurable_name(token, "round codec").options or {}
-                assert options.get("training_seed") == self.seed, (
-                    f"Case {case.codec_id}/{case.case_id} training token must carry "
-                    f"training_seed={self.seed}; got {options.get('training_seed')!r}."
-                )
         return self
 
 
@@ -140,7 +131,7 @@ def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> i
     return int(content_hash((seed, start_round, round_id, client_id))[:8], 16)
 
 
-def _case_metadata(case: ReplayCase, protocol: _WZProtocol) -> dict[str, Any]:
+def _case_metadata(case: ReplayCase) -> dict[str, Any]:
     """Return the schedule contract shared by case and experiment identities."""
     return {
         "protocol": case.protocol,
@@ -148,7 +139,6 @@ def _case_metadata(case: ReplayCase, protocol: _WZProtocol) -> dict[str, Any]:
         "initial_si": case.initial_si,
         "client_ids": list(case.client_ids),
         "round_codecs": list(case.round_codecs),
-        "warm_retrain_repeats": getattr(protocol, "warm_retrain_repeats", None),
     }
 
 
@@ -161,7 +151,7 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "trace": trace_identity,
         "seed": plan.seed,
         "codec_seed_policy": _CODEC_SEED_POLICY,
-        "case": _case_metadata(case, protocol),
+        "case": _case_metadata(case),
         "protocol_snapshot": protocol_snapshot,
         "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
@@ -169,7 +159,6 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
                 "raw_updates" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_updates"),
             "history_replacement": "decoded_updates_after_start",
             "client_order": "normal",
-            "frozen_si_refresh": protocol.refresh_frozen_si,
             "frozen_prior_refit": protocol.refit_priors_on_frozen,
             "server_history": "decoder_visible_reconstructions",
         },
@@ -187,7 +176,7 @@ def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[
         "trace": trace_identity,
         "cases": [
             {"case_id": case.case_id, "codec_id": case.codec_id}
-            | _case_metadata(case, case_protocol(plan, case))
+            | _case_metadata(case)
             for case in plan.cases
         ],
         "comparisons": [list(pair) for pair in plan.comparisons],

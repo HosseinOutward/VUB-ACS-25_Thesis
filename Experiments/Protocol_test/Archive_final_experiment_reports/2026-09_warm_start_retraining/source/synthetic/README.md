@@ -9,7 +9,7 @@ The additive SI shift is `+0.1`: one synthetic noise standard deviation and one 
 standard deviation. The cached parent is evaluated on the same held-out target with both unshifted
 and shifted SI before any conclusion is drawn.
 
-Validate and launch from the repository root:
+Historical commands from the study's original location; they do not run from this archive.
 
 ```bash
 .venv/bin/python -m Experiments.warm_start_retraining.experiment \

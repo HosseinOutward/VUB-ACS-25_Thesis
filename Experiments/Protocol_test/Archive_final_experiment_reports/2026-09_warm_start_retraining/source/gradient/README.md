@@ -13,6 +13,8 @@ The production round-12 parent retains its default two-candidate selection. Ever
 one candidate so scratch and warm conditions differ only in initialization, not in access to an
 extra cold-start candidate.
 
+Historical commands from the study's original location; they do not run from this archive.
+
 ```bash
 .venv/bin/python -m Experiments.warm_start_gradient_retraining.experiment \
   Experiments/warm_start_gradient_retraining/config.json --validate-only

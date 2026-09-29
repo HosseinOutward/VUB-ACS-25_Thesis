@@ -189,6 +189,7 @@ class _WZRoundCodec(BaseRoundCodec):
     joint_quantizer_state: dict[str, torch.Tensor] | None = None
     refit_priors_on_frozen: bool = False
     _fine_tune_native_prior: ClassVar[bool] = True
+    transmit_prior_parameters: ClassVar[bool] = False
 
     def options_to_config(
         self,
@@ -230,7 +231,7 @@ class _WZRoundCodec(BaseRoundCodec):
 
     @classmethod
     def codec_provenance(cls, **options: Any) -> dict[str, Any]:
-        """Return the oracle-access facts and rate-field availability `config_snapshot` records.
+        """Return the side-information access facts and rate-field availability `config_snapshot` records.
 
         Transport mixins layer coder facts and resolved settings on top via `super()`; unused
         quantizer options are accepted and ignored so a full round-token options dict can be
@@ -239,8 +240,7 @@ class _WZRoundCodec(BaseRoundCodec):
         return {
             "quantizer_si_access": cls.history_access.value,
             "sw_oracle_search": False,
-            "native_prior_si": cls.history_access.value,
-            "prior_refit_policy": "protocol_refit_priors_on_frozen",
+            "prior_weights_transmitted": cls.transmit_prior_parameters,
             "rate_fields_available": {
                 "quantizer_prior_rate": True,
                 "quantizer_prior_stage_rates": True,
@@ -335,9 +335,7 @@ class _WZRoundCodec(BaseRoundCodec):
             PriorCalculator.fit_prior_model(
                 bins.long(), soft_codes, native_side_info,
                 self.c_cfg.model_copy(update={"marginal_loss": False}),
-                self.quantizer.coding_model,
-                (self.quantizer.coding_model.conditional_state_dict(),),
-                self.c_cfg.prior_train_repeats,
+                self.quantizer.coding_model, (None,), self.c_cfg.prior_train_repeats,
             )
         native_prior = self.quantizer.prior_calculator.compute_prior_from_network(
             self.quantizer.coding_model, bins, native_side_info)
@@ -347,7 +345,7 @@ class _WZRoundCodec(BaseRoundCodec):
             "Warm training completed without selecting a deployed parent.")
         updates: dict[str, Any] = {
             "encoder_size": compressed_size(self.quantizer.coding_model.encoder_state_dict()),
-            "decoder_size": compressed_size(self.quantizer.coding_model.decoder_state_dict()),
+            "decoder_size": compressed_size(self.quantizer.coding_model.decoder_state_dict(self.transmit_prior_parameters)),
             "meta_data_size": compressed_size(metadata),
             "quantizer_prior_rate": sum(quantizer_prior_stage_rates),
             "quantizer_prior_stage_rates": quantizer_prior_stage_rates,
@@ -505,9 +503,7 @@ class ServerSIPriorMixin:
             self.server_si_prior_training_result = PriorCalculator.fit_prior_model(
                 bins.long(), soft_codes, side_info,
                 self.c_cfg.model_copy(update={"marginal_loss": False}),
-                self._server_si_prior_model,
-                (self._server_si_prior_model.state_dict(),),
-                self.c_cfg.prior_train_repeats,
+                self._server_si_prior_model, (None,), self.c_cfg.prior_train_repeats,
             )
             parent_fields = {}
         else:
@@ -623,7 +619,7 @@ class _CurrentTargetWZRoundCodec(_WZRoundCodec):
         assert self.quantizer.quantizer_prior_stage_rates is not None
         payload = super().get_encod_payload(delta_vec, record)
         if self._send_quantizer_state:
-            payload["quantizer_state"] = self.quantizer.coding_model.decoder_state_dict()
+            payload["quantizer_state"] = self.quantizer.coding_model.decoder_state_dict(self.transmit_prior_parameters)
             self._send_quantizer_state = False
         return payload
 
@@ -633,15 +629,7 @@ class T_RoundCodec(ServerSIPriorMixin, _CurrentTargetWZRoundCodec):
 
     round_name: ClassVar[str] = "T"
     history_access: ClassVar[Access] = Access.TEMPORAL_TOO
-
-    def get_training_data(
-        self, given_history: ReconstructionHistory, client_id: int
-    ) -> tuple[None, list[HistoryVector]]:
-        """Return worker-local history; the raw target arrives during pre-encode training."""
-        entries = given_history.view(self.history_access, client_id)[client_id]
-        assert entries[-1].client_id == client_id
-        assert entries[-1].access == self.history_access
-        return None, [entry.value for entry in entries]
+    transmit_prior_parameters: ClassVar[bool] = True
 
 
 class Oracle_RoundCodec(_CurrentTargetWZRoundCodec):
