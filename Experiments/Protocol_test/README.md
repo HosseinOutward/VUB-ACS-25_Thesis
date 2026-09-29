@@ -27,7 +27,8 @@ report the separately trained server-SI comparison.
 2. **Cases.** `sparse_replay.py` seeds each case's preceding raw history, then replays its window:
    every client of the trace is measured, and its decoded reconstruction advances decoder-visible
    history in normal server order. A case's `round_codecs` is one line of space-separated tokens,
-   where `token*n` repeats a token, e.g. `"TR|bins_per_plane=2|num_planes=3 F*9"`. Records land under
+   where `token*n` repeats a token a positive integer `n` times, e.g.
+   `"TR|bins_per_plane=2|num_planes=3 F*9"`. Records land under
    `<output_root>/cases/<codec_id>/<case_id>/`. Before each measured client-round the global RNG is
    reseeded from the plan seed, start round, round, and client, so fits are reproducible yet
    differ across clients and rounds.

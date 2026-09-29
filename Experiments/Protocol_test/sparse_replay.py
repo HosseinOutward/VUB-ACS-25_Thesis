@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import multiprocessing
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
@@ -55,10 +56,14 @@ class ReplayCase(BaseModel):
     @field_validator("round_codecs", mode="before")
     @classmethod
     def expand_schedule(cls, value: str) -> tuple[str, ...]:
-        """Expand a one-line schedule of space-separated tokens, where `token*n` repeats one n times."""
+        """Expand a space-separated schedule whose tokens optionally end in `*positive_integer`."""
         schedule: list[str] = []
         for item in value.split():
-            token, _, repeats = item.partition("*")
+            match = re.fullmatch(r"([^*]+)(?:\*([1-9][0-9]*))?", item)
+            assert match is not None, (
+                f"Invalid round_codecs item {item!r}; expected token or token*positive_integer."
+            )
+            token, repeats = match.groups()
             schedule += [token] * int(repeats or 1)
         return tuple(schedule)
 
