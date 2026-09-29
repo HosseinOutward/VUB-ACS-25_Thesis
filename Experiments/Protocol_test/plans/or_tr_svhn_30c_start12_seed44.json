@@ -5,7 +5,9 @@
   "trace_device": "cuda:0",
   "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
   "output_root": "../Runs_exp/or_tr_svhn_30c_start12_seed44/runs",
-  "gpu_ids": [0],
+  "gpu_ids": [
+    0
+  ],
   "max_parallel_cases": 1,
   "seed": 44,
   "cases": [
@@ -13,30 +15,19 @@
       "case_id": "start12",
       "codec_id": "OR",
       "start_round": 12,
-      "client_ids": [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-        10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        20, 21, 22, 23, 24, 25, 26, 27, 28, 29
-      ],
-      "round_codecs": [
-        "OR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
-        "F", "F", "F", "F", "F", "F", "F", "F", "F"
-      ]
+      "round_codecs": "OR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"
     },
     {
       "case_id": "start12",
       "codec_id": "TR",
       "start_round": 12,
-      "client_ids": [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-        10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        20, 21, 22, 23, 24, 25, 26, 27, 28, 29
-      ],
-      "round_codecs": [
-        "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
-        "F", "F", "F", "F", "F", "F", "F", "F", "F"
-      ]
+      "round_codecs": "TR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"
     }
   ],
-  "comparisons": [["TR", "OR"]]
+  "comparisons": [
+    [
+      "TR",
+      "OR"
+    ]
+  ]
 }

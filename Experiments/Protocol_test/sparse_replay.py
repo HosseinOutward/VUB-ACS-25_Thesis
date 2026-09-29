@@ -35,7 +35,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ReplayCase(BaseModel):
-    """A protocol window and the clients whose compression records the runner measures."""
+    """A protocol window; the runner measures every client of the trace in each of its rounds."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     case_id: str
@@ -43,7 +43,6 @@ class ReplayCase(BaseModel):
     protocol: str = "wz_cancer"
     start_round: int = Field(ge=0)
     initial_si: Literal["raw", "nsplit"] = "raw"
-    client_ids: tuple[int, ...]
     round_codecs: tuple[str, ...]
 
     @field_validator("case_id", "codec_id")
@@ -53,11 +52,19 @@ class ReplayCase(BaseModel):
         assert value not in {"", ".", ".."} and Path(value).name == value
         return value
 
+    @field_validator("round_codecs", mode="before")
+    @classmethod
+    def expand_schedule(cls, value: str) -> tuple[str, ...]:
+        """Expand a one-line schedule of space-separated tokens, where `token*n` repeats one n times."""
+        schedule: list[str] = []
+        for item in value.split():
+            token, _, repeats = item.partition("*")
+            schedule += [token] * int(repeats or 1)
+        return tuple(schedule)
+
     @model_validator(mode="after")
     def validate_window(self) -> ReplayCase:
-        """Require an ordered client subset and an explicit train/freeze protocol window."""
-        assert self.client_ids and tuple(sorted(set(self.client_ids))) == self.client_ids
-        assert min(self.client_ids) >= 0
+        """Require an explicit train/freeze protocol window."""
         assert len(self.round_codecs) >= 2, "round_codecs must contain at least two rounds."
         assert self.round_codecs[0] != "F", "The first schedule token must train a codec, not 'F'."
         assert "F" in self.round_codecs, "round_codecs must contain at least one frozen round."
@@ -131,19 +138,19 @@ def _codec_seed(seed: int, start_round: int, round_id: int, client_id: int) -> i
     return int(content_hash((seed, start_round, round_id, client_id))[:8], 16)
 
 
-def _case_metadata(case: ReplayCase) -> dict[str, Any]:
+def _case_metadata(case: ReplayCase, num_clients: int) -> dict[str, Any]:
     """Return the schedule contract shared by case and experiment identities."""
     return {
         "protocol": case.protocol,
         "start_round": case.start_round,
         "initial_si": case.initial_si,
-        "client_ids": list(case.client_ids),
+        "client_ids": list(range(num_clients)),
         "round_codecs": list(case.round_codecs),
     }
 
 
 def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[str, Any],
-                    protocol: _WZProtocol) -> dict[str, Any]:
+                    protocol: _WZProtocol, num_clients: int) -> dict[str, Any]:
     """Build the part of `complete.json` that decides whether a case can be reused."""
     protocol_snapshot = json.loads(json.dumps(protocol.config_snapshot()))
     return {
@@ -151,7 +158,7 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
         "trace": trace_identity,
         "seed": plan.seed,
         "codec_seed_policy": _CODEC_SEED_POLICY,
-        "case": _case_metadata(case),
+        "case": _case_metadata(case, num_clients),
         "protocol_snapshot": protocol_snapshot,
         "history_representation": protocol_snapshot["history"],
         "oracle_assumptions": {
@@ -165,7 +172,7 @@ def _case_identity(plan: ReplayPlan, case: ReplayCase, trace_identity: Mapping[s
     }
 
 
-def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[str, Any]:
+def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any], num_clients: int) -> dict[str, Any]:
     """Build the semantic identity of the whole experiment; paths are provenance, not identity."""
     return {
         "experiment_semantics_version": _EXPERIMENT_SEMANTICS_VERSION,
@@ -176,7 +183,7 @@ def _plan_identity(plan: ReplayPlan, trace_identity: Mapping[str, Any]) -> dict[
         "trace": trace_identity,
         "cases": [
             {"case_id": case.case_id, "codec_id": case.codec_id}
-            | _case_metadata(case)
+            | _case_metadata(case, num_clients)
             for case in plan.cases
         ],
         "comparisons": [list(pair) for pair in plan.comparisons],
@@ -229,7 +236,7 @@ def _checkpoint_rounds(windows: Sequence[tuple[int, int]]) -> list[int]:
 
 
 def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], checkpoint_round: int) -> Path:
-    """Evaluate selected clients while decoded and unselected raw updates advance history."""
+    """Evaluate every client while its decoded reconstruction advances history."""
     trace = Trace(
         load_fl_config(plan.fl_config), dataset_revision=plan.dataset_revision,
         device=torch.device(plan.trace_device),
@@ -241,10 +248,9 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], 
     depth = protocol.max_per_client_recons_history
     assert depth is not None and case.start_round >= depth > 0, (
         f"Case {case.case_id} needs {depth} preceding raw rounds.")
-    assert max(case.client_ids) < cfg.num_clients
     case_dir = _case_dir(plan, case)
     records_path = case_dir / "compression_records.csv"
-    identity = _case_identity(plan, case, trace_identity, protocol)
+    identity = _case_identity(plan, case, trace_identity, protocol, cfg.num_clients)
     completion = case_dir / "complete.json"
     pre_run_identity = case_dir / "pre_run_identity.json"
     if pre_run_identity.exists():
@@ -279,12 +285,8 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], 
                         delta, CompressionRecord(round_id, client_id, history_name), Access.TEMPORAL_TOO)
                 continue
             assert delta.numel() == manager.param_count
-            if client_id in case.client_ids:
-                set_global_seed(_codec_seed(plan.seed, case.start_round, round_id, client_id))
-                simulate_compression(protocol, delta, client_id, round_id, manager, case_dir, {}, (), ())
-            else:
-                for history in protocol.histories:
-                    history.commit(delta, CompressionRecord(round_id, client_id, "raw_history"), Access.TEMPORAL_TOO)
+            set_global_seed(_codec_seed(plan.seed, case.start_round, round_id, client_id))
+            simulate_compression(protocol, delta, client_id, round_id, manager, case_dir, {}, (), ())
 
     records.validate_case_records(records_path, identity["case"])
     with atomic_output(completion) as temporary:
@@ -339,7 +341,6 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
         depth = protocol.max_per_client_recons_history
         assert depth is not None and case.start_round >= depth > 0, (
             f"Case {case.case_id} needs {depth} preceding raw rounds.")
-        assert max(case.client_ids) < cfg.num_clients
         windows[case] = (case.start_round - depth, case.start_round + len(case.round_codecs) - 1)
     # Execution order: the earliest trace window first, so each case can resume from its predecessor.
     ordered = sorted(windows, key=lambda case: windows[case])
@@ -350,7 +351,7 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
     ).identity()
     provenance = _provenance(plan, plan_path)
 
-    identity = _plan_identity(plan, trace_identity)
+    identity = _plan_identity(plan, trace_identity, cfg.num_clients)
     manifest_path = plan.output_root / "test_config.json"
     if manifest_path.exists():
         stored = json.loads(manifest_path.read_text())

@@ -25,8 +25,9 @@ report the separately trained server-SI comparison.
    overwritten in place) where the next case begins, so that case resumes instead of retraining
    from round zero. A state later than a case's first round is ignored.
 2. **Cases.** `sparse_replay.py` seeds each case's preceding raw history, then replays its window:
-   every selected client's decoded reconstruction advances decoder-visible history in normal
-   server order, while unselected clients advance it with raw deltas. Records land under
+   every client of the trace is measured, and its decoded reconstruction advances decoder-visible
+   history in normal server order. A case's `round_codecs` is one line of space-separated tokens,
+   where `token*n` repeats a token, e.g. `"TR|bins_per_plane=2|num_planes=3 F*9"`. Records land under
    `<output_root>/cases/<codec_id>/<case_id>/`. Before each measured client-round the global RNG is
    reseeded from the plan seed, start round, round, and client, so fits are reproducible yet
    differ across clients and rounds.
@@ -85,8 +86,8 @@ systemd-run --user --collect --unit=fl-wz-global-plot --service-type=exec \
 - `plans/or_svhn_30c_f9.json` and `plans/tr_svhn_30c_f9.json` share the seed-43
   SVHN/ResNet-18 trace. Each measures all 30 clients at starts 5, 12, and 20 with one trained round
   followed by nine frozen rounds.
-- `plans/o_svhn_30c_f9_warm.json` and `plans/t_svhn_30c_f9_warm.json` use those placements with the
-  warm-pool protocol. Within each trained round, the first five workers build the shared cold pool
+- `plans/o_svhn_30c_f9_warm.json`, `plans/t_svhn_30c_f9_warm.json`, `plans/or_svhn_30c_f9_warm.json`,
+  and `plans/tr_svhn_30c_f9_warm.json` use those placements with the warm-pool protocol. Within each trained round, the first five workers build the shared cold pool
   and the remaining workers use warm starts; worker curves remain intentionally aggregated.
 - `plans/or_tr_svhn_30c_start12_seed44.json` (+ `plans/svhn_30c_fl_config_seed44.json`) regenerates
   an independent seed-44 FL trajectory and compares OR with TR at start 12.
@@ -109,7 +110,8 @@ Every `complete.json` (per case) and `test_config.json` (per experiment) stores 
 parts:
 
 - **`identity`**: the trace identity (`Trace.identity()`), the experiment seed, the codec-seed
-  policy, the case's schedule (`protocol`, `start_round`, `client_ids`, `round_codecs`), the
+  policy, the case's schedule (`protocol`, `start_round`, `client_ids` (every trace client),
+  `round_codecs`), the
   JSON-round-tripped `protocol.config_snapshot()`, `history_representation`, and
   `oracle_assumptions`. This is the *only* part compared for reuse: a case is reused iff its
   stored identity exactly equals the freshly computed one. A mismatch fails loudly, naming the
@@ -132,7 +134,7 @@ display label:
 - `initial_history_source`: the five-round seed history is either raw updates or the declared
   n-split reconstruction; a worker's own seeded history remains locally available.
 - `history_replacement = "decoded_updates_after_start"`: history begins with raw deltas before the
-  sparse start, then selected clients retain their decoded reconstruction so later rounds see the
+  sparse start, then clients retain their decoded reconstruction so later rounds see the
   protocol trajectory being measured.
 - `client_order = "normal"`: clients are processed in ascending id order each round; a client sees
   its own preceding rounds and earlier clients' current-round updates, never a later client's or
