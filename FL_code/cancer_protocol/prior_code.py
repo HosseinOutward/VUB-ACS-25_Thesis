@@ -84,6 +84,19 @@ class PriorCalculator:
 
         return batch_loop(prior_batch, model, bins_vec.shape[1], batch_size, cat_dim=1)
 
+    @classmethod
+    def candidate_rates(
+        cls, model: EncoderDecoderLayeredRNN, bins: torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+    ) -> tuple[float, float]:
+        """Compare a candidate's total hard-symbol code length with the same symbols' marginal entropy."""
+        prior = cls.compute_prior_from_network(model, bins, side_info)
+        marginal = cls.compute_marginal_prior(bins, model.bins_per_plane, model.num_planes)
+        return (
+            cls.compute_rate_from_prior_tensor(prior, bins, model.num_planes),
+            cls.compute_rate_from_prior_tensor(marginal, bins, model.num_planes),
+        )
+
     @staticmethod
     def prior_loss(
         model: EncoderDecoderLayeredRNN,
@@ -208,6 +221,7 @@ def _train_prior_lineage(
     )
     prior_input = (bins_vec.T.contiguous(), context_codes.contiguous())
     attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
+    rejected: list[str] = []
     for attempt_index in range(repeats + 2):
         if len(attempts) == repeats:
             break
@@ -230,11 +244,19 @@ def _train_prior_lineage(
             prior_input, side_info, c_cfg, batch_size,
             label=f"Prior {label} attempt {attempt_index + 1}",)
         candidate.requires_grad_(True)
-        if np.isfinite(loss):
-            attempts.append((candidate, loss))
+        if not np.isfinite(loss):
+            rejected.append(f"attempt {attempt_index + 1}: non-finite loss")
+            continue
+        prior_rate, marginal_rate = PriorCalculator.candidate_rates(
+            candidate, bins_vec, side_info)
+        if not prior_rate <= marginal_rate:
+            rejected.append(f"attempt {attempt_index + 1}: prior rate {prior_rate:.8g} exceeds marginal {marginal_rate:.8g}")
+            print(f"Prior {label} rejected: {rejected[-1]}", flush=True)
+            continue
+        attempts.append((candidate, loss))
 
     assert len(attempts) == repeats, (
-        f"Created {len(attempts)}/{repeats} required {label} prior candidates."
+        f"Created {len(attempts)}/{repeats} required {label} prior candidates; rejected: {rejected}."
     )
     return min(attempts, key=lambda attempt: attempt[1])
 

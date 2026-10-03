@@ -1,0 +1,8 @@
+pairing,start,reference_start,observed_outliers,excluded_matched_clients
+OR vs TR,5,5,[],[]
+OR vs TR,12,12,"[1, 13, 20, 21]","[1, 13, 20, 21]"
+OR vs TR,20,20,"[10, 15]","[10, 15]"
+OR vs OMR,12,12,"[1, 13, 20, 21]","[1, 13]"
+OMR vs TMR revised,7,7,[21],[]
+OMR vs TMR legacy,6,6,"[1, 5, 11]","[1, 5, 11]"
+OR vs OMR frozen different placements,5,7,[21],[21]

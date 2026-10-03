@@ -149,7 +149,7 @@ def _health_snapshot(
     }
 
 
-def supervise(plan_path: Path) -> int:
+def supervise(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot") -> int:
     """Run replay as a child and persist timed health snapshots until completion."""
     plan = load_plan(plan_path)
     control_dir = _control_dir(plan)
@@ -165,7 +165,7 @@ def supervise(plan_path: Path) -> int:
                 sys.executable,
                 "-u",
                 "-m",
-                "Experiments.Protocol_test.sparse_replay",
+                worker_module,
                 str(plan_path),
             ),
             cwd=_REPO_ROOT,
@@ -180,7 +180,7 @@ def supervise(plan_path: Path) -> int:
         )
         plotter = subprocess.Popen(
             (
-                sys.executable, "-u", "-m", "Experiments.Protocol_test.live_plot",
+                sys.executable, "-u", "-m", plotter_module,
                 str(plan.output_root), "--runner-pid", str(runner.pid),
                 "--control-dir", str(control_dir),
             ),
@@ -225,7 +225,7 @@ def supervise(plan_path: Path) -> int:
     return runner.returncode or 0
 
 
-def launch(plan_path: Path) -> str:
+def launch(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot") -> str:
     """Start the supervisor in an independent transient user service."""
     plan_path = plan_path.resolve()
     plan = load_plan(plan_path)
@@ -237,6 +237,7 @@ def launch(plan_path: Path) -> str:
         f"--working-directory={_REPO_ROOT}", "--property=OOMPolicy=continue",
         "--property=KillMode=control-group", sys.executable, "-u", "-m",
         "Experiments.Protocol_test.detached_replay", "supervise", str(plan_path),
+        "--worker-module", worker_module, "--plotter-module", plotter_module,
     )
     result = subprocess.run(command, check=True, capture_output=True, text=True)
     _atomic_json(control_dir / "launch.json", {
@@ -254,11 +255,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("launch", "supervise"))
     parser.add_argument("plan", type=Path)
+    parser.add_argument("--worker-module", default="Experiments.Protocol_test.sparse_replay")
+    parser.add_argument("--plotter-module", default="Experiments.Protocol_test.live_plot")
     args = parser.parse_args()
     if args.action == "launch":
-        print(launch(args.plan), flush=True)
+        print(launch(args.plan, args.worker_module, args.plotter_module), flush=True)
     else:
-        raise SystemExit(supervise(args.plan.resolve()))
+        raise SystemExit(supervise(args.plan.resolve(), args.worker_module, args.plotter_module))
 
 
 if __name__ == "__main__":

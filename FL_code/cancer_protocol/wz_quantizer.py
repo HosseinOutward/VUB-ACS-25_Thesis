@@ -1000,6 +1000,12 @@ class WZQuantizerCancer:
                     f"attempt {attempt_index + 1}: unusable symbols per plane {symbol_counts}"
                 )
             else:
+                prior_rate, marginal_rate = self.prior_calculator.candidate_rates(
+                    model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
+                if not prior_rate <= marginal_rate:
+                    rejected.append(f"attempt {attempt_index + 1}: prior rate {prior_rate:.8g} exceeds marginal {marginal_rate:.8g}")
+                    print(f"Quantizer {label} rejected: {rejected[-1]}", flush=True)
+                    continue
                 made_quants_and_stat.append((model, loss))
         assert len(made_quants_and_stat) == repeats, (
             f"Created {len(made_quants_and_stat)}/{repeats} required {label} quantizer candidates "

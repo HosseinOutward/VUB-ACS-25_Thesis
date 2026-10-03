@@ -95,6 +95,82 @@ systemd-run --user --collect --unit=fl-wz-global-plot --service-type=exec \
 
 These plans train real 30-client quantizers and are not smoke tests.
 
+## Running and reporting a new experiment
+
+Copy an ordinary OR/TR plan to a new named plan and set a fresh `output_root` under `Runs_exp/`;
+do not overwrite historical output or change `trace_device` for a same-trace comparison.
+Keep one trained round + `F*9`, all clients, and the same seed/placements for paired methods.
+Launch long runs through the detached supervisor, one quantizer job at a time on this host:
+
+```bash
+.venv/bin/python -m Experiments.Protocol_test.detached_replay launch Experiments/Protocol_test/plans/<new_plan>.json
+```
+
+Its plotter starts automatically. Use the global watcher command above for shared axes.
+Read `<output_root>/../runs_control/{runner.log,health_checks.jsonl}` for progress and memory;
+stop via `systemctl --user stop fl-wz-<plan-name>`, never `pkill`. A prior semantic identity
+mismatch needs a new output root or an explicitly archived move, not deletion/reuse.
+
+Report coverage, seed, placements, SI assumptions and training/refit schedule first. The main
+comparison is the COMPLETE 10-round average below, per start and pooled; incomplete comparisons
+must say how many matched client-rounds they contain. Publish full square percentage matrices
+with ordinary O protocols first, then experimental O variants, then T variants. Every entry is
+`rd_curve_gap(row, column)["rate_gap_percent"]`: negative favors the row. Recompute both
+directions (percentage denominators differ); use `—` for unavailable comparisons, never zero.
+Publish matrices both with all clients and with symmetric client exclusions, listing the flags
+and retained population for each pair. Full-SI rANS is primary; native transport is separate.
+
+Alongside the matrix, give cumulative RD points using this text-table schema:
+
+| Method | Start/window | Phase | Stage | Marginal | Joint prior, pre-fit | Temporal prior | Full-SI prior | Native rANS | Temporal rANS | Full-SI rANS | WMAPE dB (raw %) |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| … | … | Overall: trained+9 frozen | … | … | … | … | … | … | … | … | … |
+
+All rates are bits/float. Sources are `marginal_rate`, `quantizer_prior_stage_rates`,
+`temporal_si_prior_rate`, `server_si_prior_rate`, `coder_stage_rates`,
+`temporal_si_rans_stage_rates`, and `server_si_rans_stage_rates`. Sum stage-rate arrays through
+the displayed stage, then average observations. Standard marginal and fine-tuned prior fields
+are scalar TOTALS: show them only at the final stage, with `—` at earlier stages unless an
+experiment explicitly measured their breakdown. Missing SI measurements stay `—`.
+Pre-fit means the preserved joint prior, not a rate before any quantizer training. In F rows,
+prior rates evaluate the trained/fine-tuned weights on CURRENT target symbols and SI; they do
+not imply another fine-tuning pass. Report trained-only and frozen-only tables as separately
+labeled diagnostics when requested, and state whether F actually refits its prior.
+Also report stage failures and symbol errors; disclose rANS overhead separately and do not mix
+payload-plus-model `final_bytes` into symbol-rate curves. Historical analysis helpers and full
+rate-table examples are preserved in the dated archive linked below.
+
+## Candidate acceptance
+
+Cold and warm quantizer/prior lineages admit only finite candidates whose total hard-symbol
+prior rate is no greater than the empirical marginal rate of the same symbols, before the
+existing lowest-loss argmin. Quantizers also retain their symbol-usability checks. Required
+accepted quotas and bounded rejection budgets are unchanged: exhaustion fails loudly rather
+than deploying a rejected candidate. The policy is recorded in protocol identity, so records
+from before the gate cannot silently be reused. This is a training-time guard, not a guarantee
+against frozen-prior failure on later targets/SI.
+
+## Comparison contract
+
+The default protocol comparison is the complete window: one trained round plus nine frozen
+rounds, all matched clients with equal client-round weights. Average cumulative rates and raw
+WMAPE first; convert WMAPE percentages as `20*log10(mean_wmape/100)`, then apply
+`rd_metrics.rd_curve_gap` over the shared distortion range. Do not average per-round gap
+percentages. Trained/frozen splits are separate diagnostics, not substitutes for this overall
+comparison. Full-SI rANS versus full-SI rANS is the requested comparison; native transport
+(O full SI versus T temporal SI) is a separate labeled result. An outlier sensitivity analysis
+removes the union of flagged clients from both methods across the whole matched window; it
+is not a deployment fix. Partial windows must be labeled partial.
+
+## Archived investigation
+
+OM/TM/OMR/TMR, historical 50/30/20 target/SI mixtures, T-in-O embeddings, joint-prior fallback
+selection and their training/confirmation diagnostics are not registered by the active runner.
+Their source snapshots, plans, compact evidence and self-contained handoff are in
+[2026-10_oracle_protocol_stability](Archive_final_experiment_reports/2026-10_oracle_protocol_stability/README.md).
+Stable WZ defaults, ordinary OR/TR warm replay, rate accounting and candidate acceptance remain
+active. Large gitignored run data/checkpoints remain in `Runs_exp/`; the handoff indexes them.
+
 ## Reruns and recovery
 
 A repeated `sparse_replay` invocation reuses every completed named case artifact after an identity

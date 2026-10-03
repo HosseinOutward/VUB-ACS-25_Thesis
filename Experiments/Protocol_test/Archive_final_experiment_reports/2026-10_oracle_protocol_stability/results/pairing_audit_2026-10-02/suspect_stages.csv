@@ -1,0 +1,90 @@
+codec,start,round,client,source,stage,rate,status
+OR,12,14,1,coder_stage_rates,1,1.6228750661128304,blown
+OR,12,14,1,server_si_rans_stage_rates,1,1.6228750661128304,blown
+OR,12,15,1,coder_stage_rates,1,1.6784032255727737,blown
+OR,12,15,1,server_si_rans_stage_rates,1,1.6784032255727737,blown
+OR,12,17,1,coder_stage_rates,1,2.3677345420288005,blown
+OR,12,17,1,server_si_rans_stage_rates,1,2.3677345420288005,blown
+OR,12,17,20,coder_stage_rates,1,2.8533819988155584,blown
+OR,12,17,20,server_si_rans_stage_rates,1,2.8533819988155584,blown
+OR,12,18,13,coder_stage_rates,1,3.339053781188845,blown
+OR,12,18,13,server_si_rans_stage_rates,1,3.339053781188845,blown
+OR,12,19,1,coder_stage_rates,1,1.7193245857808719,blown
+OR,12,19,1,server_si_rans_stage_rates,1,1.7193245857808719,blown
+OR,12,19,13,coder_stage_rates,1,1.5858686944189413,blown
+OR,12,19,13,server_si_rans_stage_rates,1,1.5858686944189413,blown
+OR,12,19,21,coder_stage_rates,1,1.686500784053004,blown
+OR,12,19,21,server_si_rans_stage_rates,1,1.686500784053004,blown
+OR,12,20,1,coder_stage_rates,1,3.354245825434225,blown
+OR,12,20,1,server_si_rans_stage_rates,1,3.354245825434225,blown
+OR,12,21,1,coder_stage_rates,1,4.063777395126762,blown
+OR,12,21,1,server_si_rans_stage_rates,1,4.063777395126762,blown
+OR,12,21,13,coder_stage_rates,1,1.3628431316259275,blown
+OR,12,21,13,server_si_rans_stage_rates,1,1.3628431316259275,blown
+OR,20,27,10,coder_stage_rates,1,3.2032869591067215,blown
+OR,20,27,10,server_si_rans_stage_rates,1,3.2032869591067215,blown
+TR,12,15,1,server_si_rans_stage_rates,1,1.20178914688916,blown
+TR,20,21,10,coder_stage_rates,1,1.4158328445857953,blown
+TR,20,21,15,coder_stage_rates,1,1.9807273386144897,blown
+TR,20,21,15,server_si_rans_stage_rates,1,2.230322165563877,blown
+TR,20,23,10,coder_stage_rates,1,1.9870791785320976,blown
+TR,20,24,15,coder_stage_rates,1,2.7568967062261516,blown
+TR,20,24,15,server_si_rans_stage_rates,1,2.7023415702273423,blown
+TR,20,25,10,coder_stage_rates,1,4.446795202350424,blown
+TR,20,25,10,server_si_rans_stage_rates,1,3.325703326935346,blown
+TR,20,25,15,coder_stage_rates,1,2.236694038317449,blown
+TR,20,25,15,server_si_rans_stage_rates,1,2.134675390251271,blown
+TR,20,26,10,coder_stage_rates,1,2.1403718702494676,blown
+TR,20,26,10,server_si_rans_stage_rates,1,2.195765523525078,blown
+TR,20,26,15,coder_stage_rates,1,2.6630128204784236,blown
+TR,20,26,15,server_si_rans_stage_rates,1,2.6696565674343713,blown
+TR,20,28,10,coder_stage_rates,1,3.5492039541240903,blown
+TR,20,28,10,server_si_rans_stage_rates,1,2.0033959234252,blown
+TR,20,28,15,coder_stage_rates,1,2.253049417965626,blown
+TR,20,28,15,server_si_rans_stage_rates,1,2.1183114251019663,blown
+TR,20,29,10,coder_stage_rates,1,3.502888037374117,blown
+TR,20,29,15,coder_stage_rates,1,2.237554019347069,blown
+TR,20,29,15,server_si_rans_stage_rates,1,2.130648790222402,blown
+OMR,7,11,21,coder_stage_rates,1,2.340887680002633,blown
+OMR,7,11,21,server_si_rans_stage_rates,1,2.340887680002633,blown
+OMR,7,12,21,coder_stage_rates,1,1.9916938853882105,blown
+OMR,7,12,21,server_si_rans_stage_rates,1,1.9916938853882105,blown
+OMR,7,14,21,coder_stage_rates,1,2.1975799260967217,blown
+OMR,7,14,21,server_si_rans_stage_rates,1,2.1975799260967217,blown
+OMR,7,15,21,coder_stage_rates,1,1.95566196807231,blown
+OMR,7,15,21,server_si_rans_stage_rates,1,1.95566196807231,blown
+OMR,7,16,21,coder_stage_rates,1,2.0202549858061993,blown
+OMR,7,16,21,server_si_rans_stage_rates,1,2.0202549858061993,blown
+OMR legacy,6,7,11,coder_stage_rates,1,1.7751847179510845,blown
+OMR legacy,6,7,11,server_si_rans_stage_rates,1,1.7751847179510845,blown
+OMR legacy,6,8,5,coder_stage_rates,2,2.0746620219105565,blown
+OMR legacy,6,8,5,server_si_rans_stage_rates,2,2.0746620219105565,blown
+OMR legacy,6,8,11,coder_stage_rates,1,3.2973368312095843,blown
+OMR legacy,6,8,11,server_si_rans_stage_rates,1,3.2973368312095843,blown
+OMR legacy,6,9,5,coder_stage_rates,2,1.7588028663410973,blown
+OMR legacy,6,9,5,server_si_rans_stage_rates,2,1.7588028663410973,blown
+OMR legacy,6,9,11,coder_stage_rates,1,2.2895020248367817,blown
+OMR legacy,6,9,11,server_si_rans_stage_rates,1,2.2895020248367817,blown
+OMR legacy,6,11,5,coder_stage_rates,1,1.674252135777554,blown
+OMR legacy,6,11,5,server_si_rans_stage_rates,1,1.674252135777554,blown
+OMR legacy,6,11,11,coder_stage_rates,1,3.5547702206885177,blown
+OMR legacy,6,11,11,server_si_rans_stage_rates,1,3.5547702206885177,blown
+OMR legacy,6,12,11,coder_stage_rates,1,3.6109923748229464,blown
+OMR legacy,6,12,11,server_si_rans_stage_rates,1,3.6109923748229464,blown
+OMR legacy,6,13,5,coder_stage_rates,1,2.270168907214164,blown
+OMR legacy,6,13,5,coder_stage_rates,2,3.6365306633855745,blown
+OMR legacy,6,13,5,server_si_rans_stage_rates,1,2.270168907214164,blown
+OMR legacy,6,13,5,server_si_rans_stage_rates,2,3.6365306633855745,blown
+OMR legacy,6,14,5,coder_stage_rates,1,1.4390594869698028,blown
+OMR legacy,6,14,5,coder_stage_rates,2,1.7943153608387747,blown
+OMR legacy,6,14,5,server_si_rans_stage_rates,1,1.4390594869698028,blown
+OMR legacy,6,14,5,server_si_rans_stage_rates,2,1.7943153608387747,blown
+OMR legacy,6,14,11,coder_stage_rates,1,2.02204363187446,blown
+OMR legacy,6,14,11,server_si_rans_stage_rates,1,2.02204363187446,blown
+OMR legacy,6,15,5,coder_stage_rates,1,1.3975471581007513,blown
+OMR legacy,6,15,5,server_si_rans_stage_rates,1,1.3975471581007513,blown
+TMR legacy,6,9,1,server_si_rans_stage_rates,1,1.2113233458914174,blown
+TMR legacy,6,11,1,coder_stage_rates,1,2.0872791312760683,blown
+TMR legacy,6,11,1,server_si_rans_stage_rates,1,3.388202913310943,blown
+TMR legacy,6,13,1,coder_stage_rates,1,2.1124861625868543,blown
+TMR legacy,6,13,1,server_si_rans_stage_rates,1,3.207081750605144,blown

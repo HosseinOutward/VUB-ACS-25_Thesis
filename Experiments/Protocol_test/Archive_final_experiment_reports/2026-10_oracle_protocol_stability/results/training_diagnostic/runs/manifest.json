@@ -1,0 +1,64 @@
+{
+  "scope": "sampled diagnostic, common compressed RAW history; not exact warm-run reproduction",
+  "train_rows_per_round": 16384,
+  "heldout_rows_per_round": 4096,
+  "clients": [
+    0,
+    5,
+    11
+  ],
+  "rounds": [
+    5,
+    6,
+    7,
+    8,
+    12,
+    13
+  ],
+  "seeds": [
+    43,
+    44,
+    45
+  ],
+  "train_rounds": [
+    6,
+    5
+  ],
+  "trace_device": "cuda:0",
+  "sample_seed": 1043,
+  "selection": "historical heldout coordinates only; future rounds evaluation only",
+  "cfg": {
+    "bins_per_plane": 2,
+    "num_planes": 3,
+    "norm_slices": null,
+    "outlier_threshold": null,
+    "marginal_loss": false,
+    "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+    "train_epochs": 140,
+    "reconst_ld": 72.31601255189986,
+    "train_sample_size": 550000,
+    "train_batch_size": 6250,
+    "lr": 0.0028364098431326932,
+    "lr_step": 43,
+    "tau": 5.5,
+    "warm_training": false,
+    "warm_retrain_repeats": 2,
+    "quantizer_train_repeats": 3,
+    "prior_train_repeats": 3,
+    "prior_retrain_epochs": 30,
+    "training_progress_bar": false,
+    "training_log_every_epochs": null,
+    "fused_optimizer": true,
+    "mixed_precision": false,
+    "deduplicate_training": true,
+    "training_match_bits": 26,
+    "source_perturbation": "none",
+    "shared_heads": true,
+    "prior_context": "hard",
+    "prior_probabilities": "categorical",
+    "hidden_dim": 128,
+    "layers": 4
+  },
+  "embedding": "zero extra SI weights; O_from_T uses default warm schedule (35 epochs)",
+  "prior_update_control": "repeat current-only rows twice; equal draws and optimizer steps to two-round fit"
+}

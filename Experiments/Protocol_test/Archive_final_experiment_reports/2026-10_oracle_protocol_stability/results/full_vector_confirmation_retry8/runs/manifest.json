@@ -1,0 +1,925 @@
+{
+  "clients": [
+    0,
+    5,
+    11,
+    21
+  ],
+  "train_rounds": [
+    7,
+    6,
+    5
+  ],
+  "weights": [
+    0.5,
+    0.3,
+    0.2
+  ],
+  "validation_round": 8,
+  "future_rounds": [
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "history": "shared decoded TMR trajectory, all 30 clients, real five-slot/two-parent warm pool",
+  "scope": "full-vector mechanism confirmation, not an independent O protocol trajectory",
+  "selection": "prior NLL per encoder, then hard normalized MSE plus native NLL; validation round8 only",
+  "candidate_seeds": "baseline _codec_seed; embedded prior +500; O-from-T +1000; cold O +2000",
+  "quantizer_retry_failure_tolerance": 6,
+  "cfg": {
+    "bins_per_plane": 2,
+    "num_planes": 3,
+    "outlier_threshold": null,
+    "marginal_loss": false,
+    "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+    "train_epochs": 140,
+    "reconst_ld": 72.31601255189986,
+    "train_sample_size": 550000,
+    "train_batch_size": 6250,
+    "lr": 0.0028364098431326932,
+    "lr_step": 43,
+    "tau": 5.5,
+    "warm_training": false,
+    "warm_retrain_repeats": 2,
+    "quantizer_train_repeats": 3,
+    "prior_train_repeats": 3,
+    "prior_retrain_epochs": 30,
+    "training_progress_bar": false,
+    "training_log_every_epochs": null,
+    "fused_optimizer": true,
+    "mixed_precision": false,
+    "deduplicate_training": true,
+    "training_match_bits": 26,
+    "source_perturbation": "none",
+    "shared_heads": true,
+    "prior_context": "hard",
+    "prior_probabilities": "categorical",
+    "hidden_dim": 128,
+    "layers": 4
+  },
+  "norm_slices": [
+    [
+      0,
+      9408,
+      null
+    ],
+    [
+      9408,
+      9472,
+      null
+    ],
+    [
+      9472,
+      9536,
+      null
+    ],
+    [
+      9536,
+      46400,
+      null
+    ],
+    [
+      46400,
+      46464,
+      null
+    ],
+    [
+      46464,
+      46528,
+      null
+    ],
+    [
+      46528,
+      83392,
+      null
+    ],
+    [
+      83392,
+      83456,
+      null
+    ],
+    [
+      83456,
+      83520,
+      null
+    ],
+    [
+      83520,
+      120384,
+      null
+    ],
+    [
+      120384,
+      120448,
+      null
+    ],
+    [
+      120448,
+      120512,
+      null
+    ],
+    [
+      120512,
+      157376,
+      null
+    ],
+    [
+      157376,
+      157440,
+      null
+    ],
+    [
+      157440,
+      157504,
+      null
+    ],
+    [
+      157504,
+      231232,
+      null
+    ],
+    [
+      231232,
+      231360,
+      null
+    ],
+    [
+      231360,
+      231488,
+      null
+    ],
+    [
+      231488,
+      378944,
+      null
+    ],
+    [
+      378944,
+      379072,
+      null
+    ],
+    [
+      379072,
+      379200,
+      null
+    ],
+    [
+      379200,
+      387392,
+      null
+    ],
+    [
+      387392,
+      387520,
+      null
+    ],
+    [
+      387520,
+      387648,
+      null
+    ],
+    [
+      387648,
+      535104,
+      null
+    ],
+    [
+      535104,
+      535232,
+      null
+    ],
+    [
+      535232,
+      535360,
+      null
+    ],
+    [
+      535360,
+      682816,
+      null
+    ],
+    [
+      682816,
+      682944,
+      null
+    ],
+    [
+      682944,
+      683072,
+      null
+    ],
+    [
+      683072,
+      977984,
+      null
+    ],
+    [
+      977984,
+      978240,
+      null
+    ],
+    [
+      978240,
+      978496,
+      null
+    ],
+    [
+      978496,
+      1568320,
+      null
+    ],
+    [
+      1568320,
+      1568576,
+      null
+    ],
+    [
+      1568576,
+      1568832,
+      null
+    ],
+    [
+      1568832,
+      1601600,
+      null
+    ],
+    [
+      1601600,
+      1601856,
+      null
+    ],
+    [
+      1601856,
+      1602112,
+      null
+    ],
+    [
+      1602112,
+      2191936,
+      null
+    ],
+    [
+      2191936,
+      2192192,
+      null
+    ],
+    [
+      2192192,
+      2192448,
+      null
+    ],
+    [
+      2192448,
+      2782272,
+      null
+    ],
+    [
+      2782272,
+      2782528,
+      null
+    ],
+    [
+      2782528,
+      2782784,
+      null
+    ],
+    [
+      2782784,
+      3962432,
+      null
+    ],
+    [
+      3962432,
+      3962944,
+      null
+    ],
+    [
+      3962944,
+      3963456,
+      null
+    ],
+    [
+      3963456,
+      6322752,
+      null
+    ],
+    [
+      6322752,
+      6323264,
+      null
+    ],
+    [
+      6323264,
+      6323776,
+      null
+    ],
+    [
+      6323776,
+      6454848,
+      null
+    ],
+    [
+      6454848,
+      6455360,
+      null
+    ],
+    [
+      6455360,
+      6455872,
+      null
+    ],
+    [
+      6455872,
+      8815168,
+      null
+    ],
+    [
+      8815168,
+      8815680,
+      null
+    ],
+    [
+      8815680,
+      8816192,
+      null
+    ],
+    [
+      8816192,
+      11175488,
+      null
+    ],
+    [
+      11175488,
+      11176000,
+      null
+    ],
+    [
+      11176000,
+      11176512,
+      null
+    ],
+    [
+      11176512,
+      11181632,
+      null
+    ],
+    [
+      11181632,
+      11181642,
+      null
+    ]
+  ],
+  "protocol": {
+    "implementation": "__main__.RetryConfirmationProtocol",
+    "protocol_name_full": "wz_cancer_confirmation",
+    "options": null,
+    "warmup_round_codecs": [
+      "I",
+      "I",
+      "I",
+      "I",
+      "I",
+      "I",
+      "I",
+      "TMR|bins_per_plane=2|num_planes=3|rans_lanes=2048",
+      "F",
+      "F",
+      "F",
+      "F",
+      "F",
+      "F",
+      "F",
+      "F",
+      "F"
+    ],
+    "routine_round_codecs": [
+      "F"
+    ],
+    "round_codecs": {
+      "F": {
+        "implementation": "FL_code.cancer_protocol.round_codecs.F_RoundCodec",
+        "options": null
+      },
+      "I": {
+        "implementation": "FL_code.FL_core.codec.IdentityRoundCodec",
+        "options": null
+      },
+      "TMR|bins_per_plane=2|num_planes=3|rans_lanes=2048": {
+        "implementation": "Experiments.Protocol_test.experimental_codecs.TMR_RoundCodec",
+        "options": {
+          "bins_per_plane": 2,
+          "num_planes": 3,
+          "rans_lanes": 2048
+        },
+        "codec_provenance": {
+          "quantizer_si_access": "temporal_too",
+          "sw_oracle_search": false,
+          "prior_weights_transmitted": true,
+          "rate_fields_available": {
+            "quantizer_prior_rate": true,
+            "quantizer_prior_stage_rates": true,
+            "temporal_si_prior_rate": true,
+            "server_si_prior_rate": true,
+            "marginal_rate": true,
+            "coder_rate": true,
+            "coder_stage_rates": true,
+            "coder_overhead_rate": true,
+            "symbol_error_rate": true,
+            "temporal_si_rans_rate": true,
+            "temporal_si_rans_stage_rates": true,
+            "temporal_si_rans_overhead_rate": true,
+            "server_si_rans_rate": true,
+            "server_si_rans_stage_rates": true,
+            "server_si_rans_overhead_rate": true
+          },
+          "transport_prior_si": "temporal_too",
+          "transport": "rans",
+          "resolved_transport_settings": {
+            "rans_lanes": 2048,
+            "rans_precision": 16
+          }
+        }
+      }
+    },
+    "candidate_acceptance": "finite_usable_and_total_hard_prior_le_same_symbol_empirical_marginal_v1",
+    "quantizer_defaults": {
+      "outlier_threshold": null,
+      "marginal_loss": false,
+      "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+      "train_epochs": 140,
+      "reconst_ld": 72.31601255189986,
+      "train_sample_size": 550000,
+      "train_batch_size": 6250,
+      "lr": 0.0028364098431326932,
+      "lr_step": 43,
+      "tau": 5.5,
+      "warm_training": false,
+      "warm_retrain_repeats": 2,
+      "quantizer_train_repeats": 3,
+      "prior_train_repeats": 3,
+      "prior_retrain_epochs": 30,
+      "training_progress_bar": false,
+      "training_log_every_epochs": null,
+      "fused_optimizer": true,
+      "mixed_precision": false,
+      "deduplicate_training": true,
+      "training_match_bits": 26,
+      "source_perturbation": "none",
+      "shared_heads": true,
+      "prior_context": "hard",
+      "prior_probabilities": "categorical",
+      "hidden_dim": 128,
+      "layers": 4
+    },
+    "max_per_client_recons_history": 5,
+    "refit_priors_on_frozen": false,
+    "history": {
+      "implementation": "FL_code.cancer_protocol.history.CompressedReconstructionHistory",
+      "max_per_client": 5,
+      "prefix_bits": 18,
+      "chunk_elements": 1048576,
+      "storage_format": "normalized_adaptive_split_packed_v2",
+      "normalization_refresh_rounds": 5,
+      "normalization_slices": [
+        [
+          0,
+          9408,
+          null
+        ],
+        [
+          9408,
+          9472,
+          null
+        ],
+        [
+          9472,
+          9536,
+          null
+        ],
+        [
+          9536,
+          46400,
+          null
+        ],
+        [
+          46400,
+          46464,
+          null
+        ],
+        [
+          46464,
+          46528,
+          null
+        ],
+        [
+          46528,
+          83392,
+          null
+        ],
+        [
+          83392,
+          83456,
+          null
+        ],
+        [
+          83456,
+          83520,
+          null
+        ],
+        [
+          83520,
+          120384,
+          null
+        ],
+        [
+          120384,
+          120448,
+          null
+        ],
+        [
+          120448,
+          120512,
+          null
+        ],
+        [
+          120512,
+          157376,
+          null
+        ],
+        [
+          157376,
+          157440,
+          null
+        ],
+        [
+          157440,
+          157504,
+          null
+        ],
+        [
+          157504,
+          231232,
+          null
+        ],
+        [
+          231232,
+          231360,
+          null
+        ],
+        [
+          231360,
+          231488,
+          null
+        ],
+        [
+          231488,
+          378944,
+          null
+        ],
+        [
+          378944,
+          379072,
+          null
+        ],
+        [
+          379072,
+          379200,
+          null
+        ],
+        [
+          379200,
+          387392,
+          null
+        ],
+        [
+          387392,
+          387520,
+          null
+        ],
+        [
+          387520,
+          387648,
+          null
+        ],
+        [
+          387648,
+          535104,
+          null
+        ],
+        [
+          535104,
+          535232,
+          null
+        ],
+        [
+          535232,
+          535360,
+          null
+        ],
+        [
+          535360,
+          682816,
+          null
+        ],
+        [
+          682816,
+          682944,
+          null
+        ],
+        [
+          682944,
+          683072,
+          null
+        ],
+        [
+          683072,
+          977984,
+          null
+        ],
+        [
+          977984,
+          978240,
+          null
+        ],
+        [
+          978240,
+          978496,
+          null
+        ],
+        [
+          978496,
+          1568320,
+          null
+        ],
+        [
+          1568320,
+          1568576,
+          null
+        ],
+        [
+          1568576,
+          1568832,
+          null
+        ],
+        [
+          1568832,
+          1601600,
+          null
+        ],
+        [
+          1601600,
+          1601856,
+          null
+        ],
+        [
+          1601856,
+          1602112,
+          null
+        ],
+        [
+          1602112,
+          2191936,
+          null
+        ],
+        [
+          2191936,
+          2192192,
+          null
+        ],
+        [
+          2192192,
+          2192448,
+          null
+        ],
+        [
+          2192448,
+          2782272,
+          null
+        ],
+        [
+          2782272,
+          2782528,
+          null
+        ],
+        [
+          2782528,
+          2782784,
+          null
+        ],
+        [
+          2782784,
+          3962432,
+          null
+        ],
+        [
+          3962432,
+          3962944,
+          null
+        ],
+        [
+          3962944,
+          3963456,
+          null
+        ],
+        [
+          3963456,
+          6322752,
+          null
+        ],
+        [
+          6322752,
+          6323264,
+          null
+        ],
+        [
+          6323264,
+          6323776,
+          null
+        ],
+        [
+          6323776,
+          6454848,
+          null
+        ],
+        [
+          6454848,
+          6455360,
+          null
+        ],
+        [
+          6455360,
+          6455872,
+          null
+        ],
+        [
+          6455872,
+          8815168,
+          null
+        ],
+        [
+          8815168,
+          8815680,
+          null
+        ],
+        [
+          8815680,
+          8816192,
+          null
+        ],
+        [
+          8816192,
+          11175488,
+          null
+        ],
+        [
+          11175488,
+          11176000,
+          null
+        ],
+        [
+          11176000,
+          11176512,
+          null
+        ],
+        [
+          11176512,
+          11181632,
+          null
+        ],
+        [
+          11181632,
+          11181642,
+          null
+        ]
+      ]
+    },
+    "warm_quantizer_pool": {
+      "pool_size": 5,
+      "parents_per_refresh": 2,
+      "selection": "balanced_rotating_window_v1",
+      "history_readiness": "warmup_schedule_asserted_at_warm_entry",
+      "server_si_prior_pool": "aligned_parent_slots_for_T"
+    },
+    "multi_round_training": {
+      "train_offsets": [
+        1,
+        2
+      ],
+      "train_weights": [
+        0.5,
+        0.3,
+        0.2
+      ],
+      "target": "raw_client_delta",
+      "side_information": "decoder_visible_snapshot_before_target_encoding",
+      "sampling": "weighted_current_then_increasing_lag",
+      "stack": "lazy_independently_normalized_si_blocks_v1",
+      "prior_training": "weighted_final_encoder_symbols_with_capture_time_native_and_server_si_v1",
+      "history_seed_depth": 7
+    },
+    "quantizer_retry_failure_tolerance": 6
+  },
+  "provenance": {
+    "git_head": "de470eadedef896c34984ca7fbdc3e1453b17971",
+    "dirty_source_fingerprint": "26107c269e4d062510f82239ad79f8429268d23bd3ef8cf5276e041bb54b3b26",
+    "dirty_source_paths": [
+      "Experiments/Protocol_test/README.md",
+      "Experiments/Protocol_test/detached_replay.py",
+      "Experiments/Protocol_test/records.py",
+      "Experiments/Protocol_test/sparse_replay.py",
+      "FL_code/cancer_protocol/cancer_protocol.py",
+      "FL_code/cancer_protocol/prior_code.py",
+      "FL_code/cancer_protocol/round_codecs.py",
+      "FL_code/cancer_protocol/wz_quantizer.py",
+      "Experiments/Protocol_test/audit_multi_round.py",
+      "Experiments/Protocol_test/audit_pairings.py",
+      "Experiments/Protocol_test/experimental_codecs.py",
+      "Experiments/Protocol_test/full_vector_confirmation.py",
+      "Experiments/Protocol_test/smoke_multi_round.py",
+      "Experiments/Protocol_test/test_candidate_acceptance.py",
+      "Experiments/Protocol_test/test_experimental_codecs.py",
+      "Experiments/Protocol_test/test_full_vector_confirmation.py",
+      "Experiments/Protocol_test/test_training_diagnostic.py",
+      "Experiments/Protocol_test/training_diagnostic.py"
+    ],
+    "torch_version": "2.5.1+cu121",
+    "cuda_version": "12.1",
+    "gpu_names": [
+      "NVIDIA GeForce RTX 3090"
+    ],
+    "plan_path": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/Experiments/Protocol_test/plans/full_vector_confirmation_retry8.json",
+    "output_root": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/Experiments/Protocol_test/Runs_exp/full_vector_confirmation_retry8/runs",
+    "gpu_ids": [
+      0
+    ],
+    "max_parallel_cases": 1,
+    "plan": {
+      "name": "full_vector_confirmation_retry8",
+      "description": "Full-vector confirmation with eight maximum warm attempts per parent (two accepted plus six rejection slots); acceptance, quotas, priors, and optimizer unchanged.",
+      "fl_config": "svhn_30c_fl_config.json",
+      "trace_device": "cuda:0",
+      "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+      "output_root": "../Runs_exp/full_vector_confirmation_retry8/runs",
+      "gpu_ids": [
+        0
+      ],
+      "max_parallel_cases": 1,
+      "seed": 43,
+      "cases": [
+        {
+          "case_id": "start7",
+          "codec_id": "TMR",
+          "protocol": "wz_cancer_confirmation",
+          "start_round": 7,
+          "round_codecs": "TMR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"
+        }
+      ],
+      "comparisons": []
+    }
+  },
+  "trace_identity": {
+    "trace_version": 2,
+    "fl_config": {
+      "model_name": "resnet18",
+      "dataset_name": "SVHN",
+      "num_classes": 10,
+      "image_size": 32,
+      "num_clients": 30,
+      "num_loader_workers": 0,
+      "local_epochs": 1,
+      "batch_size": 128,
+      "lr": 0.1,
+      "seed": 43,
+      "server_momentum": 0.0,
+      "server_nesterov": false,
+      "augment": false,
+      "label_smoothing": 0.0,
+      "grad_clip_norm": 0.0,
+      "non_iid_partition": false,
+      "dirichlet_alpha": 0.5,
+      "server_lr": 1.0,
+      "channels_last": true,
+      "fused_optimizer": true,
+      "mixed_precision": true,
+      "dataset_fraction": null
+    },
+    "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+    "device": {
+      "type": "cuda",
+      "name": "NVIDIA GeForce RTX 3090",
+      "capability": [
+        8,
+        6
+      ],
+      "torch": "2.5.1+cu121",
+      "cuda": "12.1",
+      "cudnn_deterministic": true,
+      "cudnn_benchmark": false
+    }
+  }
+}

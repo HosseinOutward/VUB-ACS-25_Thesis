@@ -4,6 +4,18 @@ One folder per investigation. Each folder has its own `README.md` indexing its p
 
 Naming: `YYYY-MM_topic/`.
 
+### 2026-10 — Oracle protocol stability and multi-round alternatives
+`2026-10_oracle_protocol_stability/`
+
+Stable WZ optimizer defaults restored usable OR quantizers. Complete OR/TR windows favor OR;
+multi-round OMR/TMR and fallback-selection diagnostics did not establish a decisive incremental
+win over simpler OR. The handoff separates complete 1-trained+9-frozen protocol averages from
+partial/common-history diagnostics, documents frozen-prior failures and acceptance/retry limits,
+and preserves experimental source snapshots and compact evidence. Large run data stay gitignored
+in `Experiments/Protocol_test/Runs_exp/`.
+
+---
+
 ### 2026-09 — Warm-start retraining studies
 `2026-09_warm_start_retraining/`
 

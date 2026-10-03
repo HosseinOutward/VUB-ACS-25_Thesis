@@ -165,6 +165,7 @@ class _WZProtocol(BaseProtocol):
     def config_snapshot(self) -> dict[str, Any]:
         """Return the WZ schedule, quantizer defaults, and SI/history policies."""
         snapshot = super().config_snapshot()
+        snapshot["candidate_acceptance"] = "finite_usable_and_total_hard_prior_le_same_symbol_empirical_marginal_v1"
         snapshot["quantizer_defaults"] = WZcfgQuant(
             bins_per_plane=1,
             num_planes=1,

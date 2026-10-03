@@ -1,0 +1,17 @@
+{
+  "name": "omr_svhn_30c_f9_warm",
+  "description": "Lag-1 raw-target OMR, warm pool, 30 clients, starts 6/12/20, one trained round and nine frozen rounds.",
+  "fl_config": "svhn_30c_fl_config.json",
+  "trace_device": "cuda:0",
+  "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+  "output_root": "../Runs_exp/omr_svhn_30c_f9_warm/runs",
+  "gpu_ids": [0],
+  "max_parallel_cases": 1,
+  "seed": 43,
+  "cases": [
+    {"case_id": "start6", "codec_id": "OMR", "protocol": "wz_cancer_multi_warm|train_offsets=(1,)", "start_round": 6, "round_codecs": "OMR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"},
+    {"case_id": "start12", "codec_id": "OMR", "protocol": "wz_cancer_multi_warm|train_offsets=(1,)", "start_round": 12, "round_codecs": "OMR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"},
+    {"case_id": "start20", "codec_id": "OMR", "protocol": "wz_cancer_multi_warm|train_offsets=(1,)", "start_round": 20, "round_codecs": "OMR|bins_per_plane=2|num_planes=3|rans_lanes=2048 F*9"}
+  ],
+  "comparisons": []
+}
