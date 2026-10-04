@@ -77,6 +77,13 @@ Rest:
 - Run multi-hour jobs through the detached experiment supervisor, never an interactive tool session. It records health at 1, 5, and 30 minutes, then every 90 minutes; rely on those checks instead of babysitting with repeated sleeps. Bound parallel cases by measured host RAM so the job survives chat/session loss.
 - Keep its live plotter enabled: it refreshes changed results in disposable processes, survives plot-code edits without replacing the last good plots, and exits with the experiment.
 
+### Protocol runs and result reporting
+
+- Use a fresh named plan/output; launch with `.venv/bin/python -m Experiments.Protocol_test.detached_replay launch <plan.json>`. Preserve the trace device for matched comparisons; stop via the specific `systemctl --user stop <unit>`, never `pkill`. See `Experiments/Protocol_test/README.md` for details.
+- Default comparison: all matched clients over **one trained + nine frozen rounds**, per start and pooled. Average cumulative rates and raw WMAPE before `20*log10(mean_wmape/100)` and `rd_metrics.rd_curve_gap`; never average individual gap percentages. Label partial windows and trained/frozen diagnostic splits explicitly.
+- Report a **full square text table of equal-distortion rate changes (%)**, row versus column, negative favoring the row; recompute reverse entries. Full-SI rANS is primary; native transport is separate. Show with/without symmetric whole-window client exclusions, their reasons and retained coverage.
+- Alongside it, show stage RD tables in bits/float: **marginal, joint/pre-finetuning prior, temporal/full-SI fine-tuned priors, native/temporal/full-SI rANS, and WMAPE dB (raw %)**. Scalar totals appear only at the final stage; missing measurements are `—`, not inferred. Frozen prior rates evaluate fixed trained weights on refreshed target/SI, not another fit; state any actual refitting and flag dead/blown stages or symbol errors.
+
 ---
 
 ## 4. Code Review Goals
