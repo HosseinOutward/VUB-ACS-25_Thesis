@@ -169,7 +169,8 @@ selection and their training/confirmation diagnostics are not registered by the 
 Their source snapshots, plans, compact evidence and self-contained handoff are in
 [2026-10_oracle_protocol_stability](Archive_final_experiment_reports/2026-10_oracle_protocol_stability/README.md).
 Stable WZ defaults, ordinary OR/TR warm replay, rate accounting and candidate acceptance remain
-active. Large gitignored run data/checkpoints remain in `Runs_exp/`; the handoff indexes them.
+active. Closed run folders are now colocated with archived plans under that investigation's
+`runs/` and `plans/`; `Runs_exp/` is reserved for new experiments. The handoff indexes them.
 
 ## Reruns and recovery
 

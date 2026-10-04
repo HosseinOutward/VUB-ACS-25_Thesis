@@ -1,6 +1,18 @@
 # Closure checks — 2026-10-04
 
+Final cleanup read-only checks: all six relocated OR/TR CSVs still validate at 300 rows each;
+all seven active plan files construct successfully; the live Runs_exp container is empty.
+At the user's request, 183 experiment tensors and one shared trace continuation checkpoint
+were removed (623,440,366 bytes), with an exact path/size manifest in `removed_artifacts.csv`.
+About 19 MiB of raw CSV/JSON evidence, logs and plots remain colocated in `runs/` and ignored
+by Git. Datasets and other shared caches were untouched. Historical statements below that
+checkpoints were preserved describe the first closure, before this subsequent removal.
+
 The retained configuration and cleanup were checked without launching another long experiment.
+The checks below describe the first closure. The user's subsequent cleanup removed the two
+active test files and moved all closed run folders to this archive's `runs/`, with archived
+plans in `plans/`. The historical 23-pass result is not a claim that those tests still exist
+in the active tree. Raw CSV/JSON evidence and original provenance remain preserved.
 
 - `OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m pytest -q`: **23 passed**.
   Nine acceptance/identity tests plus fourteen current plan/record/default contract checks.

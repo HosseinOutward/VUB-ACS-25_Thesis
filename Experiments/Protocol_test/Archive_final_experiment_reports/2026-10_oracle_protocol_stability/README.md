@@ -4,6 +4,14 @@ This is the self-contained handoff for branch `quantizer-stability-defaults`, cl
 2026-10-04. Read this file before the historical reports: several earlier tables deliberately
 compare partial windows, and must not be interpreted as complete protocol rankings.
 
+Final cleanup colocates plans in `plans/` and closed run outputs in `runs/`. Experimental
+model/problem tensors and the single shared trace continuation checkpoint were removed at
+the user's request; CSV/JSON evidence, logs and plots remain. `removed_artifacts.csv` lists
+all 184 removed files and sizes (623,440,366 bytes total). These untracked tensors cannot be
+recovered from Git; model re-evaluation and trace continuation require recomputation. The
+shared-cache deletion was limited to `_/data/trace_states/9373b2e968ca413fd03c63aa1a4407da6dfa36947d2996d8f3ce6f120b3b1387.pt`;
+datasets and other shared caches were not removed.
+
 ## Decision
 
 Keep ordinary O/OR and T/TR, the stabilized WZ quantizer defaults, fixed-symbol prior
@@ -89,7 +97,8 @@ on usable matched cases. Warm fits were usable and roughly a third of cold fitti
 The underlying diagnostic is already archived at
 `Experiments/Archive/O_collapse_diagnostic/README.md`. Its opening historical hypothesis is
 superseded by its results section. Stable defaults are retained, not archived out of production.
-Original stopped outputs were moved, not deleted, to `_/tmp/Runs_exp_stopped_2026-09-29/`.
+Original stopped outputs were first moved, not deleted, to `_/tmp/Runs_exp_stopped_2026-09-29/`;
+the final cleanup colocates them here under `runs/stopped_2026-09-29/`.
 
 ### B. Complete original OR/TR replay
 
@@ -228,35 +237,47 @@ and validation costs also prevent treating the selected curve as a free replacem
 
 ## 5. Archive layout, preserved data and reproducibility
 
-`source/` mirrors the ORIGINAL repository-relative locations of experiment code/plans/tests
-and the exact supporting core/replay files as they existed before cleanup. These are inert
+`source/` mirrors the ORIGINAL repository-relative locations of experiment code/tests
+and the exact supporting core/replay files as they existed before cleanup. `plans/` now owns
+the archived experiment plans, original OR/TR plan snapshots and shared FL config. These are inert
 historical snapshots, not active plugins. Their imports, commands, relative plan paths and
 registration side effects intentionally preserve the original layout. Do not import them into
 the retained runner. To reproduce, use a separate worktree at
 `de470eadedef896c34984ca7fbdc3e1453b17971`, overlay the selected historical `source/` files at
-their original paths, then use a fresh output root and the archived command in that worktree.
+their original paths and `plans/` into `Experiments/Protocol_test/plans/`, then use a fresh output
+root and the archived command in that worktree. The plan JSON and stored manifests retain
+their original output paths for provenance; map these to a fresh root rather than overwriting
+archived results. Active ordinary OR/TR templates remain in the live plans directory. Removed
+tensor artifacts must be recomputed; the source snapshot alone does not recover their contents.
 Review the full support snapshot, not just `experimental_codecs.py`: weighted priors and runner
 capture hooks were part of the semantics. Old lag-1 plans require their historical implementation
 or explicitly matching weights; the old stopped confirmation plan is not accepted by the retry8
 worker. No compatibility wrappers or silent rerun fallbacks are provided.
 
 `results/` contains versioned copies of compact derived CSVs, final reports, manifests and
-completion markers. Original derived artifacts also remain with the untouched run data. The
+completion markers. Original derived artifacts also remain with the retained run evidence. The
 copied reports contain historical commands/source paths and scope labels; this handoff owns the
 final interpretation and complete-window comparison contract.
 
-Large raw records, checkpoints, model tensors, trace caches and health logs remain gitignored:
+Closed run folders have been MOVED here into `runs/`, alongside their archived `plans/`.
+They remain gitignored; compact evidence above is versioned. The old live `Runs_exp/` container
+is empty and reserved for new experiments. Stored logs/manifests retain original paths rather
+than rewriting historical provenance. Experimental tensor artifacts have been removed, along
+with the one shared trace checkpoint listed above; datasets and other caches were not moved
+or deleted. `runs/` retains about 19 MiB of evidence/logs/plots, locally and gitignored.
 
-| Repository-relative path under `Experiments/Protocol_test/Runs_exp/` | Contents/status |
+| Path under this archive's `runs/` | Contents/status |
 |---|---|
 | `or_svhn_30c_f9_warm/`, `tr_svhn_30c_f9_warm/` | Complete original OR/TR, 900 rows each |
 | `omr_svhn_30c_f9_warm/`, `tmr_svhn_30c_f9_warm/` | Stopped lag-1 runs; partial matched audit only |
 | `omr_svhn_30c_f9_w503020_gate/` | Revised OMR, 314 rows; stopped frozen-prior failures |
 | `tmr_svhn_30c_f9_w503020_gate/` | Revised TMR, two rows; OOM stopped |
-| `training_diagnostic/` | Completed sampled diagnostic, attempts/models/selection analysis |
-| `full_vector_confirmation/` | Failed first confirmation, 21 baseline rows; retained checkpoints |
+| `training_diagnostic/` | Completed sampled diagnostic, attempts/selection analysis; tensors removed |
+| `full_vector_confirmation/` | Failed first confirmation, 21 baseline rows; checkpoints removed |
 | `full_vector_confirmation_retry8/` | Successful confirmation, all baseline/evaluation results |
 | `pairing_audit_2026-10-02/` | Matched historical RD audit and symmetric exclusions |
+| `_global_analysis/`, `_global_analysis_control/` | Closed global plots/watcher status |
+| `stopped_2026-09-29/` | Original stopped old-default outputs and plots |
 
 Primary numerical evidence: `results/pairing_audit_2026-10-02/{stage_points,comparison_gaps,exclusions,suspect_stages}.csv`.
 Confirmation evidence: `results/full_vector_confirmation_retry8/runs/`, including the full rate
@@ -294,7 +315,9 @@ SI availability explicit, test failures on all clients/seeds, and compare comple
 averages. Do not reintroduce M complexity solely because of a partial, selected, or excluded
 curve. No such new experiment was authorized/launched as part of closing this branch.
 
-Cleanup retains the general marginal-acceptance tests, removes archive imports from active replay,
-and excludes historical archive tests from routine pytest discovery. The closure merges into
+The first cleanup verified 23 acceptance/plan/record tests; the user subsequently removed the
+two active test files as no longer needed. Their original experimental test snapshots remain
+historical evidence under `source/`. Archive imports remain removed from active replay and
+historical tests excluded from routine discovery. The closure merges into
 local master, deletes only the merged feature branch, and does not push or reconcile the
 substantially diverged origin/master. Compact evidence is committed; large run data are not.

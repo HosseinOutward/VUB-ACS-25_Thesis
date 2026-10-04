@@ -11,8 +11,8 @@ Stable WZ optimizer defaults restored usable OR quantizers. Complete OR/TR windo
 multi-round OMR/TMR and fallback-selection diagnostics did not establish a decisive incremental
 win over simpler OR. The handoff separates complete 1-trained+9-frozen protocol averages from
 partial/common-history diagnostics, documents frozen-prior failures and acceptance/retry limits,
-and preserves experimental source snapshots and compact evidence. Large run data stay gitignored
-in `Experiments/Protocol_test/Runs_exp/`.
+and preserves experimental source snapshots and compact evidence. Closed run folders are colocated
+with their plans under this investigation's `runs/` and `plans/`; raw runs remain gitignored.
 
 ---
 
