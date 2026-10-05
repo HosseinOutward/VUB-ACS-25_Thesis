@@ -1,0 +1,19 @@
+{
+  "name": "alternating-svhn-5c-r7-20261005",
+  "fl_config": "svhn_5c_fl_config.json",
+  "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+  "output_root": "../../../../_/experiments/alternating_prior_quantizer_rerun",
+  "trace_device": "cuda:0",
+  "gpu_id": 1,
+  "seed": 43,
+  "target_round": 7,
+  "cases": [0, 1, 2, 3, 4],
+  "phases": ["initial_joint", "prior", "quantizer", "prior", "joint", "prior"],
+  "quantizer": {
+    "bins_per_plane": 2,
+    "num_planes": 3,
+    "training_log_every_epochs": 10
+  },
+  "min_available_ram_gib": 12,
+  "min_free_gpu_gib": 20
+}

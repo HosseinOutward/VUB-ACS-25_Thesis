@@ -1,0 +1,71 @@
+{
+  "identity": {
+    "plan": {
+      "name": "alternating-svhn-5c-r7-20261005",
+      "fl_config": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/Experiments/alternating_training/svhn_5c_fl_config.json",
+      "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+      "output_root": "/home/hojjat/Hossein_folder/Projects/FL_WZ_Quant/Experiments/Protocol_test/Runs_exp/alternating_svhn_5c_r7_20261005/runs",
+      "trace_device": "cuda:0",
+      "gpu_id": 1,
+      "seed": 43,
+      "target_round": 7,
+      "cases": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "phases": [
+        "initial_joint",
+        "prior",
+        "quantizer",
+        "prior",
+        "joint",
+        "prior"
+      ],
+      "quantizer": {
+        "bins_per_plane": 2,
+        "num_planes": 3,
+        "training_log_every_epochs": 10
+      },
+      "min_available_ram_gib": 12.0,
+      "min_free_gpu_gib": 20.0
+    },
+    "data": "9bd96f09a434068bc3ce881a8d48f35768a3a1b5863a0dda67556990a74dd060",
+    "quantizer": {
+      "bins_per_plane": 2,
+      "num_planes": 3,
+      "outlier_threshold": null,
+      "marginal_loss": false,
+      "pretrain_pth_dir": "FL_code/data/pre_trained_pth",
+      "train_epochs": 140,
+      "reconst_ld": 72.31601255189986,
+      "train_sample_size": 550000,
+      "train_batch_size": 6250,
+      "lr": 0.0028364098431326932,
+      "lr_step": 43,
+      "tau": 5.5,
+      "warm_training": false,
+      "warm_retrain_repeats": 2,
+      "quantizer_train_repeats": 3,
+      "prior_train_repeats": 3,
+      "max_training_attempts": 8,
+      "prior_retrain_epochs": 30,
+      "training_progress_bar": false,
+      "training_log_every_epochs": 10,
+      "fused_optimizer": true,
+      "mixed_precision": false,
+      "deduplicate_training": true,
+      "training_match_bits": 26,
+      "source_perturbation": "none",
+      "shared_heads": true,
+      "prior_context": "hard",
+      "prior_probabilities": "categorical",
+      "hidden_dim": 128,
+      "layers": 4
+    },
+    "training_source": "d61ba6ebf58eed75a2fc2ef8c4d4d9bc90aadb3720c4337c00275b47cce1e660"
+  },
+  "diagnostic": "single trained target, fixed historical full SI"
+}

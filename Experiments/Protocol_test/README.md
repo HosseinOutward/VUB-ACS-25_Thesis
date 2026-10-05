@@ -164,6 +164,11 @@ is not a deployment fix. Partial windows must be labeled partial.
 
 ## Archived investigation
 
+The [alternating prior/quantizer diagnostic](../Archive/2026-10_alternating_prior_quantizer/README.md)
+tested whether prior underfitting constrains the quantizer. Prior-only fitting improved estimated
+RD, but quantizer continuation with that prior frozen did not improve the curve after refitting.
+Its experiment code, report, plot, and compact measurements are archived together.
+
 OM/TM/OMR/TMR, historical 50/30/20 target/SI mixtures, T-in-O embeddings, joint-prior fallback
 selection and their training/confirmation diagnostics are not registered by the active runner.
 Their source snapshots, plans, compact evidence and self-contained handoff are in

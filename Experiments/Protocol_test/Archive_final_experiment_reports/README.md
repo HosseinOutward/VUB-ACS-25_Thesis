@@ -4,6 +4,18 @@ One folder per investigation. Each folder has its own `README.md` indexing its p
 
 Naming: `YYYY-MM_topic/`.
 
+### 2026-10 — Alternating prior and quantizer training
+
+[2026-10_alternating_prior_quantizer](../../Archive/2026-10_alternating_prior_quantizer/README.md)
+
+Five-client round-7 diagnostic with fixed rounds-5–6 decoder SI. Prior-only fitting reduced
+estimated rate substantially, but continuing the quantizer with that improved prior frozen
+did not improve RD after another prior fit. The quantizer therefore seems not to have been
+constrained by prior underfitting in this setting. Experiment code, a complete report, an RD
+plot, and one measurement table are colocated under `Experiments/Archive/`.
+
+---
+
 ### 2026-10 — Oracle protocol stability and multi-round alternatives
 `2026-10_oracle_protocol_stability/`
 
