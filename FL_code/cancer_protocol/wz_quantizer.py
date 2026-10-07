@@ -13,6 +13,7 @@ import torch
 from torch.nn import Parameter
 import torch.nn.functional as F
 
+from FL_code.FL_core.numerical_policy import NumericalPolicy
 from FL_code.FL_core.utils import (
     OUTLIER_CHUNK,
     OutlierMetadata,
@@ -417,6 +418,7 @@ def new_rnn_model(
     hidden_dim: int,
     layers: int,
     shared_heads: bool = True,
+    numerical_policy: NumericalPolicy | None = None,
 ) -> EncoderDecoderLayeredRNN:
     """Create the RNN network shared by the WZ quantizer and the conditional prior model."""
     return EncoderDecoderLayeredRNN(
@@ -429,6 +431,7 @@ def new_rnn_model(
         marginal=marginal,
         shared_encoder=shared_heads,
         shared_decoder=shared_heads,
+        numerical_policy=numerical_policy,
     )
 
 
@@ -442,7 +445,7 @@ def batch_loop(
     """Run an inference callback over contiguous batches on the best device and concatenate the outputs."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
-    with torch.inference_mode():
+    with model.numerical_policy.scope(), torch.inference_mode():
         batches = [func(start, min(start + batch_size, input_size)) for start in range(0, input_size, batch_size)]
     model.cpu()
     if device.type == "cuda":
@@ -478,137 +481,141 @@ def wz_model_training_loop(
         [EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], SideInfoMatrix | _SideInfoRows | torch.Tensor], str
     ] | None = None,
     index_sampler: Callable[[int], torch.Tensor] | None = None,
-    **loss_fn_options,
+    **loss_fn_options: Any,
 ) -> float:
     """Train one model, adaptively collapsing duplicate rows and preserving their loss mass.
 
     ``index_sampler`` draws each epoch's row indices; the default samples every row uniformly.
     """
-    model.to('cuda').train()
-    training_inputs = tuple(value.to('cuda') for value in training_inputs)
-    assert training_inputs
-    assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
-    side_info = side_info.to('cuda')
+    with c_cfg.numerical_policy.scope():
+        model.numerical_policy = c_cfg.numerical_policy
+        model.training_provenance = c_cfg.numerical_policy.runtime(
+            torch.device("cuda", torch.cuda.current_device()), mixed_precision=c_cfg.mixed_precision)
+        model.to('cuda').train()
+        training_inputs = tuple(value.to('cuda') for value in training_inputs)
+        assert training_inputs
+        assert all(value.shape[0] == training_inputs[0].shape[0] for value in training_inputs)
+        side_info = side_info.to('cuda')
 
-    input_size = training_inputs[0].shape[0]
-    total_samples = min(c_cfg.train_sample_size, input_size)
-    batch_draws = min(batch_size, total_samples)
-    expected_index_duplicate_fraction = 1 - (
-        input_size * (1 - (1 - 1 / input_size) ** batch_draws) / batch_draws
-        if input_size > 1 else 1
-    )
-    row_groups = None
-    if c_cfg.deduplicate_training:
-        blocks = (*training_inputs, side_info)
-        probe_size = min(batch_size, input_size)
-        probe_indices = (
-            torch.arange(probe_size, device=side_info.device) * input_size // probe_size
+        input_size = training_inputs[0].shape[0]
+        total_samples = min(c_cfg.train_sample_size, input_size)
+        batch_draws = min(batch_size, total_samples)
+        expected_index_duplicate_fraction = 1 - (
+            input_size * (1 - (1 - 1 / input_size) ** batch_draws) / batch_draws
+            if input_size > 1 else 1
         )
-        probe_groups = unique_row_groups(
-            tuple(_rows_for_grouping(block, probe_indices) for block in blocks), c_cfg.training_match_bits)[1]
-        content_duplicate_fraction = 1 - (int(probe_groups.max()) + 1) / probe_size
-        if content_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
-            representatives, row_groups, collisions = unique_row_groups(
-                blocks, c_cfg.training_match_bits)
-            # Colliding rows are not provably equal, so they must not share a weighted group.
-            row_groups[collisions] = representatives.numel() + torch.arange(
-                collisions.numel(), device=row_groups.device)
-        elif expected_index_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
-            row_groups = torch.arange(input_size, device=side_info.device)
-
-    # Both training losses are scaled by 1/K relative to their previous forms.
-    optimizer_epsilon = 1e-8 / model.num_planes
-    optimizer = torch.optim.Adam(
-        parameters,
-        fused=c_cfg.fused_optimizer,
-        lr=c_cfg.lr,
-        weight_decay=0,
-        eps=optimizer_epsilon,
-    )
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
-    scaler = torch.amp.GradScaler("cuda", enabled=c_cfg.mixed_precision)
-
-    total_batches = (total_samples + batch_size - 1) // batch_size
-    pbar = create_training_progress_bar(
-        c_cfg.train_epochs * total_batches,
-        desc=label,
-        disable=not c_cfg.training_progress_bar,)
-
-    for epoch in range(c_cfg.train_epochs):
-        epoch_started = perf_counter()
-        indices = (
-            torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
-            if index_sampler is None
-            else index_sampler(total_samples)
-        )
-        # Decode the sampled SI once per epoch. In O rounds this replaces 32 minibatch passes over
-        # 150 chunked history columns with one pass, while preserving the exact sampled rows and
-        # per-minibatch duplicate weighting below.
-        epoch_inputs = tuple(value[indices] for value in training_inputs)
-        epoch_side_info = side_info[indices]
-        epoch_row_groups = None if row_groups is None else row_groups[indices]
-        epoch_loss = 0.0
-        epoch_model_samples = 0
-        for start in range(0, total_samples, batch_size):
-            batch_slice = slice(start, start + batch_size)
-            input_batch = tuple(value[batch_slice] for value in epoch_inputs)
-            si_batch = epoch_side_info[batch_slice]
-            sample_weights = None
-            if epoch_row_groups is not None:
-                _, inverse, counts = torch.unique(
-                    epoch_row_groups[batch_slice], return_inverse=True, return_counts=True
-                )
-                if counts.numel() < input_batch[0].shape[0]:
-                    representatives = torch.full_like(counts, input_batch[0].shape[0])
-                    representatives.scatter_reduce_(
-                        0,
-                        inverse,
-                        torch.arange(input_batch[0].shape[0], device=inverse.device),
-                        reduce="amin",
-                    )
-                    input_batch = tuple(value[representatives] for value in input_batch)
-                    si_batch = si_batch[representatives]
-                    sample_weights = counts.to(training_inputs[0].dtype)
-            epoch_model_samples += input_batch[0].shape[0]
-
-            optimizer.zero_grad()
-            with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
-                loss = compute_loss(
-                    model, input_batch, si_batch, epoch, c_cfg,
-                    sample_weights=sample_weights, **loss_fn_options
-                )
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            epoch_loss += loss.item()
-            if c_cfg.training_progress_bar:
-                pbar.set_postfix({"loss": f"{loss.item():.2f}"})
-                pbar.update(1)
-        scheduler.step()
-        epoch_loss /= total_batches
-        if c_cfg.training_log_every_epochs and (
-            (epoch + 1) % c_cfg.training_log_every_epochs == 0 or epoch + 1 == c_cfg.train_epochs
-        ):
-            epoch_seconds = perf_counter() - epoch_started
-            metrics = ""
-            if metrics_fn is not None:
-                model.eval()
-                with torch.inference_mode():
-                    metrics = f", {metrics_fn(model, training_inputs, side_info)}"
-                model.train()
-            print(
-                f"{label} epoch {epoch + 1}/{c_cfg.train_epochs}: "
-                f"loss={epoch_loss:.6f}, lr={optimizer.param_groups[0]['lr']:.3e}, "
-                f"seconds={epoch_seconds:.2f}, samples_per_second={total_samples / epoch_seconds:.0f}, "
-                f"model_samples={epoch_model_samples}/{total_samples}{metrics}",
-                flush=True,
+        row_groups = None
+        if c_cfg.deduplicate_training:
+            blocks = (*training_inputs, side_info)
+            probe_size = min(batch_size, input_size)
+            probe_indices = (
+                torch.arange(probe_size, device=side_info.device) * input_size // probe_size
             )
+            probe_groups = unique_row_groups(
+                tuple(_rows_for_grouping(block, probe_indices) for block in blocks), c_cfg.training_match_bits)[1]
+            content_duplicate_fraction = 1 - (int(probe_groups.max()) + 1) / probe_size
+            if content_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
+                representatives, row_groups, collisions = unique_row_groups(
+                    blocks, c_cfg.training_match_bits)
+                # Colliding rows are not provably equal, so they must not share a weighted group.
+                row_groups[collisions] = representatives.numel() + torch.arange(
+                    collisions.numel(), device=row_groups.device)
+            elif expected_index_duplicate_fraction >= TRAINING_DEDUPLICATION_MIN_FRACTION:
+                row_groups = torch.arange(input_size, device=side_info.device)
 
-    pbar.close()
-    model.cpu()
-    torch.cuda.empty_cache()
-    return epoch_loss
+        # Both training losses are scaled by 1/K relative to their previous forms.
+        optimizer_epsilon = 1e-8 / model.num_planes
+        optimizer = torch.optim.Adam(
+            parameters,
+            fused=c_cfg.fused_optimizer,
+            lr=c_cfg.lr,
+            weight_decay=0,
+            eps=optimizer_epsilon,
+        )
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=c_cfg.lr_step, gamma=0.3)
+        scaler = torch.amp.GradScaler("cuda", enabled=c_cfg.mixed_precision)
+
+        total_batches = (total_samples + batch_size - 1) // batch_size
+        pbar = create_training_progress_bar(
+            c_cfg.train_epochs * total_batches,
+            desc=label,
+            disable=not c_cfg.training_progress_bar,)
+
+        for epoch in range(c_cfg.train_epochs):
+            epoch_started = perf_counter()
+            indices = (
+                torch.randint(input_size, (total_samples,), device=training_inputs[0].device)
+                if index_sampler is None
+                else index_sampler(total_samples)
+            )
+            # Decode the sampled SI once per epoch. In O rounds this replaces 32 minibatch passes over
+            # 150 chunked history columns with one pass, while preserving the exact sampled rows and
+            # per-minibatch duplicate weighting below.
+            epoch_inputs = tuple(value[indices] for value in training_inputs)
+            epoch_side_info = side_info[indices]
+            epoch_row_groups = None if row_groups is None else row_groups[indices]
+            epoch_loss = 0.0
+            epoch_model_samples = 0
+            for start in range(0, total_samples, batch_size):
+                batch_slice = slice(start, start + batch_size)
+                input_batch = tuple(value[batch_slice] for value in epoch_inputs)
+                si_batch = epoch_side_info[batch_slice]
+                sample_weights = None
+                if epoch_row_groups is not None:
+                    _, inverse, counts = torch.unique(
+                        epoch_row_groups[batch_slice], return_inverse=True, return_counts=True
+                    )
+                    if counts.numel() < input_batch[0].shape[0]:
+                        representatives = torch.full_like(counts, input_batch[0].shape[0])
+                        representatives.scatter_reduce_(
+                            0,
+                            inverse,
+                            torch.arange(input_batch[0].shape[0], device=inverse.device),
+                            reduce="amin",
+                        )
+                        input_batch = tuple(value[representatives] for value in input_batch)
+                        si_batch = si_batch[representatives]
+                        sample_weights = counts.to(training_inputs[0].dtype)
+                epoch_model_samples += input_batch[0].shape[0]
+
+                optimizer.zero_grad()
+                with torch.amp.autocast("cuda", enabled=c_cfg.mixed_precision):
+                    loss = compute_loss(
+                        model, input_batch, si_batch, epoch, c_cfg,
+                        sample_weights=sample_weights, **loss_fn_options
+                    )
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
+                epoch_loss += loss.item()
+                if c_cfg.training_progress_bar:
+                    pbar.set_postfix({"loss": f"{loss.item():.2f}"})
+                    pbar.update(1)
+            scheduler.step()
+            epoch_loss /= total_batches
+            if c_cfg.training_log_every_epochs and (
+                (epoch + 1) % c_cfg.training_log_every_epochs == 0 or epoch + 1 == c_cfg.train_epochs
+            ):
+                epoch_seconds = perf_counter() - epoch_started
+                metrics = ""
+                if metrics_fn is not None:
+                    model.eval()
+                    with torch.inference_mode():
+                        metrics = f", {metrics_fn(model, training_inputs, side_info)}"
+                    model.train()
+                print(
+                    f"{label} epoch {epoch + 1}/{c_cfg.train_epochs}: "
+                    f"loss={epoch_loss:.6f}, lr={optimizer.param_groups[0]['lr']:.3e}, "
+                    f"seconds={epoch_seconds:.2f}, samples_per_second={total_samples / epoch_seconds:.0f}, "
+                    f"model_samples={epoch_model_samples}/{total_samples}{metrics}",
+                    flush=True,
+                )
+
+        pbar.close()
+        model.cpu()
+        torch.cuda.empty_cache()
+        return epoch_loss
 
 
 def _stacked_problem_sampler(
@@ -657,6 +664,7 @@ class WZcfgQuant(BaseModel):
     training_log_every_epochs: int | None = None
     fused_optimizer: bool = True
     mixed_precision: bool = False
+    numerical_policy: NumericalPolicy = NumericalPolicy()
     deduplicate_training: bool = True
     training_match_bits: int = Field(default=26, ge=1, le=32)
     source_perturbation: Literal["none", "draw_discard", "add"] = "none"
@@ -709,6 +717,7 @@ class WZQuantizerCancer:
             shared_heads=self.shared_heads,
             hidden_dim=self.hidden_dim,
             layers=self.layers,
+            numerical_policy=self.c_cfg.numerical_policy,
         )
 
     def __init__(
@@ -731,6 +740,7 @@ class WZQuantizerCancer:
         self.side_info_columns_cache = side_info_columns_cache or SideInfoColumnsCache()
         self.vector_size: int | None = None
         self.quantizer_prior_stage_rates: tuple[float, ...] | None = None
+        self.training_provenance: dict[str, Any] | None = None
         self._warm_start_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_losses: tuple[float, ...] = ()
@@ -871,6 +881,8 @@ class WZQuantizerCancer:
         wmspe_denom = (x_prep.float().square().mean().item() / 2) + 1e-8
         self.coding_model = self._train_finite_candidate_and_retrieve_best(x_prep, side_info, wmspe_denom)
 
+        self.training_provenance = self.c_cfg.numerical_policy.runtime(
+            self.device, mixed_precision=self.c_cfg.mixed_precision)
         # Diagnostics describe the problem this quantizer will code, which is the leading block.
         bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
         prior = self.prior_calculator.compute_prior_from_network(

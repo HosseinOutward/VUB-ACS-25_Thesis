@@ -186,6 +186,13 @@ class _WZProtocol(BaseProtocol):
             round_codec_class = self._round_codec_classes[round_name]
             if issubclass(round_codec_class, _WZRoundCodec):
                 entry["codec_provenance"] = round_codec_class.codec_provenance(**entry["options"])
+                resolved = round_codec_class.config_class(**{
+                    key: value for key, value in entry["options"].items()
+                    if key in round_codec_class.config_class.model_fields
+                })
+                entry["numerical_runtime"] = resolved.numerical_policy.runtime(
+                    torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu"),
+                    mixed_precision=resolved.mixed_precision)
         return snapshot
 
 

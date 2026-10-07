@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 
 from FL_code.run_fl import FLConfig
 from .models import FLModelTemplate
+from .numerical_policy import NumericalPolicy
 from .utils import (
     EVAL_METRIC_KEYS,
     StateDictManager,
@@ -36,6 +37,7 @@ def train_client_update(
     ).cpu().contiguous()
 
 
+@NumericalPolicy().scope()
 def run_federated_client(
     cfg: FLConfig,
     rank: int,

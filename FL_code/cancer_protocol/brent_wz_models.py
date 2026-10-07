@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from functools import partial
+from typing import Any
+
+from FL_code.FL_core.numerical_policy import NumericalPolicy
 
 import torch
 import torch.nn as nn
@@ -80,11 +83,14 @@ class EncoderDecoderLayeredRNN(nn.Module):
         marginal: bool = False,
         output_activation: Callable[[torch.Tensor], torch.Tensor] | None = None,
         encoder_input_dim: int | None = None,
+        numerical_policy: NumericalPolicy | None = None,
     ) -> None:
         super().__init__()
 
         assert bins_per_plane > 1, 'need at least single bit (2 bins) per plane'
 
+        self.numerical_policy: NumericalPolicy = numerical_policy or NumericalPolicy()
+        self.training_provenance: dict[str, Any] | None = None
         self.bins_per_plane: int = bins_per_plane
         self.num_planes: int = num_planes
         self.shared_decoder: bool = shared_decoder

@@ -16,6 +16,7 @@ from .client import train_client_update
 from .dataset import GROUP_FIELD, create_dataloader, precompute_dataset_to_shared
 from .explicit_cache import CacheEntry
 from .models import initialize_model
+from .numerical_policy import NumericalPolicy
 from .server import aggregate_and_update
 from .utils import StateDictManager
 
@@ -24,7 +25,8 @@ from .utils import StateDictManager
 # same configuration, so completed experiments and saved continuation states cannot be mistaken
 # for the same trajectory. Version 2 fixed cross-device RNG leakage (`_seeded` seeded the ambient
 # current CUDA device rather than the requested one) and added the fixed cudnn determinism policy.
-_TRACE_VERSION = 2
+# Version 3 makes TF32 and reduced-precision reductions explicit and prevents state leakage.
+_TRACE_VERSION = 3
 # `data_folder` is excluded: a path is not data identity, `dataset_revision` is.
 _SEMANTIC_FIELDS = {
     "model_name", "dataset_name", "image_size", "num_clients",
@@ -42,7 +44,7 @@ _CUDNN_BENCHMARK = False
 
 @contextmanager
 def _seeded(seed: int, device: torch.device) -> Iterator[None]:
-    """Fork RNG and cudnn-determinism state for `device`, seed it, then restore the caller's.
+    """Fork RNG and numerical policy for `device`, seed it, then restore the caller's.
 
     `device` must carry an explicit CUDA index rather than relying on the ambient current
     device: `torch.cuda.manual_seed` and kernel dispatch both key off "current device", so a
@@ -53,23 +55,21 @@ def _seeded(seed: int, device: torch.device) -> Iterator[None]:
         f"Trace generation needs an explicit CUDA device index; got {device}."
     )
     python_state, numpy_state = random.getstate(), np.random.get_state()
-    cudnn_state = (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark)
     cuda_devices = [device.index] if device.type == "cuda" else []
     device_ctx = torch.cuda.device(device.index) if device.type == "cuda" else contextlib.nullcontext()
-    with torch.random.fork_rng(devices=cuda_devices), device_ctx:
+    precision_ctx = NumericalPolicy(cudnn_deterministic=_CUDNN_DETERMINISTIC,
+                                    cudnn_benchmark=_CUDNN_BENCHMARK).scope() if device.type == "cuda" else contextlib.nullcontext()
+    with torch.random.fork_rng(devices=cuda_devices), device_ctx, precision_ctx:
         try:
             random.seed(seed)
             np.random.seed(seed % 2**32)
             torch.random.default_generator.manual_seed(seed)
             if device.type == "cuda":
                 torch.cuda.manual_seed(seed)
-                torch.backends.cudnn.deterministic = _CUDNN_DETERMINISTIC
-                torch.backends.cudnn.benchmark = _CUDNN_BENCHMARK
             yield
         finally:
             random.setstate(python_state)
             np.random.set_state(numpy_state)
-            torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark = cudnn_state
 
 
 class Trace:
@@ -114,6 +114,9 @@ class Trace:
             "fl_config": self.cfg.model_dump(mode="json", include=_SEMANTIC_FIELDS | {"num_classes"}),
             "dataset_revision": self.dataset_revision,
             "device": self._device_signature(self.device),
+            "numerical_runtime": NumericalPolicy(
+                cudnn_deterministic=_CUDNN_DETERMINISTIC, cudnn_benchmark=_CUDNN_BENCHMARK,
+            ).runtime(self.device, mixed_precision=self.cfg.mixed_precision),
         }
 
     def stream(
@@ -202,6 +205,7 @@ class Trace:
             if round_id + 1 == save_round:
                 cast(CacheEntry, checkpoint).save({
                     "round": save_round,
+                    "provenance": self.identity(),
                     "server": manager.flatten(model.state_dict()),
                     "buffers": buffers,
                     "client_optimizers": [optimizer.state_dict() for optimizer in optimizers],
@@ -218,7 +222,7 @@ class Trace:
             return {
                 "type": "cuda", "name": torch.cuda.get_device_name(device.index),
                 "capability": list(torch.cuda.get_device_capability(device.index)),
-                "torch": torch.__version__, "cuda": torch.version.cuda,
+                "torch": str(torch.__version__), "cuda": torch.version.cuda,
                 "cudnn_deterministic": _CUDNN_DETERMINISTIC, "cudnn_benchmark": _CUDNN_BENCHMARK,
             }
-        return {"type": device.type, "machine": platform.machine(), "torch": torch.__version__}
+        return {"type": device.type, "machine": platform.machine(), "torch": str(torch.__version__)}

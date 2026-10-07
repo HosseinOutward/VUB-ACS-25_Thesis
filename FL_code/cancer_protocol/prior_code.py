@@ -176,6 +176,8 @@ class PriorCalculator:
             for name, value in lineage_models[deployed_parent].state_dict().items()
         }
         model = _new_prior_model(c_cfg, side_info.shape[1]) if target_model is None else target_model
+        model.numerical_policy = c_cfg.numerical_policy
+        model.training_provenance = lineage_models[deployed_parent].training_provenance
         # A supplied target keeps its encoder/decoder, which the prior-only state does not carry.
         assert not model.load_state_dict(deployed_state, strict=target_model is None).unexpected_keys
         return PriorTrainingResult(
@@ -199,6 +201,7 @@ def _new_prior_model(c_cfg: WZcfgQuant, side_info_size: int) -> EncoderDecoderLa
         c_cfg.hidden_dim,
         c_cfg.layers,
         c_cfg.shared_heads,
+        numerical_policy=c_cfg.numerical_policy,
     ).copy_for_prior_retraining()
 
 

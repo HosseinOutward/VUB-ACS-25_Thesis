@@ -335,11 +335,7 @@ def _create_backbone(name: str, num_classes: int, image_size: int = 32) -> nn.Mo
 
 
 def initialize_model(cfg: FLConfig, device: torch.device) -> FLModelTemplate:
-    """Build the configured backbone on `device` and wrap it for the FL loop.
-
-    On CUDA this also flips the process-wide TF32 matmul switches, which affects every model in the
-    worker and not only the one returned here.
-    """
+    """Build the configured backbone on `device` without changing backend precision settings."""
     assert cfg.num_classes is not None, "cfg.num_classes must be set before model initialization."
     model_name = cfg.model_name.lower()
     backbone = _create_backbone(model_name, cfg.num_classes, cfg.image_size).to(device)
@@ -353,8 +349,5 @@ def initialize_model(cfg: FLConfig, device: torch.device) -> FLModelTemplate:
                 for param in module.parameters():
                     if param.ndim == 4:
                         param.data = param.data.contiguous(memory_format=torch.channels_last)
-
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
 
     return model

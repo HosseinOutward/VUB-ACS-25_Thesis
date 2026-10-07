@@ -82,6 +82,8 @@ class CancerRecord(CompressionRecord):
     element_metrics_class: ClassVar[type[ElementMetrics]] = ElementMetrics
     _element_metrics: ElementMetrics | None = None
 
+    numerical_runtime: dict[str, Any] | None = None
+    quantizer_training_provenance: dict[str, Any] | None = None
     bins_per_plane: int | None = None
     num_planes: int | None = None
     quantizer_prior_rate: float | None = None
@@ -261,6 +263,8 @@ class _WZRoundCodec(BaseRoundCodec):
         record.update_record_fields(
             bins_per_plane=self.c_cfg.bins_per_plane,
             num_planes=self.c_cfg.num_planes,
+            numerical_runtime=self.c_cfg.numerical_policy.runtime(
+                self.quantizer.device, mixed_precision=self.c_cfg.mixed_precision),
         )
         if self.dump_element_metrics:
             # Model states are dumped every round, but the per-coordinate arrays are several
@@ -314,6 +318,8 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> dict[str, Any]:
         """Quantize a raw delta, fine-tune its native prior, and attach rate metrics."""
         assert delta_vec.dtype == torch.float32 and delta_vec.device == torch.device("cpu")
+        if self.quantizer.training_provenance is not None:
+            record.update_record_fields(quantizer_training_provenance=self.quantizer.training_provenance)
         self._original_delta_vec = delta_vec
         bins, soft_codes, metadata = self.quantizer.encoding_process(delta_vec)
         assert soft_codes is not None, (
@@ -397,6 +403,9 @@ class _WZRoundCodec(BaseRoundCodec):
         artifact.models = {
             "round_name_full": self.round_name_full,
             "c_cfg": self.c_cfg.model_dump(mode="json", exclude={"norm_slices"}),
+            "numerical_runtime": record.numerical_runtime,
+            "quantizer_training_provenance": record.quantizer_training_provenance,
+            "native_prior_training_provenance": self.quantizer.coding_model.training_provenance,
             "quantizer_model_after_prior_finetuning": self.quantizer.coding_model.state_dict(),
             "quantizer_prior_model": self._quantizer_prior_model.state_dict(),
         }

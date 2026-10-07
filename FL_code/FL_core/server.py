@@ -4,10 +4,12 @@ import torch
 import torch.distributed as dist
 
 from FL_code.run_fl import FLConfig
+from .numerical_policy import NumericalPolicy
 from .utils import set_global_seed, evaluate, recalibrate_batchnorm, setup_fl_worker, format_metrics, StateDictManager
 from .codec import simulate_compression, create_protocol
 
 
+@NumericalPolicy().scope()
 def run_federated_server(
     cfg: FLConfig,
     rank: int,
