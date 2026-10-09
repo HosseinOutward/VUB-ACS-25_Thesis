@@ -18,18 +18,14 @@ from FL_code.cancer_protocol.history import HistoryVector
 from FL_code.cancer_protocol.prior_code import INFERENCE_BATCH, PriorCalculator
 from FL_code.cancer_protocol.round_codecs import CancerRecord, Oracle_RoundCodec, PriorEvaluation, _WZRoundCodec, compressed_size
 from FL_code.cancer_protocol.brent_wz_models import EncoderDecoderLayeredRNN
-from FL_code.cancer_protocol.wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, WZcfgQuant, SideInfoMatrix, _SideInfoRows
+from FL_code.cancer_protocol.wz_quantizer import DedupedWZQuantizerCancer, PreprocessMetadata, WZcfgQuant, SideInfoMatrix, _SideInfoRows, select_si_rows
 
 
-class SamplingConfig(BaseModel):
-    """Sample acquisition settings consumed by S independently of ordinary WZ training settings."""
+class SampleTrainingConfig(BaseModel):
+    """Sample-fit settings shared by SO's raw-label oracle and S's decoded-label fitting."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     sample_size: int = Field(default=3_600_000, ge=1, strict=True)
-    sample_extra_planes: int = Field(default=1, ge=0, strict=True)
-    sample_rans_lanes: int = Field(default=16, ge=1, le=2**20, strict=True)
-    sample_training: Literal["all", "prefix"] = "all"
-    sample_format: Literal["lwzq", "fp16"] = "lwzq"
     sample_fit_epochs: int | None = Field(default=28, ge=1, strict=True)
     sample_fit_lr: float | None = Field(default=0.0006807383623518464, gt=0)
     sample_fit_tau: float | None = Field(default=0.30, gt=0)
@@ -38,6 +34,15 @@ class SamplingConfig(BaseModel):
     sample_train_prior: bool = True
     sample_train_backbones: bool = True
     sample_hard_inputs: bool = False
+
+
+class SamplingConfig(SampleTrainingConfig):
+    """S acquisition settings added to the sample-fit settings shared with SO."""
+
+    sample_extra_planes: int = Field(default=1, ge=0, strict=True)
+    sample_rans_lanes: int = Field(default=16, ge=1, le=2**20, strict=True)
+    sample_training: Literal["all", "prefix"] = "all"
+    sample_format: Literal["lwzq", "fp16"] = "lwzq"
     sample_noise_multiplier: float = Field(default=0.0, ge=0)
 
 
@@ -59,7 +64,7 @@ class SamplePayload:
 
 
 class SampledRecord(CancerRecord):
-    """S/SR metrics, including sample acquisition rates normalized by the full gradient size."""
+    """SO/SOR and S/SR metrics, with sample acquisition rates normalized by full gradient size."""
 
     sample_count: int | None = None
     sample_num_planes: int | None = None
@@ -190,8 +195,101 @@ class _SampleQuantizer(DedupedWZQuantizerCancer):
         return stages
 
 
-class SampledRoundCodec(Oracle_RoundCodec):
-    """Fit O's unchanged training process to samples reconstructed by the preceding WZ model."""
+class _SampledOracleQuantizer(_SampleQuantizer):
+    """SO's free raw-label training pool, retaining full-vector inference and normalization."""
+
+    training_sample_size: int
+    training_sample_indices: torch.Tensor | None = None
+
+    def _fit_prepared(self, x_prep: torch.Tensor, side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor) -> None:
+        count = min(self.training_sample_size, x_prep.shape[0])
+        self.training_sample_indices = (torch.arange(count) if count == x_prep.shape[0] else torch.from_numpy(np.sort(
+            np.random.default_rng(int(torch.randint(0, 2**31, ()).item())).choice(x_prep.shape[0], count, replace=False))))
+        # Match the raw-sample diagnostic's draw budget when the fixed pool is smaller than an epoch.
+        rows = self.training_sample_indices.repeat((self.c_cfg.train_sample_size + count - 1) // count)
+        super()._fit_prepared(x_prep[rows.to(x_prep.device)], select_si_rows(side_info, rows))
+
+
+class _SampleFitRoundCodec(Oracle_RoundCodec):
+    """Shared SO/S training configuration; each concrete codec owns sample availability and transport."""
+
+    record_class: ClassVar[type[SampledRecord]] = SampledRecord
+    quantizer: _SampleQuantizer
+    sampling: SampleTrainingConfig
+
+    def options_to_config(
+        self, sample_size: int = 3_600_000, sample_fit_epochs: int | None = 28,
+        sample_fit_lr: float | None = 0.0006807383623518464, sample_fit_tau: float | None = 0.30,
+        sample_fit_batch_size: int | None = 7_500, sample_train_encoder: bool = True,
+        sample_train_prior: bool = True, sample_hard_inputs: bool = False, sample_train_backbones: bool = True, **options: Any,
+    ) -> None:
+        """Configure sample fitting separately from ordinary quantizer and entropy-prior settings."""
+        self.sampling = SampleTrainingConfig(sample_size=sample_size, sample_fit_epochs=sample_fit_epochs,
+            sample_fit_lr=sample_fit_lr, sample_fit_tau=sample_fit_tau, sample_fit_batch_size=sample_fit_batch_size,
+            sample_train_encoder=sample_train_encoder, sample_train_prior=sample_train_prior,
+            sample_hard_inputs=sample_hard_inputs, sample_train_backbones=sample_train_backbones)
+        super().options_to_config(**options)
+
+    @classmethod
+    def validate_cfg(cls, **options: Any) -> None:
+        """Validate the shared sample-fit contract and ordinary WZ options independently."""
+        SampleTrainingConfig(**{key: value for key, value in options.items() if key in SampleTrainingConfig.model_fields})
+        super().validate_cfg(**{key: value for key, value in options.items() if key not in SampleTrainingConfig.model_fields})
+
+    def _configure_sample_fit(self) -> None:
+        for field, option in (("fit_epochs", "sample_fit_epochs"), ("fit_lr", "sample_fit_lr"),
+            ("fit_tau", "sample_fit_tau"), ("fit_batch_size", "sample_fit_batch_size"),
+            ("fit_encoder", "sample_train_encoder"), ("fit_prior", "sample_train_prior"),
+            ("fit_backbones", "sample_train_backbones"), ("fit_hard_inputs", "sample_hard_inputs")):
+            setattr(self.quantizer, field, getattr(self.sampling, option))
+
+
+class SampledOracleRoundCodec(_SampleFitRoundCodec):
+    """SO fits free raw samples; oracle labels are neither transmitted nor substituted at decode."""
+
+    round_name: ClassVar[str] = "SO"
+    quantizer_class: ClassVar[type[_SampledOracleQuantizer]] = _SampledOracleQuantizer
+    quantizer: _SampledOracleQuantizer
+
+    @classmethod
+    def codec_provenance(cls, **options: Any) -> dict[str, Any]:
+        """Declare SO's raw-label privilege explicitly rather than reporting it as acquisition."""
+        sampling = SampleTrainingConfig(**{key: value for key, value in options.items() if key in SampleTrainingConfig.model_fields})
+        return super().codec_provenance(**{key: value for key, value in options.items() if key not in SampleTrainingConfig.model_fields}) | dict(
+            sampling=sampling.model_dump(), sample_training_target="raw_sample_oracle",
+            sample_availability="free_current_target_labels_at_fitter", sample_acquisition="none",
+            sample_rate_accounting="free_oracle_labels; full_vector_new_model_symbols",
+            sample_replacement=False)
+
+    def pre_encode_training_steps(self, delta_vec: torch.Tensor) -> None:
+        """Fit ordinary WZ weights on the raw training pool without a sample acquisition stream."""
+        self._configure_sample_fit()
+        self.quantizer.training_sample_size = self.sampling.sample_size
+        super().pre_encode_training_steps(delta_vec)
+
+    def get_encod_payload(self, delta_vec: torch.Tensor, record: SampledRecord) -> dict[str, Any]:
+        """Record free raw labels explicitly while transmitting the ordinary full-vector symbols."""
+        payload = super().get_encod_payload(delta_vec, record)
+        record.update_record_fields(sample_count=0 if self.round_name_full == "F" else min(self.sampling.sample_size, delta_vec.numel()),
+                                    sample_format="raw_oracle", sample_prior_rate=0.0, sample_coder_rate=0.0,
+                                    **({"sample_wmape": 0.0} if self.round_name_full != "F" else {}))
+        return payload
+
+    def release_round_resources(self) -> None:
+        """Drop training coordinates after the round; frozen rounds reuse only fitted weights."""
+        super().release_round_resources()
+        self.quantizer.training_sample_indices = None
+
+
+class SampledOracleRansRoundCodec(RansRoundMixin, SampledOracleRoundCodec):
+    """SOR uses rANS for ordinary symbols while its raw sample labels remain an oracle privilege."""
+
+    round_name: ClassVar[str] = "SOR"
+    transport_prior_access: ClassVar[Access] = Access.SERVER_ONLY
+
+
+class SampledRoundCodec(_SampleFitRoundCodec):
+    """S fits decoded samples and accounts for their acquisition before ordinary symbol transport."""
 
     round_name: ClassVar[str] = "S"
     record_class: ClassVar[type[SampledRecord]] = SampledRecord
@@ -218,7 +316,7 @@ class SampledRoundCodec(Oracle_RoundCodec):
         sample_hard_inputs: bool = False, sample_train_backbones: bool = True, **options: Any,
     ) -> None:
         """Keep sampling options at the experimental codec, then configure ordinary WZ fitting."""
-        self.sampling = SamplingConfig(sample_size=sample_size, sample_extra_planes=sample_extra_planes,
+        sampling = SamplingConfig(sample_size=sample_size, sample_extra_planes=sample_extra_planes,
                                        sample_rans_lanes=sample_rans_lanes, sample_training=sample_training,
                                        sample_format=sample_format, sample_fit_epochs=sample_fit_epochs,
                                        sample_fit_lr=sample_fit_lr, sample_fit_tau=sample_fit_tau,
@@ -226,7 +324,8 @@ class SampledRoundCodec(Oracle_RoundCodec):
                                        sample_fit_batch_size=sample_fit_batch_size, sample_train_encoder=sample_train_encoder,
                                        sample_train_prior=sample_train_prior, sample_hard_inputs=sample_hard_inputs,
                                        sample_train_backbones=sample_train_backbones)
-        super().options_to_config(**options)
+        super().options_to_config(**{key: getattr(sampling, key) for key in SampleTrainingConfig.model_fields}, **options)
+        self.sampling = sampling
         self.normal_planes = self.c_cfg.num_planes
         self._previous_state = None
         self._previous_planes = None
@@ -409,16 +508,9 @@ class SampledRoundCodec(Oracle_RoundCodec):
         self.quantizer.c_cfg = self.c_cfg
         self.quantizer.normalization_factors = factors
         self.quantizer.fit_planes = self.normal_planes if self.sampling.sample_training == "prefix" else None
-        self.quantizer.fit_epochs = self.sampling.sample_fit_epochs
-        self.quantizer.fit_lr = self.sampling.sample_fit_lr
-        self.quantizer.fit_tau = self.sampling.sample_fit_tau
+        self._configure_sample_fit()
         fit_config = self.quantizer.training_config()
         self._sample_fields |= dict(sample_fit_lr=fit_config.lr, sample_fit_tau=fit_config.tau)
-        self.quantizer.fit_batch_size = self.sampling.sample_fit_batch_size
-        self.quantizer.fit_encoder = self.sampling.sample_train_encoder
-        self.quantizer.fit_prior = self.sampling.sample_train_prior
-        self.quantizer.fit_backbones = self.sampling.sample_train_backbones
-        self.quantizer.fit_hard_inputs = self.sampling.sample_hard_inputs
         self.quantizer.fit_noise_std = noise_std
         self.si = sampled_history
         super().pre_encode_training_steps(reconstruction)

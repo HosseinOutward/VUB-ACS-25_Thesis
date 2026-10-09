@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-from Experiments.Protocol_test.sampled_codec import SampledRecord, SampledRoundCodec, SampledRansRoundCodec, SamplePayload, SamplingConfig
+from Experiments.Protocol_test.sampled_codec import SampledRecord, SampledRoundCodec, SampledRansRoundCodec, SampledOracleRoundCodec, SampledOracleRansRoundCodec, SamplePayload, SamplingConfig
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, record_reconstruction_metrics
 from FL_code.FL_core.utils import decompress_data_list, normalization_params
 from FL_code.cancer_protocol.cancer_protocol import _WZProtocol
@@ -65,6 +65,51 @@ def make_codec(
     codec = kind(options, kind.round_name)
     codec.build_quantizer(None, history)
     return codec, target, history
+
+
+@pytest.mark.parametrize("kind", [SampledOracleRoundCodec, SampledOracleRansRoundCodec])
+def test_sampled_oracle_fits_raw_labels_without_acquisition(
+    kind: type[SampledOracleRoundCodec], fits: list[FitInputs], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SO keeps the raw-sample oracle's full normalization, ordinary planes and full-vector decode."""
+    monkeypatch.setattr(SampledOracleRoundCodec, "_fine_tune_native_prior", False)
+    _, target, history = make_codec(SampledRoundCodec)
+    options = dict(bins_per_plane=3, num_planes=3, sd_slices=(slice(0, 32), slice(32, 64)),
+                   hidden_dim=4, layers=1, sample_size=11, train_sample_size=11)
+    if kind is SampledOracleRansRoundCodec:
+        options["rans_lanes"] = 2
+    codec = kind(options, kind.round_name)
+    codec.build_quantizer(None, list(history))
+    record = codec.create_r_record(5, 0)
+    codec.pre_encode_training_steps(target)
+    indices = codec.quantizer.training_sample_indices
+    assert len(fits) == 1 and fits[0].planes == codec.quantizer.num_planes == 3
+    normalized, _ = codec.quantizer.preprocess_x(target)
+    torch.testing.assert_close(fits[0].target, normalized[indices].cpu())
+    assert codec.quantizer.sample_indices is None and codec.quantizer.sample_reconstruction is None
+    payload = codec.encode(target, record)
+    assert "sample_payload" not in decompress_data_list(payload)
+    delivered = codec.decode(payload, record)
+    assert record.sample_format == "raw_oracle" and record.sample_count == 11
+    assert record.sample_wmape == record.sample_prior_rate == record.sample_coder_rate == 0.0
+    assert not torch.equal(delivered[indices], target[indices])
+    codec.release_round_resources()
+    assert codec.quantizer.training_sample_indices is None
+    codec.refresh_side_information(history)
+    codec.round_name_full = "F"
+    frozen = codec.create_r_record(6, 0)
+    codec.pre_encode_training_steps(target)
+    codec.decode(codec.encode(target, frozen), frozen)
+    assert len(fits) == 1 and frozen.sample_count == 0 and frozen.sample_wmape is None
+
+
+@pytest.mark.parametrize("token", ["SO", "SOR"])
+def test_sampled_oracle_protocol_provenance(token: str) -> None:
+    """Schedules resolve SO/SOR distinctly from S/SR and disclose free raw-label access."""
+    protocol = create_protocol("wz_cancer", (slice(0, 32), slice(32, 64)))
+    protocol.set_schedule(5, (f"{token}|bins_per_plane=2|num_planes=3|sample_size=11", "F"))
+    snapshot = protocol.config_snapshot()
+    assert "raw_sample_oracle" in str(snapshot) and "free_current_target_labels_at_fitter" in str(snapshot)
 
 
 @pytest.mark.parametrize("kind", [SampledRoundCodec, SampledRansRoundCodec])

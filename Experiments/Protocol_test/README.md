@@ -142,6 +142,18 @@ rate-table examples are preserved in the dated archive linked below.
 
 ## Sampled codecs
 
+`SO` is the **sampled oracle**: it fits on raw current-target samples assumed free at the
+fitter. `SOR` adds rANS transport for the ordinary quantizer symbols; neither oracle sends a
+sample acquisition stream or replaces decoded positions with raw labels. Raw-sample studies
+historically labeled S are SO under this terminology; their stored records retain their original
+labels. New protocol schedules use `SO`/`SOR` explicitly for that privileged reference.
+
+`S` is the practical counterpart: its training samples must first be received and decoded from
+a charged acquisition payload; `SR` adds rANS symbol transport. Both families share the sample-fit
+settings, while acquisition belongs only to S/SR. The existing extra-plane and FP16 acquisition
+paths remain implementations of S, rather than definitions of S. Sample WMAPE zero describes
+SO's exact training labels; zero recorded sample cost is its explicit oracle assumption.
+
 `sampled_codec.py` registers `S` and its rANS variant `SR` with the replay runner. They inherit O's
 training process, but fit only reconstructed current-target samples with the full target's
 transmitted normalization factors and matching decoder-visible SI. `num_planes` is the ordinary
