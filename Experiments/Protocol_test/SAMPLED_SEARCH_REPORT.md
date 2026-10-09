@@ -34,10 +34,17 @@ planes; SR also records actual sample/refinement stream rates and overhead. All 
 planes are needed before training and their costs enter the first recorded stage. Recorded
 stage rates already include them; sample cost columns must not be added a second time.
 
-Current sampling defaults: **3,000,000 coordinates**, **one extra plane**, LWZQ acquisition,
+Current sampling defaults (9 October, S08): **3,600,000 coordinates**, **one extra plane**, LWZQ acquisition,
 all trained planes in the sample objective, 16 sample-rANS lanes, no added label noise,
-soft training, encoder/prior/backbones trainable. Optional sample-only epoch, LR, tau and
-batch overrides default to `None`, preserving inherited optimizer values. Prefix training,
+soft training, encoder/prior/backbones trainable. Sample-only optimizer defaults are the
+S08 setting: **28 epochs / LR 0.0006807383623518464 / initial tau 0.30 / batch 7,500**.
+Explicit `None` restores the inherited value for each field, including batch size.
+The expanded comparison completed all 20 seeds per configuration before the stop request;
+its workers and plotter exited and released memory. S08 versus S04 is **−0.621704%**
+for all twenty mean curves and **−1.127571%** for the independently selected best twelve.
+The all-twenty paired bootstrap 95% interval is **[−2.411654%, +1.223641%]**.
+Complete raw tables and validation are in [the expanded report](S04_S08_EXPANDED_SEED_REPORT.md).
+Acquisition and the later entropy-prior optimizer keep their own settings. Prefix training,
 FP16 acquisition, capacity-freezing and hard-input options remain opt-in S/SR machinery.
 The original experiment-only privileged raw-sample subclass was removed; the 8 October
 follow-up rebuilds its sampling rule in a separate measurement worker. The numerical-policy fix remains

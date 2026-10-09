@@ -18,6 +18,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from Experiments.Protocol_test import records
+from Experiments.Protocol_test import sampled_codec as _sampled_codec
 from FL_code.FL_core.explicit_cache import CacheEntry, TorchCodec, atomic_output, content_hash
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
 from FL_code.FL_core.models import initialize_model

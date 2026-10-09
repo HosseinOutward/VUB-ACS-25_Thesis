@@ -69,6 +69,7 @@ class CustomRNN(nn.Module):
 
 
 class EncoderDecoderLayeredRNN(nn.Module):
+    hard_decoder_inputs: bool = False
     def __init__(
         self,
         input_dim: int,
@@ -176,7 +177,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         rnn_out = self.encoder(rnn_inputs)
         if self.shared_encoder is False:
             soft_codes = [softmax(binner(rnn_out[:, binner_idx]), dim=-1)
-                          for binner_idx, binner in enumerate(self.binners)]
+                          for binner_idx, binner in enumerate(self.binners[:self.num_planes])]
         else:
             soft_codes = [softmax(self.binner(rnn_out[:, binner_idx]), dim=-1) for binner_idx in range(self.num_planes)]
         bins = [torch.argmax(sc, dim=-1) for sc in soft_codes]
@@ -202,12 +203,15 @@ class EncoderDecoderLayeredRNN(nn.Module):
         """Run the encoder, decoder, and in-model symbol prior for training."""
         # Encoder
         bins, codes = self.encode(x=x, tau=tau)
+        decoder_codes = ([code + (F.one_hot(symbols, self.bins_per_plane).to(code.dtype) - code).detach()
+                          for symbols, code in zip(bins, codes, strict=True)]
+                         if self.hard_decoder_inputs else codes)
 
         # Decoder
-        reconstructed = self.decode(codes=codes, y=y)
+        reconstructed = self.decode(codes=decoder_codes, y=y)
 
         # Priors
-        priors = self.get_priors(codes=codes, y=y, tau=tau)
+        priors = self.get_priors(codes=decoder_codes, y=y, tau=tau)
 
         return reconstructed, bins, codes, priors
 
@@ -221,7 +225,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         rnn_d_inputs = torch.stack([torch.cat([c, y], dim=-1) for c in codes], dim=1)
         rnn_d_out = self.decoder(rnn_d_inputs)
         if self.shared_decoder is False:
-            reconstructed = [rec(rnn_d_out[:, rec_idx]) for rec_idx, rec in enumerate(self.reconstructors)]
+            reconstructed = [rec(rnn_d_out[:, rec_idx]) for rec_idx, rec in enumerate(self.reconstructors[:self.num_planes])]
         else:
             reconstructed = [self.reconstructor(rnn_d_out[:, rec_idx]) for rec_idx in range(self.num_planes)]
 
@@ -259,7 +263,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
             rnn_inputs_prior = rnn_inputs_prior.float()
         prior_logits = self.conditionalRNN(rnn_inputs_prior)
         if self.shared_priors is False:
-            priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors)]
+            priors = [cp(prior_logits[:, cp_idx]) for cp_idx, cp in enumerate(self.conditionalPriors[:self.num_planes])]
             priors = [softmax(p, dim=-1) for p in priors]
         else:
             priors = [self.conditionalPrior(prior_logits[:, cp_idx]) for cp_idx in range(self.num_planes)]

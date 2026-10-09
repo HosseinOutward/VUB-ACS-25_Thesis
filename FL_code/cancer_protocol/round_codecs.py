@@ -26,6 +26,7 @@ from .wz_quantizer import (
     SideInfoColumnsCache,
     SideInfoMatrix,
     WZcfgQuant,
+    _SideInfoRows,
 )
 
 
@@ -169,7 +170,7 @@ class PriorEvaluation:
     """One prior model paired with the exact side information used to evaluate it."""
 
     model: EncoderDecoderLayeredRNN
-    side_information: SideInfoMatrix | torch.Tensor
+    side_information: SideInfoMatrix | _SideInfoRows | torch.Tensor
 
 
 class _WZRoundCodec(BaseRoundCodec):
@@ -278,6 +279,9 @@ class _WZRoundCodec(BaseRoundCodec):
     ) -> tuple[torch.Tensor | None, list[HistoryVector] | None]:
         """Return data available where this child trains its quantizer."""
         raise NotImplementedError("Subclasses must return the quantizer training data.")
+
+    def set_previous_codec(self, previous: _WZRoundCodec | None) -> None:
+        """Accept an optional preceding codec; ordinary WZ rounds need no preceding weights."""
 
     def refresh_side_information(
         self, side_information: Sequence[HistoryVector]

@@ -129,6 +129,7 @@ class _WZProtocol(BaseProtocol):
             side_information,
             initial_states,
         )
+        codec.set_previous_codec(self.last_trained_codec.get(client_id))
         self.last_trained_codec[client_id] = codec
         return codec
 

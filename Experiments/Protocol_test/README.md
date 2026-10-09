@@ -140,6 +140,45 @@ Also report stage failures and symbol errors; disclose rANS overhead separately 
 payload-plus-model `final_bytes` into symbol-rate curves. Historical analysis helpers and full
 rate-table examples are preserved in the dated archive linked below.
 
+## Sampled codecs
+
+`sampled_codec.py` registers `S` and its rANS variant `SR` with the replay runner. They inherit O's
+training process, but fit only reconstructed current-target samples with the full target's
+transmitted normalization factors and matching decoder-visible SI. `num_planes` is the ordinary
+prefix; `sample_extra_planes` (default 1) extends the same machine for future sample acquisition.
+`sample_size` defaults to 3,600,000 distinct coordinates, capped at the vector size. Sample-fit
+optimizer defaults use S08: 28 epochs, LR 0.0006807383623518464, initial tau 0.30 and batch 7,500.
+Explicit `None` inherits the ordinary setting for that optimizer field. Acquisition
+and separate entropy-prior fits use their ordinary WZ settings. These defaults are provisional
+research settings, not established WMAPE/MAPE targets; see the twenty-seed comparison in
+[`S04_S08_EXPANDED_SEED_REPORT.md`](S04_S08_EXPANDED_SEED_REPORT.md).
+
+On a trained round, the preceding deployed machine acquires the current sample using refreshed
+server SI before the replacement machine is fitted. Its full sample is decoded from the payload,
+and those reconstructions replace sampled positions at every reported stage and in committed
+history. The ordinary machine still runs inference over the full vector, but sampled symbols
+from that new machine are omitted from transmission. F refreshes SI and reuses the ordinary
+prefix without another sample. The protocol passes previous codecs through a generic handoff;
+there are no S-specific round numbers or schedules. With no preceding model, S explicitly fits
+a cold sampling model on the last decoder-visible history vector. A preceding model must have
+trained at least `num_planes + sample_extra_planes` stages and compatible weight shapes. Model
+distribution and conditional-prior fitting retain O's existing assumptions.
+
+For N floats and sampled coordinates I, the final symbol rate is the new machine's n-plane cost
+outside I plus the old machine's (n+e)-plane cost on I, divided by N. Equivalently, the mixed
+n-plane base uses old symbols on I and new symbols elsewhere, then adds only I's extra planes.
+CSV `sample_extra_prior_rate` records that weighted refinement; `sample_prior_rate` records all
+sample planes. SR also records actual sample stream rate, refinement stream growth, and included
+rANS overhead. The sample acquisition cost is charged to stage zero because all sample planes
+are needed before fitting any deployed stage. Standard prior/rANS stage arrays already include
+acquisition, so do not add these sample columns again. `normal_quantizer_prior_stage_rates` and
+`replaced_sample_prior_stage_rates` retain the full-new-vector diagnostic and its discarded sample
+contribution. `final_bytes` includes the sample packet and its metadata as well as normal payload.
+
+The [sampled search report](SAMPLED_SEARCH_REPORT.md) retains the tested sample counts,
+extra planes, epoch/LR/tau ranges, setups and measured outcomes. Dedicated investigation code,
+plans, model captures, results and caches have been removed; S/SR and their codec tests remain.
+
 ## Candidate acceptance
 
 Cold and warm quantizer/prior lineages admit only finite candidates whose total hard-symbol
