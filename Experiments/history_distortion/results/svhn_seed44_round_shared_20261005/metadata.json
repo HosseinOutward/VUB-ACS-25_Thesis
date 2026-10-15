@@ -1,0 +1,377 @@
+{
+  "trace": {
+    "trace_version": 2,
+    "fl_config": {
+      "model_name": "resnet18",
+      "dataset_name": "SVHN",
+      "num_classes": 10,
+      "image_size": 32,
+      "num_clients": 30,
+      "num_loader_workers": 0,
+      "local_epochs": 1,
+      "batch_size": 128,
+      "lr": 0.1,
+      "seed": 44,
+      "server_momentum": 0.0,
+      "server_nesterov": false,
+      "augment": false,
+      "label_smoothing": 0.0,
+      "grad_clip_norm": 0.0,
+      "non_iid_partition": false,
+      "dirichlet_alpha": 0.5,
+      "server_lr": 1.0,
+      "channels_last": true,
+      "fused_optimizer": true,
+      "mixed_precision": true,
+      "dataset_fraction": null
+    },
+    "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+    "device": {
+      "type": "cuda",
+      "name": "NVIDIA GeForce RTX 3090",
+      "capability": [
+        8,
+        6
+      ],
+      "torch": "2.5.1+cu121",
+      "cuda": "12.1",
+      "cudnn_deterministic": true,
+      "cudnn_benchmark": false
+    }
+  },
+  "history": {
+    "implementation": "FL_code.cancer_protocol.history.CompressedReconstructionHistory",
+    "max_per_client": 1,
+    "prefix_bits": 18,
+    "chunk_elements": 1048576,
+    "storage_format": "normalized_adaptive_split_packed_v2",
+    "normalization_refresh_rounds": 5,
+    "normalization_slices": [
+      [
+        0,
+        9408,
+        null
+      ],
+      [
+        9408,
+        9472,
+        null
+      ],
+      [
+        9472,
+        9536,
+        null
+      ],
+      [
+        9536,
+        46400,
+        null
+      ],
+      [
+        46400,
+        46464,
+        null
+      ],
+      [
+        46464,
+        46528,
+        null
+      ],
+      [
+        46528,
+        83392,
+        null
+      ],
+      [
+        83392,
+        83456,
+        null
+      ],
+      [
+        83456,
+        83520,
+        null
+      ],
+      [
+        83520,
+        120384,
+        null
+      ],
+      [
+        120384,
+        120448,
+        null
+      ],
+      [
+        120448,
+        120512,
+        null
+      ],
+      [
+        120512,
+        157376,
+        null
+      ],
+      [
+        157376,
+        157440,
+        null
+      ],
+      [
+        157440,
+        157504,
+        null
+      ],
+      [
+        157504,
+        231232,
+        null
+      ],
+      [
+        231232,
+        231360,
+        null
+      ],
+      [
+        231360,
+        231488,
+        null
+      ],
+      [
+        231488,
+        378944,
+        null
+      ],
+      [
+        378944,
+        379072,
+        null
+      ],
+      [
+        379072,
+        379200,
+        null
+      ],
+      [
+        379200,
+        387392,
+        null
+      ],
+      [
+        387392,
+        387520,
+        null
+      ],
+      [
+        387520,
+        387648,
+        null
+      ],
+      [
+        387648,
+        535104,
+        null
+      ],
+      [
+        535104,
+        535232,
+        null
+      ],
+      [
+        535232,
+        535360,
+        null
+      ],
+      [
+        535360,
+        682816,
+        null
+      ],
+      [
+        682816,
+        682944,
+        null
+      ],
+      [
+        682944,
+        683072,
+        null
+      ],
+      [
+        683072,
+        977984,
+        null
+      ],
+      [
+        977984,
+        978240,
+        null
+      ],
+      [
+        978240,
+        978496,
+        null
+      ],
+      [
+        978496,
+        1568320,
+        null
+      ],
+      [
+        1568320,
+        1568576,
+        null
+      ],
+      [
+        1568576,
+        1568832,
+        null
+      ],
+      [
+        1568832,
+        1601600,
+        null
+      ],
+      [
+        1601600,
+        1601856,
+        null
+      ],
+      [
+        1601856,
+        1602112,
+        null
+      ],
+      [
+        1602112,
+        2191936,
+        null
+      ],
+      [
+        2191936,
+        2192192,
+        null
+      ],
+      [
+        2192192,
+        2192448,
+        null
+      ],
+      [
+        2192448,
+        2782272,
+        null
+      ],
+      [
+        2782272,
+        2782528,
+        null
+      ],
+      [
+        2782528,
+        2782784,
+        null
+      ],
+      [
+        2782784,
+        3962432,
+        null
+      ],
+      [
+        3962432,
+        3962944,
+        null
+      ],
+      [
+        3962944,
+        3963456,
+        null
+      ],
+      [
+        3963456,
+        6322752,
+        null
+      ],
+      [
+        6322752,
+        6323264,
+        null
+      ],
+      [
+        6323264,
+        6323776,
+        null
+      ],
+      [
+        6323776,
+        6454848,
+        null
+      ],
+      [
+        6454848,
+        6455360,
+        null
+      ],
+      [
+        6455360,
+        6455872,
+        null
+      ],
+      [
+        6455872,
+        8815168,
+        null
+      ],
+      [
+        8815168,
+        8815680,
+        null
+      ],
+      [
+        8815680,
+        8816192,
+        null
+      ],
+      [
+        8816192,
+        11175488,
+        null
+      ],
+      [
+        11175488,
+        11176000,
+        null
+      ],
+      [
+        11176000,
+        11176512,
+        null
+      ],
+      [
+        11176512,
+        11181632,
+        null
+      ],
+      [
+        11181632,
+        11181642,
+        null
+      ]
+    ]
+  },
+  "clients": [
+    0,
+    10,
+    20
+  ],
+  "first_round": 0,
+  "last_round": 5,
+  "round_shared": {
+    "refresh_submissions": 30,
+    "fit_client": 0,
+    "estimator": "normalization_params(raw_layer), identical to quantizer preprocessing",
+    "admission_order": "all clients in ascending order; fit before first admission in each group",
+    "inverse_factors": "owned by each stored vector; retained across later refreshes"
+  },
+  "source": "raw local model deltas after local training; the values compressed by FL, not minibatch gradients"
+}
