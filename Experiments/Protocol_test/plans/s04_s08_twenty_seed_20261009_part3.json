@@ -1,0 +1,35 @@
+{
+  "name": "s04_s08_twenty_seed_20261009_part3",
+  "output_root": "../../../_/experiments/s04_s08_twenty_seed_20261009/shards/part3",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "methods": [
+    "S"
+  ],
+  "seeds": [
+    50,
+    53,
+    56,
+    59,
+    62
+  ],
+  "sample_size": 3600000,
+  "sample_fits": [
+    {
+      "name": "e28_l080_t020_n3600000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.2,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e28_l080_t030_n3600000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    }
+  ]
+}

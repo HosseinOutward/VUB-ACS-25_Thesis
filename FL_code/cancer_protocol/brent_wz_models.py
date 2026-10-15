@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from functools import partial
 from typing import Any
@@ -92,6 +92,8 @@ class EncoderDecoderLayeredRNN(nn.Module):
 
         self.numerical_policy: NumericalPolicy = numerical_policy or NumericalPolicy()
         self.training_provenance: dict[str, Any] | None = None
+        self.training_selection_epoch: int | None = None
+        self.training_selection_score: float | None = None
         self.bins_per_plane: int = bins_per_plane
         self.num_planes: int = num_planes
         self.shared_decoder: bool = shared_decoder
@@ -161,25 +163,43 @@ class EncoderDecoderLayeredRNN(nn.Module):
             prior_model.reconstructors = None
         return prior_model
 
+    def prior_parameters(self) -> Iterator[nn.Parameter]:
+        """Yield the symbol-prior parameters for prior-only optimization."""
+        yield from self.conditionalRNN.parameters()
+        heads = (self.conditionalPrior,) if self.shared_priors else self.conditionalPriors
+        for head in heads:
+            yield from head.parameters()
+
     def encode(
         self,
         x: torch.Tensor,
         tau: float = 1.0,
         force_softmax: bool = False,
+        deterministic_encoder: bool = False,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         """Map scalar inputs to one symbol and code vector per refinement stage."""
-        if self.training:
+        if deterministic_encoder:
+            softmax = partial(F.softmax, dim=-1)
+            softmax_tau = tau
+        elif self.training:
             softmax = partial(F.gumbel_softmax, tau=tau, hard=False)
+            softmax_tau = None
         else:
             softmax = F.softmax
+            softmax_tau = None
 
         rnn_inputs = x.unsqueeze(1).repeat(1, self.num_planes, 1)
         rnn_out = self.encoder(rnn_inputs)
+        def encode_logits(logits: torch.Tensor) -> torch.Tensor:
+            return (F.softmax(logits / softmax_tau, dim=-1) if softmax_tau is not None
+                    else softmax(logits, dim=-1))
+
         if self.shared_encoder is False:
-            soft_codes = [softmax(binner(rnn_out[:, binner_idx]), dim=-1)
+            soft_codes = [encode_logits(binner(rnn_out[:, binner_idx]))
                           for binner_idx, binner in enumerate(self.binners[:self.num_planes])]
         else:
-            soft_codes = [softmax(self.binner(rnn_out[:, binner_idx]), dim=-1) for binner_idx in range(self.num_planes)]
+            soft_codes = [encode_logits(self.binner(rnn_out[:, binner_idx]))
+                          for binner_idx in range(self.num_planes)]
         bins = [torch.argmax(sc, dim=-1) for sc in soft_codes]
 
         if self.training or force_softmax:
@@ -194,6 +214,8 @@ class EncoderDecoderLayeredRNN(nn.Module):
         x: torch.Tensor,
         y: torch.Tensor | None,
         tau: float = 1.0,
+        force_prior_softmax: bool = False,
+        deterministic_encoder: bool = False,
     ) -> tuple[
         list[torch.Tensor],
         list[torch.Tensor],
@@ -202,7 +224,8 @@ class EncoderDecoderLayeredRNN(nn.Module):
     ]:
         """Run the encoder, decoder, and in-model symbol prior for training."""
         # Encoder
-        bins, codes = self.encode(x=x, tau=tau)
+        bins, codes = (self.encode(x=x, tau=tau, deterministic_encoder=True)
+                       if deterministic_encoder else self.encode(x=x, tau=tau))
         decoder_codes = ([code + (F.one_hot(symbols, self.bins_per_plane).to(code.dtype) - code).detach()
                           for symbols, code in zip(bins, codes, strict=True)]
                          if self.hard_decoder_inputs else codes)
@@ -211,7 +234,7 @@ class EncoderDecoderLayeredRNN(nn.Module):
         reconstructed = self.decode(codes=decoder_codes, y=y)
 
         # Priors
-        priors = self.get_priors(codes=decoder_codes, y=y, tau=tau)
+        priors = self.get_priors(codes=decoder_codes, y=y, tau=tau, force_softmax=force_prior_softmax)
 
         return reconstructed, bins, codes, priors
 

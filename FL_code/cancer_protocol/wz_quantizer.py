@@ -481,6 +481,7 @@ def wz_model_training_loop(
         [EncoderDecoderLayeredRNN, tuple[torch.Tensor, ...], SideInfoMatrix | _SideInfoRows | torch.Tensor], str
     ] | None = None,
     index_sampler: Callable[[int], torch.Tensor] | None = None,
+    selection_metric: Callable[[EncoderDecoderLayeredRNN, int], float] | None = None,
     **loss_fn_options: Any,
 ) -> float:
     """Train one model, adaptively collapsing duplicate rows and preserving their loss mass.
@@ -541,6 +542,30 @@ def wz_model_training_loop(
             desc=label,
             disable=not c_cfg.training_progress_bar,)
 
+        best_selection_score = float("inf")
+        best_selection_epoch: int | None = None
+        best_selection_state: dict[str, torch.Tensor] | None = None
+
+        def select_checkpoint(epoch: int) -> None:
+            nonlocal best_selection_score, best_selection_epoch, best_selection_state
+            assert selection_metric is not None
+            was_training = model.training
+            model.eval()
+            try:
+                with torch.inference_mode():
+                    score = float(selection_metric(model, epoch))
+            finally:
+                model.train(was_training)
+            if np.isfinite(score) and score < best_selection_score:
+                best_selection_score = score
+                best_selection_epoch = epoch
+                best_selection_state = {
+                    name: value.detach().cpu().clone() for name, value in model.state_dict().items()
+                }
+
+        if selection_metric is not None:
+            select_checkpoint(-1)
+
         for epoch in range(c_cfg.train_epochs):
             epoch_started = perf_counter()
             indices = (
@@ -594,6 +619,8 @@ def wz_model_training_loop(
                     pbar.update(1)
             scheduler.step()
             epoch_loss /= total_batches
+            if selection_metric is not None:
+                select_checkpoint(epoch)
             if c_cfg.training_log_every_epochs and (
                 (epoch + 1) % c_cfg.training_log_every_epochs == 0 or epoch + 1 == c_cfg.train_epochs
             ):
@@ -613,9 +640,15 @@ def wz_model_training_loop(
                 )
 
         pbar.close()
+        if selection_metric is not None:
+            assert best_selection_state is not None and best_selection_epoch is not None, (
+                f"{label} produced no finite validation checkpoint.")
+            model.load_state_dict(best_selection_state)
+            model.training_selection_epoch = best_selection_epoch
+            model.training_selection_score = best_selection_score
         model.cpu()
         torch.cuda.empty_cache()
-        return epoch_loss
+        return best_selection_score if selection_metric is not None else epoch_loss
 
 
 def _stacked_problem_sampler(
@@ -658,6 +691,7 @@ class WZcfgQuant(BaseModel):
     warm_retrain_repeats: int = Field(default=2, ge=1, strict=True)
     quantizer_train_repeats: int = 3
     prior_train_repeats: int = 3
+    max_training_attempts: int = Field(default=8, ge=1, strict=True)
     prior_retrain_epochs: int = Field(default=30, ge=1, strict=True)
 
     training_progress_bar: bool = False
@@ -686,7 +720,6 @@ class WZQuantizerCancer:
     """Learned Wyner-Ziv quantizer for one flattened Cancer protocol update vector."""
 
     prior_calculator: ClassVar[type[PriorCalculator]] = PriorCalculator
-    candidate_failure_tolerance: ClassVar[int] = 2
 
     @property
     def device(self) -> torch.device:
@@ -745,6 +778,11 @@ class WZQuantizerCancer:
         self.warm_retrained_states: tuple[dict[str, torch.Tensor], ...] = ()
         self.warm_retrained_losses: tuple[float, ...] = ()
         self.warm_deployed_parent: int | None = None
+        self.fit_selection_epoch: int | None = None
+        self.fit_selection_score: float | None = None
+        self._last_fit_selection_epoch: int | None = None
+        self._last_fit_selection_score: float | None = None
+        self.selection_metric: Callable[[EncoderDecoderLayeredRNN, int], float] | None = None
         # Set while stacking, whenever the caller weights the stacked problems unevenly.
         self.training_index_sampler: Callable[[int], torch.Tensor] | None = None
 
@@ -810,6 +848,7 @@ class WZQuantizerCancer:
         sample_weights: torch.Tensor | None,
         wmspe_denom: float,
         perturb_generator: torch.Generator,
+        force_prior_softmax: bool = False,
     ) -> torch.Tensor:
         """Compute the stage-averaged reconstruction-plus-rate loss for one training batch."""
         x_batch, = training_input
@@ -821,7 +860,11 @@ class WZQuantizerCancer:
                 x_batch = x_batch + perturbation
         progress = epoch / c_cfg.train_epochs
         tau = c_cfg.tau * np.exp(progress * np.log(0.1 / c_cfg.tau))
-        reconstructions, bins, soft_codes, priors = model(x_batch, si_batch, tau=tau)
+        if force_prior_softmax:
+            reconstructions, bins, soft_codes, priors = model(
+                x_batch, si_batch, tau=tau, force_prior_softmax=True)
+        else:
+            reconstructions, bins, soft_codes, priors = model(x_batch, si_batch, tau=tau)
 
         loss = torch.zeros((), device=x_batch.device)
         sample_indices = torch.arange(x_batch.shape[0], device=x_batch.device)
@@ -884,11 +927,46 @@ class WZQuantizerCancer:
         self.training_provenance = self.c_cfg.numerical_policy.runtime(
             self.device, mixed_precision=self.c_cfg.mixed_precision)
         # Diagnostics describe the problem this quantizer will code, which is the leading block.
-        bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
-        prior = self.prior_calculator.compute_prior_from_network(
+        bins, _ = self._fit_candidate_data(
+            self.coding_model, x_prep[:self.vector_size], select_si_rows(side_info, slice(0, self.vector_size)))
+        prior = self._fit_prior_for_bins(
             self.coding_model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
         self.quantizer_prior_stage_rates = self.prior_calculator.compute_plane_rates(
             prior, bins, self.c_cfg.num_planes)
+
+    def _fit_training_inputs(self, x_prep: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        """Return row-aligned model inputs for fitting; subclasses may append received symbols."""
+        return (x_prep,)
+
+    def _fit_candidate_data(
+        self,
+        model: EncoderDecoderLayeredRNN,
+        x_prep: torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the symbols and reconstruction used to validate a candidate's coded rows."""
+        self.coding_model = model
+        bins, _ = self.encode_prepared(x_prep, INFERENCE_BATCH)
+        reconstruction = self.decode_prepared(bins, side_info, INFERENCE_BATCH)
+        return bins, reconstruction
+
+    def _fit_prior_for_bins(
+        self,
+        model: EncoderDecoderLayeredRNN,
+        bins: torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the candidate prior on the supplied symbols and decoder side information."""
+        return self.prior_calculator.compute_prior_from_network(model, bins, side_info)
+
+    def _fit_candidate_rates(
+        self,
+        model: EncoderDecoderLayeredRNN,
+        bins: torch.Tensor,
+        side_info: SideInfoMatrix | _SideInfoRows | torch.Tensor,
+    ) -> tuple[float, float]:
+        """Compare candidate and marginal rates on the symbols used by this fit."""
+        return self.prior_calculator.candidate_rates(model, bins, side_info)
 
     def _stack_training_pairs(
         self,
@@ -941,6 +1019,7 @@ class WZQuantizerCancer:
         if self._warm_start_states:
             states: list[dict[str, torch.Tensor]] = []
             losses: list[float] = []
+            selection_epochs: list[int | None] = []
             for parent_index, parent_state in enumerate(self._warm_start_states):
                 model, loss = self._train_finite_candidate(
                     x_prep, side_info, wmspe_denom, parent_state, self.warm_retrain_repeats,
@@ -951,16 +1030,22 @@ class WZQuantizerCancer:
                     for name, value in model.state_dict().items()
                 })
                 losses.append(loss)
+                selection_epochs.append(self._last_fit_selection_epoch)
                 del model
             self.warm_retrained_states = tuple(states)
             self.warm_retrained_losses = tuple(losses)
             self.warm_deployed_parent = min(
                 range(len(states)), key=self.warm_retrained_losses.__getitem__)
             self.coding_model.load_state_dict(self.warm_retrained_states[self.warm_deployed_parent])
+            self.fit_selection_epoch = selection_epochs[self.warm_deployed_parent]
+            self.fit_selection_score = self.warm_retrained_losses[self.warm_deployed_parent]
             return self.coding_model
-        return self._train_finite_candidate(
+        model, score = self._train_finite_candidate(
             x_prep, side_info, wmspe_denom, None, self.quantizer_train_repeats, "cold"
-        )[0]
+        )
+        self.fit_selection_epoch = self._last_fit_selection_epoch
+        self.fit_selection_score = score if self.selection_metric is not None else None
+        return model
 
     def _train_finite_candidate(
         self,
@@ -972,10 +1057,12 @@ class WZQuantizerCancer:
         label: str,
     ) -> tuple[EncoderDecoderLayeredRNN, float]:
         """Train one lineage repeatedly and return its lowest-loss usable candidate."""
-        failure_tolerance = self.candidate_failure_tolerance
+        assert 0 < repeats <= self.max_training_attempts, (
+            f"{label} requires {repeats} accepted quantizers but max_training_attempts={self.max_training_attempts}."
+        )
         made_quants_and_stat: list[tuple[EncoderDecoderLayeredRNN, float]] = []
         rejected: list[str] = []
-        for attempt_index in range(repeats + failure_tolerance):
+        for attempt_index in range(self.max_training_attempts):
             if len(made_quants_and_stat) == repeats:
                 break
 
@@ -984,12 +1071,14 @@ class WZQuantizerCancer:
             if initial_state is not None:
                 model.load_state_dict(initial_state)
             perturb_generator = torch.Generator(device="cuda").manual_seed(torch.initial_seed())
+            selection_options = {"selection_metric": self.selection_metric} if self.selection_metric is not None else {}
             loss = wz_model_training_loop(
                 self.compute_loss, model, model.parameters(),
-                (x_prep,), side_info, self.training_config(), batch_size=self.train_batch_size,
+                self._fit_training_inputs(x_prep), side_info, self.training_config(), batch_size=self.train_batch_size,
                 label=f"Quantizer {label} attempt {attempt_index + 1}",
                 metrics_fn=self.training_metrics,
                 index_sampler=self.training_index_sampler,
+                **selection_options,
                 wmspe_denom=wmspe_denom,
                 perturb_generator=perturb_generator)
 
@@ -1000,10 +1089,8 @@ class WZQuantizerCancer:
             # Check through this quantizer's own encode/decode so the pass benefits from
             # row deduplication; the caller overwrites coding_model with the winner below.
             # Only the leading block is checked: it is the vector this quantizer will code.
-            self.coding_model = model
-            bins, _ = self.encode_prepared(x_prep[:self.vector_size], INFERENCE_BATCH)
-            reconstruction = self.decode_prepared(
-                bins, select_si_rows(side_info, slice(0, self.vector_size)), INFERENCE_BATCH)
+            bins, reconstruction = self._fit_candidate_data(
+                model, x_prep[:self.vector_size], select_si_rows(side_info, slice(0, self.vector_size)))
             if not torch.isfinite(reconstruction).all():
                 rejected.append(f"attempt {attempt_index + 1}: non-finite reconstruction")
             elif not self._candidate_is_usable(bins, reconstruction):
@@ -1012,7 +1099,7 @@ class WZQuantizerCancer:
                     f"attempt {attempt_index + 1}: unusable symbols per plane {symbol_counts}"
                 )
             else:
-                prior_rate, marginal_rate = self.prior_calculator.candidate_rates(
+                prior_rate, marginal_rate = self._fit_candidate_rates(
                     model, bins, select_si_rows(side_info, slice(0, self.vector_size)))
                 if not prior_rate <= marginal_rate:
                     rejected.append(f"attempt {attempt_index + 1}: prior rate {prior_rate:.8g} exceeds marginal {marginal_rate:.8g}")
@@ -1021,10 +1108,12 @@ class WZQuantizerCancer:
                 made_quants_and_stat.append((model, loss))
         assert len(made_quants_and_stat) == repeats, (
             f"Created {len(made_quants_and_stat)}/{repeats} required {label} quantizer candidates "
-            f"after {repeats + failure_tolerance} attempts; rejected: {rejected}."
+            f"after {self.max_training_attempts} attempts; rejected: {rejected}."
         )
-
-        return min(made_quants_and_stat, key=lambda attempt: attempt[1])
+        selected = min(made_quants_and_stat, key=lambda attempt: attempt[1])
+        self._last_fit_selection_epoch = selected[0].training_selection_epoch
+        self._last_fit_selection_score = selected[0].training_selection_score
+        return selected
 
     def _candidate_is_usable(
         self,

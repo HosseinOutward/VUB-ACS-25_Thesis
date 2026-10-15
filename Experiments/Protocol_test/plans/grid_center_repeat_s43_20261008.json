@@ -1,0 +1,21 @@
+{
+  "name": "grid_center_repeat_s43_20261008",
+  "output_root": "../../../_/experiments/grid_center_repeat_s43_20261008",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "methods": [
+    "S"
+  ],
+  "seeds": [
+    43
+  ],
+  "sample_size": 3000000,
+  "sample_fits": [
+    {
+      "name": "e35_l100_t025",
+      "train_epochs": 35,
+      "lr": 0.000850922952939808,
+      "tau": 0.25
+    }
+  ]
+}

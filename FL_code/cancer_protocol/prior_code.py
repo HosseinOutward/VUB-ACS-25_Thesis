@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -27,6 +27,8 @@ class PriorTrainingResult:
     model: EncoderDecoderLayeredRNN
     lineage_states: tuple[dict[str, torch.Tensor], ...]
     deployed_parent: int
+    selection_epoch: int | None = None
+    selection_score: float | None = None
 
 
 class PriorCalculator:
@@ -137,6 +139,8 @@ class PriorCalculator:
         initial_states: Sequence[Mapping[str, torch.Tensor] | None],
         attempts_per_parent: int,
         batch_size: int = 50_000,
+        selection_metric: Callable[[EncoderDecoderLayeredRNN, int], float] | None = None,
+        prior_heads_only: bool = False,
     ) -> PriorTrainingResult:
         """Train each explicit prior lineage and install the best result into `target_model`.
 
@@ -162,11 +166,12 @@ class PriorCalculator:
         lineage_losses: list[float] = []
         for parent_index, initial_state in enumerate(initial_states):
             from_scratch = target_model is None and initial_state is None
+            lineage_options = {"prior_heads_only": True} if prior_heads_only else {}
             model, loss = _train_prior_lineage(
                 bins_vec, soft_codes, side_info,
                 c_cfg if from_scratch else c_cfg.warm_retraining_config(c_cfg.prior_retrain_epochs),
                 target_model, initial_state, attempts_per_parent, batch_size,
-                f"parent {parent_index}",
+                f"parent {parent_index}", selection_metric, **lineage_options,
             )
             lineage_models.append(model)
             lineage_losses.append(loss)
@@ -178,6 +183,8 @@ class PriorCalculator:
         model = _new_prior_model(c_cfg, side_info.shape[1]) if target_model is None else target_model
         model.numerical_policy = c_cfg.numerical_policy
         model.training_provenance = lineage_models[deployed_parent].training_provenance
+        model.training_selection_epoch = lineage_models[deployed_parent].training_selection_epoch
+        model.training_selection_score = lineage_losses[deployed_parent] if selection_metric is not None else None
         # A supplied target keeps its encoder/decoder, which the prior-only state does not carry.
         assert not model.load_state_dict(deployed_state, strict=target_model is None).unexpected_keys
         return PriorTrainingResult(
@@ -186,6 +193,8 @@ class PriorCalculator:
                 name: value.detach().cpu().clone() for name, value in candidate.state_dict().items()
             } for candidate in lineage_models),
             deployed_parent=deployed_parent,
+            selection_epoch=model.training_selection_epoch,
+            selection_score=model.training_selection_score,
         )
 
 
@@ -215,9 +224,14 @@ def _train_prior_lineage(
     repeats: int,
     batch_size: int,
     label: str,
+    selection_metric: Callable[[EncoderDecoderLayeredRNN, int], float] | None = None,
+    prior_heads_only: bool = False,
 ) -> tuple[EncoderDecoderLayeredRNN, float]:
     from .wz_quantizer import wz_model_training_loop
 
+    assert 0 < repeats <= c_cfg.max_training_attempts, (
+        f"{label} requires {repeats} accepted priors but max_training_attempts={c_cfg.max_training_attempts}."
+    )
     context_codes = (
         F.one_hot(bins_vec.T.long(), num_classes=c_cfg.bins_per_plane).float()
         if c_cfg.prior_context == "hard" else soft_codes.transpose(0, 1)
@@ -225,7 +239,7 @@ def _train_prior_lineage(
     prior_input = (bins_vec.T.contiguous(), context_codes.contiguous())
     attempts: list[tuple[EncoderDecoderLayeredRNN, float]] = []
     rejected: list[str] = []
-    for attempt_index in range(repeats + 2):
+    for attempt_index in range(c_cfg.max_training_attempts):
         if len(attempts) == repeats:
             break
         candidate = (
@@ -234,18 +248,18 @@ def _train_prior_lineage(
         )
         if initial_state is not None:
             candidate.load_state_dict(initial_state, strict=True)
-        prior_heads = (
-            candidate.conditionalPriors
-            if not candidate.shared_priors else (candidate.conditionalPrior,))
         candidate.requires_grad_(False)
-        prior_params = tuple(candidate.conditionalRNN.parameters()) + tuple(
-            parameter for head in prior_heads for parameter in head.parameters())
+        prior_params = (tuple(parameter for name, parameter in candidate.named_parameters()
+                              if set(name.split(".")) & {"conditionalPrior", "conditionalPriors"})
+                        if prior_heads_only else tuple(candidate.prior_parameters()))
+        assert prior_params, "Prior head-only training requires at least one conditional prior head."
         for parameter in prior_params:
             parameter.requires_grad_(True)
+        selection_options = {"selection_metric": selection_metric} if selection_metric is not None else {}
         loss = wz_model_training_loop(
             PriorCalculator.prior_loss, candidate, iter(prior_params),
             prior_input, side_info, c_cfg, batch_size,
-            label=f"Prior {label} attempt {attempt_index + 1}",)
+            label=f"Prior {label} attempt {attempt_index + 1}", **selection_options)
         candidate.requires_grad_(True)
         if not np.isfinite(loss):
             rejected.append(f"attempt {attempt_index + 1}: non-finite loss")
@@ -259,7 +273,8 @@ def _train_prior_lineage(
         attempts.append((candidate, loss))
 
     assert len(attempts) == repeats, (
-        f"Created {len(attempts)}/{repeats} required {label} prior candidates; rejected: {rejected}."
+        f"Created {len(attempts)}/{repeats} required {label} prior candidates "
+        f"after {c_cfg.max_training_attempts} attempts; rejected: {rejected}."
     )
     return min(attempts, key=lambda attempt: attempt[1])
 

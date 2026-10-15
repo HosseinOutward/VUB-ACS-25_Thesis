@@ -1,0 +1,65 @@
+{
+  "name": "s04_s08_twenty_seed_20261009",
+  "output_root": "../../../_/experiments/s04_s08_twenty_seed_20261009",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "source_root": "../../../_/experiments/s_local_grid5_20261008",
+  "report_path": "../S04_S08_EXPANDED_SEED_REPORT.md",
+  "worker_plans": [
+    "s04_s08_twenty_seed_20261009_part1.json",
+    "s04_s08_twenty_seed_20261009_part2.json",
+    "s04_s08_twenty_seed_20261009_part3.json"
+  ],
+  "configurations": {
+    "S04": {
+      "name": "e28_l080_t020_n3600000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.2,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    },
+    "S08": {
+      "name": "e28_l080_t030_n3600000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    }
+  },
+  "seeds": [
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62
+  ],
+  "original_seeds": [
+    43,
+    44,
+    45,
+    46,
+    47
+  ],
+  "ranking_span_db": [
+    -5.017826972967395,
+    -3.954611888439368
+  ],
+  "trim_count": 12,
+  "bootstrap_samples": 2000
+}

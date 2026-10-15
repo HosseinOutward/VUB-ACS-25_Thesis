@@ -21,9 +21,6 @@ import tempfile
 from time import sleep
 from typing import Any
 
-from Experiments.Protocol_test import plot
-
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLOT_SOURCES = (
     Path(__file__).with_name("plot.py"),
@@ -39,6 +36,7 @@ _RESULT_PATTERNS = (
 _GLOBAL_RESULT_PATTERNS = tuple(f"**/{pattern}" for pattern in _RESULT_PATTERNS)
 REFRESH_SECONDS = 60
 RENDER_TIMEOUT_SECONDS = 10 * 60
+GLOBAL_ANALYSIS_DIR = "_global_analysis"
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -103,12 +101,12 @@ def _publish(staging: Path, output: Path) -> None:
         shutil.rmtree(previous)
 
 
-def _refresh_once(target: Path, output: Path, control_dir: Path, *, global_view: bool) -> bool:
+def _refresh_once(target: Path, output: Path, control_dir: Path, *, global_view: bool, plot_module: str = "Experiments.Protocol_test.plot") -> bool:
     """Render `target` in a disposable directory and atomically publish only on success."""
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-refresh-", dir=output.parent))
     command = (
-        sys.executable, "-u", "-m", "Experiments.Protocol_test.plot", str(target),
+        sys.executable, "-u", "-m", plot_module, str(target),
         *(("--global",) if global_view else ()), "--out", str(staging),
     )
     try:
@@ -142,7 +140,8 @@ def _refresh_once(target: Path, output: Path, control_dir: Path, *, global_view:
             shutil.rmtree(staging)
 
 
-def watch(output_root: Path, runner_pid: int, control_dir: Path, interval: int = REFRESH_SECONDS) -> int:
+def watch(output_root: Path, runner_pid: int, control_dir: Path, interval: int = REFRESH_SECONDS, *,
+          plot_module: str = "Experiments.Protocol_test.plot", source_paths: tuple[Path, ...] = _PLOT_SOURCES) -> int:
     """Refresh changed results until the original experiment process exits, including final state."""
     output_root, control_dir = output_root.resolve(), control_dir.resolve()
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -168,7 +167,7 @@ def watch(output_root: Path, runner_pid: int, control_dir: Path, interval: int =
     while True:
         alive = _runner_alive(runner_pid, start_ticks)
         try:
-            signature = (result_digest(output_root), source_digest())
+            signature = (result_digest(output_root), source_digest(source_paths))
         except OSError as error:
             _atomic_json(control_dir / "plot_refresh.json", {
                 "status": "retrying", "timestamp": datetime.now().astimezone().isoformat(),
@@ -180,7 +179,7 @@ def watch(output_root: Path, runner_pid: int, control_dir: Path, interval: int =
             continue
         has_records = any(output_root.glob("cases/*/*/compression_records.csv"))
         if has_records and signature != last_successful_signature:
-            if _refresh_once(output_root, output_root / "analysis", control_dir, global_view=False):
+            if _refresh_once(output_root, output_root / "analysis", control_dir, global_view=False, plot_module=plot_module):
                 last_successful_signature = signature
         elif not has_records:
             _atomic_json(control_dir / "plot_refresh.json", {
@@ -207,7 +206,7 @@ def watch_global(container: Path, control_dir: Path, interval: int = REFRESH_SEC
     """
     container, control_dir = container.resolve(), control_dir.resolve()
     control_dir.mkdir(parents=True, exist_ok=True)
-    output = container / plot.GLOBAL_ANALYSIS_DIR
+    output = container / GLOBAL_ANALYSIS_DIR
     last_successful_signature: tuple[str, str] | None = None
     while True:
         try:
@@ -244,7 +243,7 @@ def main() -> None:
     assert args.interval > 0, "Plot refresh interval must be positive."
     if args.global_view:
         assert args.runner_pid is None, "The global watcher outlives any single experiment process."
-        control_dir = args.control_dir or args.target / f"{plot.GLOBAL_ANALYSIS_DIR}_control"
+        control_dir = args.control_dir or args.target / f"{GLOBAL_ANALYSIS_DIR}_control"
         raise SystemExit(watch_global(args.target, control_dir, args.interval))
     assert args.runner_pid is not None and args.control_dir is not None, (
         "Watching one experiment requires --runner-pid and --control-dir.")

@@ -8,6 +8,28 @@ Separate protocol/supervisor work and the history-distortion study remain, as re
 The reconstructed F and matched 8 October follow-up sections describe new retained workers,
 plans and artifacts; the historical cleanup statement does not apply to those outputs.
 
+## Current received-FP16 follow-up (14 October 2026)
+
+The current practical-S follow-up uses seed 43, the same target/baseline and O read-only reference,
+received FP16 labels, fixed coordinates and a deterministic received-only train/validation split.
+The [validated-fit progress report](S_RECEIVED_FP16_VALIDATED_PILOT_PROGRESS_20261014.md) records
+the train/validation traces, execution incidents and current matched results. The full
+[hard-transport NLL report](../../_/experiments/s_received_fp16_validated_hard_transport_pilot_20261014/final_analysis/report.md)
+compares O, current-best S43, and soft-input, hard-input, categorical-p, and hard-transport fits at
+20k/100k samples. Every small-sample main fit selected its initial state or epoch 0; training RD
+fell while held-out RD rose sharply. Their O gaps remain about **+21% at 20k** and **+31% at 100k**,
+so these candidates are not multi-seed or deployable winners. Sample packets were actually measured,
+with decoded sample values and transmitted normalization factors checked across variants.
+
+The best current spatial result is a separate post-decoder blend of received spatial neighbors,
+applied to the five-seed current-best MAE-prefix S curves. It reduces the full-SI rANS gap versus O
+from **+7.017% to +6.109% all-five** and from **+8.210% to +7.482% best-three**, while leaving
+symbols, rates, priors and packet unchanged. Its validation uses received sample neighbors, including
+other held-out sample labels as context; this context dependency is disclosed in the progress report.
+It is not a learned-quantizer result.
+
+For the current-best S diagnostic, the mean sample-only joint mixed-mask CE is 0.763593 bpf versus 0.759565 bpf for the full-target-refitted server-SI prior (−0.004028 bpf); measured full-SI rANS is 0.769666 bpf. This small difference is the observed prior-access provenance confound. Do not substitute the incompatible all-coordinate 0.23 bpf comparison for this quantity, and do not treat the full-target-refitted CE as deployable.
+
 ## Retained implementation
 
 `Experiments/Protocol_test/sampled_codec.py` registers S and SR. S inherits O's training
@@ -164,6 +186,342 @@ use componentwise medians of cumulative rates and raw WMAPE before conversion to
 seed-gap medians instead compare each S with its fresh same-seed O, then take the median.
 These are different summaries. Missing/nonmonotone/nonoverlapping measurements are `—`.
 
+## Expanded S04/S08 seed comparison (9 October 2026)
+
+A paired extension adds fit seeds 48–62 to S04 and S08, retaining their original five
+runs for **20 seeds each**. Thirty new fits use the same starting model, target, SI,
+CUDA device and fit schedules; only initial tau differs (.20 versus .30).
+[**S04_S08_EXPANDED_SEED_REPORT.md**](S04_S08_EXPANDED_SEED_REPORT.md) records execution
+status and will receive all-twenty/fresh-fifteen averages, best-three/best-twelve views,
+paired seed differences and bootstrap intervals automatically.
+
+## Nearby parameter grid (8 October 2026)
+
+The follow-up varies S initial tau **0.20/0.25/0.30**, LR **0.8/1.0/1.2×**
+the retained center, epochs **28/35/42**, raw sample count **2.4M/3M/3.6M**, and
+training batch size **5,000/6,250/7,500**. The 43 configurations comprise all 32
+low/high combinations, ten one-axis changes about the center, and the center itself.
+Each uses matched fit seeds 43–47 and the retained starting model/target/SI on cuda:0.
+Five center fits were reused; **210 new fits completed** across three memory-bounded
+workers. The supervisor and live plotter both exited with code 0. Sample coordinates stay identical within each seed/count pair; different
+counts have different pools. Separate entropy-prior settings are unchanged.
+The explicit center reproduced the retained raw-S model and metrics bitwise exactly.
+
+Completed raw tables and parameter-interaction plots are in
+[**S_LOCAL_GRID_REPORT.md**](S_LOCAL_GRID_REPORT.md). Comparisons with original O, T and F,
+including all-five and independently selected best-three means, are in
+[**S_LOCAL_GRID_COMPARISON_REPORT.md**](S_LOCAL_GRID_COMPARISON_REPORT.md). All-five means drive the parameter
+interaction analysis; independently selected best-three means remain visible.
+
+## Five-seed validation and seed audit (8 October 2026)
+
+**Completed: twenty matched fits (five per method), plus one independent S43 repeat.**
+Eight new fits extend the retained twelve 43–45 measurements with seeds 46 and 47.
+Three detached workers and their live plotters all exited with code **0**. Plans:
+`plans/five_seed_os_extension_20261008.json`, `plans/five_seed_ot_extension_20261008.json`,
+and `plans/seed_repeat_s43_20261008.json`. Each output uses the same plan stem under
+`_/experiments/`. All fits use the retained F reference on RTX 3090 / cuda:0. The
+supervisor's measured five-minute checks had roughly 9 GB RAM headroom, full comparison-GPU
+utilization and no errors. Timing includes GPU contention and is not a throughput benchmark.
+
+As requested, select each codec's best three independently. Retained seeds are **O:
+43/46/47; O_tau025: 44/45/46; S_tau025 and T: 43/44/45**. Discarded fits remain in the
+individual-run tables and the untrimmed five-seed mean. The common selection interval is
+**52.483861–63.612634% raw WMAPE** (−5.599485 to −3.929132 dB). Selection covers the
+same measured span for every seed and does not extrapolate. Client exclusions are separate:
+none, with **1/1 client** retained. This is still a single fixed-gradient diagnostic.
+
+Full-SI S/O gaps: **+1.041111%** for the selected-three mean, **−0.181201%** for the
+all-five mean (negative favors S). Same-seed S beats original O in **2/5** fits; the added
+seeds 46 and 47 favor O by **+6.169733%** and **+3.618556%**. With the same arithmetic
+averaging rule, original seeds 43–45 give **−3.056441%**, while added seeds 46–47 give
+**+4.261074%**. The earlier approximately 2.5% S/O median advantage is therefore seed
+sensitive and is not retained by the requested best-three comparison. S/O_tau025 remains
+**−3.142258%** selected-three and **−2.935658%** all-five, with **4/5** same-seed wins.
+These are comparisons of mean curves, not averages of individual gap percentages.
+
+### Seed audit and measurement validation
+
+No seed-handling defect was demonstrated. Python, NumPy, CPU Torch and both CUDA RNGs
+reset correctly. All **15,000,000** S coordinates reproduce exactly from the five fit
+seeds. Each method has five distinct joint and native-prior tensor hashes, with one fixed
+initial-state hash. T's initial SI projection is validated directly against the retained
+baseline. All cumulative stage totals agree with their scalar rates and the final-stage
+WMAPE agrees with delivered reconstruction WMAPE. Prior fitting leaves the quantizer
+weights exactly unchanged. All 24 archived FL source files match across F and the six
+comparison/repeat outputs; the new workers share identical raw comparison-runner code.
+
+The full-size S43 repeat reproduces **sample indices, joint weights, fitted-prior weights,
+all stage rates and raw WMAPE bitwise exactly**, despite a different preceding case and
+concurrent GPU work. It is an audit control, not a sixth seed or a cohort observation.
+CPU quantizer/prior probes also reproduce after intervening seeds and constructor randomness.
+Local seed-zero generators are confined to normalization/deduplication and do not reset
+training randomness. Native symbol errors are zero in all twenty fits and the repeat;
+no stage monotonicity, stream-growth or full-target prior/marginal failures were flagged.
+Per-stage marginal entropies were not measured, so symbol-stage death is not inferred.
+
+**41 tests passed** for S/SR defaults, explicit overrides/inheritance, codec behavior and
+aggregation/ranking arithmetic. On 8 October the practical S default used the historical
+winner's **3M samples / 35 epochs / LR 0.0008509229529398079 / initial tau 0.25**; its
+acquired reconstructed labels and rate accounting remain distinct from this raw-S control.
+The current S08 defaults above supersede that configuration.
+Explicit `None` restores an inherited sample-fit optimizer value.
+
+Reproducible audit and complete raw tables/CSV/JSON/PNG/PDF:
+`_/experiments/five_seed_svhn_20261008_analysis`. Key files: `seed_audit.md`,
+`seed_audit_probe.py/json`, `gpu_repeat_validation.json`, `final_validation.py`,
+`validation.json`, `selection.csv/json`, `mean_stage_points.csv/json`,
+`comparison_gaps.csv`, `paired_seed_gaps.csv`, and `seed_cohort_means.json`.
+Analysis worker: `Experiments/Protocol_test/five_seed_tables.py`; its exact source is also
+retained as `analysis_source.py`. Numerical policy is unchanged; the bitwise repeat is
+an observed result for this setup, not a general GPU determinism guarantee.
+
+Fit seeds **43–47**; original completed seeds 43–45 retained, seeds 46–47 newly fitted.
+Starting weights, SVHN client-0 round-5 target, all 150 SI columns and numerical policy stay fixed at baseline seed 43.
+T uses its five temporal columns for its quantizer/native coder and all 150 for the separately refitted comparison prior.
+O_tau025 retains the matched S-optimizer control. S_tau025 is the privileged raw-label diagnostic; practical S still acquires reconstructed labels.
+This measures fit/sample randomness on one fixed gradient, not FL-trace or starting-weight seed robustness.
+
+Rank each codec's runs by mean full-SI rANS at equal distortion over the **same** interval [-5.599485, -3.929132] WMAPE dB.
+Lower is better. Equivalently rank the RD gap against fixed F* on that interval. Discard the two largest scores independently per codec; ties by seed.
+These are intentionally selected best-three means; the untrimmed five-seed means and all paired seeds remain visible.
+Average cumulative stage rates and raw WMAPE first, then convert WMAPE to dB and compare aggregate curves.
+Do not average per-seed gap percentages. Each matrix uses the pair's complete shared distortion span; the fixed common span applies only to selection.
+
+| Codec | Seed | Common-span full-SI mean bpf | Common-span gap vs F* % | Included in best three |
+|---|---:|---:|---:|---|
+| O | 43 | 0.396194274 | -21.210926 | yes |
+| O | 44 | 0.456442657 | -9.229647 | discarded |
+| O | 45 | 0.440024994 | -12.494541 | discarded |
+| O | 46 | 0.407873129 | -18.888414 | yes |
+| O | 47 | 0.424775980 | -15.527033 | yes |
+| O_tau025 | 43 | 0.446048240 | -11.296730 | discarded |
+| O_tau025 | 44 | 0.427843634 | -14.916984 | yes |
+| O_tau025 | 45 | 0.432418719 | -14.007161 | yes |
+| O_tau025 | 46 | 0.428474534 | -14.791521 | yes |
+| O_tau025 | 47 | 0.459574033 | -8.606927 | discarded |
+| S_tau025 | 43 | 0.430635005 | -14.361879 | yes |
+| S_tau025 | 44 | 0.403422542 | -19.773479 | yes |
+| S_tau025 | 45 | 0.423512338 | -15.778326 | yes |
+| S_tau025 | 46 | 0.440236738 | -12.452433 | discarded |
+| S_tau025 | 47 | 0.442492266 | -12.003888 | discarded |
+| T | 43 | 0.476415011 | -5.257850 | yes |
+| T | 44 | 0.466266650 | -7.276001 | yes |
+| T | 45 | 0.429658039 | -14.556163 | yes |
+| T | 46 | 0.480654847 | -4.414696 | discarded |
+| T | 47 | 0.477038787 | -5.133803 | discarded |
+
+### Best three of five: mean stage RD
+
+Cumulative bits/float. Marginal is a final-stage scalar total; — is unmeasured. F* has no prior refit.
+
+| Method | Stage | Marginal | Joint/pre-fit prior | Temporal prior | Full-SI fitted prior | Native rANS | Temporal rANS | Full-SI rANS | WMAPE dB (raw %) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| O | 1 | — | 0.292310 | — | 0.285901 | 0.290949 | — | 0.290949 | -3.255679 (68.741036%) |
+| O | 2 | — | 0.413419 | — | 0.393929 | 0.399170 | — | 0.399170 | -4.618776 (58.757216%) |
+| O | 3 | 1.481469 | 0.677713 | — | 0.642499 | 0.648230 | — | 0.648230 | -7.762201 (40.915694%) |
+| O_tau025 | 1 | — | 0.380266 | — | 0.322475 | 0.327664 | — | 0.327664 | -3.344545 (68.041320%) |
+| O_tau025 | 2 | — | 0.471331 | — | 0.399461 | 0.404825 | — | 0.404825 | -4.328896 (60.751248%) |
+| O_tau025 | 3 | 1.142834 | 0.645685 | — | 0.565205 | 0.570918 | — | 0.570918 | -6.714338 (46.161837%) |
+| F* | 1 | — | 0.366520 | — | — | 0.372292 | — | 0.372292 | -3.093789 (70.034263%) |
+| F* | 2 | — | 0.490296 | — | — | 0.496130 | — | 0.496130 | -4.631368 (58.672093%) |
+| F* | 3 | 1.784724 | 0.765840 | — | — | 0.771315 | — | 0.771315 | -8.779112 (36.395226%) |
+| S_tau025 | 1 | — | 0.295019 | — | 0.289155 | 0.294170 | — | 0.294170 | -3.179751 (69.344568%) |
+| S_tau025 | 2 | — | 0.452438 | — | 0.373656 | 0.378816 | — | 0.378816 | -4.207564 (61.605829%) |
+| S_tau025 | 3 | 1.445236 | 0.706036 | — | 0.606954 | 0.612598 | — | 0.612598 | -7.393678 (42.689011%) |
+| T | 1 | — | 0.327238 | 0.323751 | 0.316303 | 0.328967 | 0.328967 | 0.321501 | -2.810242 (72.358227%) |
+| T | 2 | — | 0.450529 | 0.436613 | 0.417841 | 0.442075 | 0.442075 | 0.423300 | -4.317785 (60.829013%) |
+| T | 3 | 1.485475 | 0.731827 | 0.711754 | 0.681534 | 0.717872 | 0.717872 | 0.687827 | -7.862216 (40.447268%) |
+
+Equal-distortion rate changes (%), row versus column; negative favors row; reverse entries recomputed.
+Client exclusions: none; with/without symmetric whole-window client exclusions is identical, 1/1 client retained.
+Fit coverage: 3/5 separately selected per codec; fixed F* (one model). One static round, no frozen evaluation window.
+
+Full-SI rANS (primary):
+
+```text
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -4.570    -14.819     -1.030     -8.463
+   O_tau025     +4.789     +0.000    -12.852     +3.244     -5.251
+         F*    +17.397    +14.748     +0.000    +17.332     +7.393
+   S_tau025     +1.041     -3.142    -14.772     +0.000     -8.019
+          T     +9.245     +5.542     -6.884     +8.718     +0.000
+```
+
+Native transport (T uses temporal SI):
+
+```text
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -4.570    -14.819     -1.030    -12.230
+   O_tau025     +4.789     +0.000    -12.852     +3.244     -9.139
+         F*    +17.397    +14.748     +0.000    +17.332     +3.001
+   S_tau025     +1.041     -3.142    -14.772     +0.000    -11.783
+          T    +13.934    +10.058     -2.914    +13.357     +0.000
+```
+
+
+### All five, untrimmed: mean stage RD
+
+Cumulative bits/float. Marginal is a final-stage scalar total; — is unmeasured. F* has no prior refit.
+
+| Method | Stage | Marginal | Joint/pre-fit prior | Temporal prior | Full-SI fitted prior | Native rANS | Temporal rANS | Full-SI rANS | WMAPE dB (raw %) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| O | 1 | — | 0.336600 | — | 0.315372 | 0.320513 | — | 0.320513 | -3.429478 (67.379236%) |
+| O | 2 | — | 0.459648 | — | 0.424482 | 0.429816 | — | 0.429816 | -4.811072 (57.470689%) |
+| O | 3 | 1.332573 | 0.672968 | — | 0.618361 | 0.624057 | — | 0.624057 | -7.344558 (42.931108%) |
+| O_tau025 | 1 | — | 0.381203 | — | 0.337489 | 0.342799 | — | 0.342799 | -3.496751 (66.859399%) |
+| O_tau025 | 2 | — | 0.475790 | — | 0.410570 | 0.416088 | — | 0.416088 | -4.381786 (60.382445%) |
+| O_tau025 | 3 | 1.231164 | 0.650195 | — | 0.575914 | 0.581765 | — | 0.581765 | -6.720010 (46.131703%) |
+| F* | 1 | — | 0.366520 | — | — | 0.372292 | — | 0.372292 | -3.093789 (70.034263%) |
+| F* | 2 | — | 0.490296 | — | — | 0.496130 | — | 0.496130 | -4.631368 (58.672093%) |
+| F* | 3 | 1.784724 | 0.765840 | — | — | 0.771315 | — | 0.771315 | -8.779112 (36.395226%) |
+| S_tau025 | 1 | — | 0.321951 | — | 0.316098 | 0.321211 | — | 0.321211 | -3.393436 (67.659407%) |
+| S_tau025 | 2 | — | 0.460705 | — | 0.404811 | 0.410101 | — | 0.410101 | -4.494210 (59.605935%) |
+| S_tau025 | 3 | 1.425664 | 0.677659 | — | 0.603935 | 0.609626 | — | 0.609626 | -7.292433 (43.189517%) |
+| T | 1 | — | 0.399784 | 0.342518 | 0.336041 | 0.347721 | 0.347721 | 0.341248 | -2.949642 (71.206219%) |
+| T | 2 | — | 0.515497 | 0.446973 | 0.429640 | 0.452444 | 0.452444 | 0.435078 | -4.335929 (60.702074%) |
+| T | 3 | 1.471649 | 0.771781 | 0.695519 | 0.666162 | 0.701567 | 0.701567 | 0.672300 | -7.633942 (41.524357%) |
+
+Equal-distortion rate changes (%), row versus column; negative favors row; reverse entries recomputed.
+Client exclusions: none; with/without symmetric whole-window client exclusions is identical, 1/1 client retained.
+Fit coverage: 5/5 per codec; fixed F* (one model). One static round, no frozen evaluation window.
+
+Full-SI rANS (primary):
+
+```text
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -3.039    -12.925     +0.182     -7.386
+   O_tau025     +3.134     +0.000    -11.206     +3.024     -5.087
+         F*    +14.844    +12.620     +0.000    +15.219     +6.139
+   S_tau025     -0.181     -2.936    -13.209     +0.000     -7.647
+          T     +7.974     +5.360     -5.784     +8.280     +0.000
+```
+
+Native transport (T uses temporal SI):
+
+```text
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -3.039    -12.925     +0.182    -10.993
+   O_tau025     +3.134     +0.000    -11.206     +3.024     -8.746
+         F*    +14.844    +12.620     +0.000    +15.219     +2.064
+   S_tau025     -0.181     -2.936    -13.209     +0.000    -11.232
+          T    +12.350     +9.584     -2.022    +12.653     +0.000
+```
+
+### Same-seed comparisons, all five
+
+Pairwise full-SI curve gaps remain diagnostic; the aggregate result comes from averaged curves.
+
+| Candidate | Reference | Seed 43 | Seed 44 | Seed 45 | Seed 46 | Seed 47 | Wins | Best-three mean-curve gap % | All-five mean-curve gap % |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| O_tau025 | O | +7.670517 | -4.659207 | -1.564142 | +4.214708 | +8.342351 | 2/5 | +4.789359 | +3.133918 |
+| S_tau025 | O | +4.570148 | -9.963724 | -3.497871 | +6.169733 | +3.618556 | 2/5 | +1.041111 | -0.181201 |
+| S_tau025 | O_tau025 | -3.676251 | -5.188801 | -3.474724 | +2.220431 | -3.757370 | 4/5 | -3.142258 | -2.935658 |
+| T | O | +13.392703 | +3.326231 | -2.321965 | +17.348375 | +11.792650 | 1/5 | +9.245055 | +7.974494 |
+
+### Added-seed diagnostic with the same averaging rule
+
+This separates the additional seeds from the switch from historical medians to arithmetic means.
+Each cell compares curves built from mean cumulative rates and mean raw WMAPE; it is not a mean of individual gaps.
+
+| Candidate | Reference | Original seeds 43–45 mean-curve gap % | Added seeds 46–47 mean-curve gap % |
+|---|---|---:|---:|
+| S_tau025 | O | -3.056441 | +4.261074 |
+| S_tau025 | O_tau025 | -4.033612 | -1.081134 |
+| T | O | +5.161997 | +12.303471 |
+
+### Individual run stage measurements
+
+Every retained and discarded seed is included. Cumulative bpf; marginal final-stage only.
+
+| Codec | Seed | Stage | Marginal | Joint prior | Temporal prior | Full-SI prior | Native rANS | Temporal rANS | Full-SI rANS | Raw WMAPE % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| O | 43 | 1 | — | 0.251859218 | — | 0.243858129 | 0.248872929 | — | 0.248872929 | 71.972638277 |
+| O | 43 | 2 | — | 0.436843291 | — | 0.414023563 | 0.419259354 | — | 0.419259354 | 55.777552776 |
+| O | 43 | 3 | 1.519805968 | 0.733658656 | — | 0.700295910 | 0.706208265 | — | 0.706208265 | 37.495508603 |
+| O | 44 | 1 | — | 0.442519009 | — | 0.361378759 | 0.366501449 | — | 0.366501449 | 66.059389602 |
+| O | 44 | 2 | — | 0.605076134 | — | 0.502810553 | 0.507976199 | — | 0.507976199 | 53.533272806 |
+| O | 44 | 3 | 1.170208916 | 0.743691310 | — | 0.599013776 | 0.604181032 | — | 0.604181032 | 44.503628069 |
+| O | 45 | 1 | — | 0.363549829 | — | 0.357779145 | 0.363216064 | — | 0.363216064 | 64.613683327 |
+| O | 45 | 2 | — | 0.452904828 | — | 0.437813133 | 0.443593526 | — | 0.443593526 | 57.548522280 |
+| O | 45 | 3 | 1.048249781 | 0.588008396 | — | 0.565294221 | 0.571411605 | — | 0.571411605 | 47.404829670 |
+| O | 46 | 1 | — | 0.295239657 | — | 0.288890600 | 0.293995461 | — | 0.293995461 | 68.280693377 |
+| O | 46 | 2 | — | 0.427300200 | — | 0.405635059 | 0.410995809 | — | 0.410995809 | 57.653061224 |
+| O | 46 | 3 | 1.552451164 | 0.729105875 | — | 0.698800147 | 0.704817414 | — | 0.704817414 | 35.953980239 |
+| O | 47 | 1 | — | 0.329831958 | — | 0.324955553 | 0.329977297 | — | 0.329977297 | 65.969776953 |
+| O | 47 | 2 | — | 0.376113489 | — | 0.362129178 | 0.367254112 | — | 0.367254112 | 62.841033771 |
+| O | 47 | 3 | 1.372149616 | 0.570373774 | — | 0.528401028 | 0.533665449 | — | 0.533665449 | 49.297594536 |
+| O_tau025 | 43 | 1 | — | 0.355878800 | — | 0.353357673 | 0.358548414 | — | 0.358548414 | 64.662826973 |
+| O_tau025 | 43 | 2 | — | 0.447240688 | — | 0.426559143 | 0.431862870 | — | 0.431862870 | 59.475175240 |
+| O_tau025 | 43 | 3 | 1.709383637 | 0.694297872 | — | 0.662047632 | 0.667742358 | — | 0.667742358 | 40.205969370 |
+| O_tau025 | 44 | 1 | — | 0.366170317 | — | 0.358769864 | 0.364204828 | — | 0.364204828 | 63.612633758 |
+| O_tau025 | 44 | 2 | — | 0.509793714 | — | 0.488088399 | 0.494054809 | — | 0.494054809 | 52.280270240 |
+| O_tau025 | 44 | 3 | 1.165070057 | 0.629251830 | — | 0.598527424 | 0.604500126 | — | 0.604500126 | 43.885009947 |
+| O_tau025 | 45 | 1 | — | 0.480909079 | — | 0.333808154 | 0.339036431 | — | 0.339036431 | 68.893372218 |
+| O_tau025 | 45 | 2 | — | 0.524415497 | — | 0.370753638 | 0.375959810 | — | 0.375959810 | 63.525431436 |
+| O_tau025 | 45 | 3 | 0.876503430 | 0.643560428 | — | 0.484138191 | 0.489693374 | — | 0.489693374 | 52.483860521 |
+| O_tau025 | 46 | 1 | — | 0.293718666 | — | 0.274846345 | 0.279750684 | — | 0.279750684 | 71.617953024 |
+| O_tau025 | 46 | 2 | — | 0.379784413 | — | 0.339541145 | 0.344459606 | — | 0.344459606 | 66.448043153 |
+| O_tau025 | 46 | 3 | 1.386929482 | 0.664243914 | — | 0.612949915 | 0.618561746 | — | 0.618561746 | 42.116640726 |
+| O_tau025 | 47 | 1 | — | 0.409336299 | — | 0.366664290 | 0.372455494 | — | 0.372455494 | 65.510206614 |
+| O_tau025 | 47 | 2 | — | 0.517714165 | — | 0.427906934 | 0.434103685 | — | 0.434103685 | 60.183304702 |
+| O_tau025 | 47 | 3 | 1.017932281 | 0.619623393 | — | 0.521906387 | 0.528326698 | — | 0.528326698 | 51.967033318 |
+| S_tau025 | 43 | 1 | — | 0.335716397 | — | 0.329693943 | 0.334946871 | — | 0.334946871 | 66.518997932 |
+| S_tau025 | 43 | 2 | — | 0.602448881 | — | 0.406337745 | 0.411787106 | — | 0.411787106 | 59.852731157 |
+| S_tau025 | 43 | 3 | 1.498782009 | 0.832965672 | — | 0.614682131 | 0.620494915 | — | 0.620494915 | 41.671929143 |
+| S_tau025 | 44 | 1 | — | 0.283551097 | — | 0.277416766 | 0.282259081 | — | 0.282259081 | 69.152961434 |
+| S_tau025 | 44 | 2 | — | 0.425917819 | — | 0.399175636 | 0.404137425 | — | 0.404137425 | 57.820201120 |
+| S_tau025 | 44 | 3 | 1.580731213 | 0.715245023 | — | 0.679271720 | 0.684919084 | — | 0.684919084 | 37.096466588 |
+| S_tau025 | 45 | 1 | — | 0.265790582 | — | 0.260353267 | 0.265304148 | — | 0.265304148 | 72.361743499 |
+| S_tau025 | 45 | 2 | — | 0.328948744 | — | 0.315454207 | 0.320524660 | — | 0.320524660 | 67.144555769 |
+| S_tau025 | 45 | 3 | 1.256194025 | 0.569898568 | — | 0.526908733 | 0.532379055 | — | 0.532379055 | 49.298637182 |
+| S_tau025 | 46 | 1 | — | 0.358725131 | — | 0.354130566 | 0.359272457 | — | 0.359272457 | 65.550274600 |
+| S_tau025 | 46 | 2 | — | 0.462045603 | — | 0.439501114 | 0.444731105 | — | 0.444731105 | 57.514473779 |
+| S_tau025 | 46 | 3 | 1.668749869 | 0.667484544 | — | 0.623012520 | 0.628578164 | — | 0.628578164 | 42.021802185 |
+| S_tau025 | 47 | 1 | — | 0.365973890 | — | 0.358897537 | 0.364272081 | — | 0.364272081 | 64.713059698 |
+| S_tau025 | 47 | 2 | — | 0.484164529 | — | 0.463584065 | 0.469322842 | — | 0.469322842 | 55.697712292 |
+| S_tau025 | 47 | 3 | 1.123862624 | 0.602699243 | — | 0.575799994 | 0.581758565 | — | 0.581758565 | 45.858750811 |
+| T | 43 | 1 | — | 0.365237385 | 0.361717790 | 0.356196016 | 0.367030889 | 0.367030889 | 0.361450313 | 70.670909967 |
+| T | 43 | 2 | — | 0.470498353 | 0.454961777 | 0.438558646 | 0.460631453 | 0.460631453 | 0.444045696 | 61.129410644 |
+| T | 43 | 3 | 1.778716147 | 0.764601320 | 0.745362699 | 0.713125892 | 0.751724300 | 0.751724300 | 0.719646005 | 37.828302519 |
+| T | 44 | 1 | — | 0.345455915 | 0.342410475 | 0.335444987 | 0.347759300 | 0.347759300 | 0.340717759 | 70.020058476 |
+| T | 44 | 2 | — | 0.427475132 | 0.416589230 | 0.400965899 | 0.422079691 | 0.422079691 | 0.406321004 | 62.771953221 |
+| T | 44 | 3 | 1.171905711 | 0.651254244 | 0.637731373 | 0.612114787 | 0.643614238 | 0.643614238 | 0.617767587 | 46.852197931 |
+| T | 45 | 1 | — | 0.271021187 | 0.267124385 | 0.257268310 | 0.272111019 | 0.272111019 | 0.262336426 | 76.383713183 |
+| T | 45 | 2 | — | 0.453614488 | 0.438286513 | 0.413997680 | 0.443514825 | 0.443514825 | 0.419532659 | 58.585676092 |
+| T | 45 | 3 | 1.505803138 | 0.779626355 | 0.752168059 | 0.719362259 | 0.758277899 | 0.758277899 | 0.726066529 | 36.661303444 |
+| T | 46 | 1 | — | 0.633924007 | 0.371235043 | 0.366719127 | 0.376513575 | 0.376513575 | 0.372064854 | 69.408443387 |
+| T | 46 | 2 | — | 0.732127674 | 0.455887757 | 0.441956908 | 0.461514329 | 0.461514329 | 0.447382594 | 61.312211331 |
+| T | 46 | 3 | 1.130225629 | 0.894875072 | 0.611419626 | 0.586855024 | 0.617449924 | 0.617449924 | 0.592624947 | 47.381245616 |
+| T | 47 | 1 | — | 0.383281887 | 0.370103329 | 0.364577919 | 0.375191407 | 0.375191407 | 0.369670930 | 69.547967947 |
+| T | 47 | 2 | — | 0.493768677 | 0.469141759 | 0.452722378 | 0.474479866 | 0.474479866 | 0.458108746 | 59.711117085 |
+| T | 47 | 3 | 1.771595091 | 0.768548742 | 0.730914690 | 0.699349664 | 0.736768357 | 0.736768357 | 0.705392643 | 38.898736567 |
+
+Stage diagnostics:
+
+- O seed 43: monotone stages; no flagged rate growth/prior failure.
+- O seed 44: monotone stages; no flagged rate growth/prior failure.
+- O seed 45: monotone stages; no flagged rate growth/prior failure.
+- S_tau025 seed 43: monotone stages; no flagged rate growth/prior failure.
+- S_tau025 seed 44: monotone stages; no flagged rate growth/prior failure.
+- S_tau025 seed 45: monotone stages; no flagged rate growth/prior failure.
+- T seed 43: monotone stages; no flagged rate growth/prior failure.
+- T seed 44: monotone stages; no flagged rate growth/prior failure.
+- T seed 45: monotone stages; no flagged rate growth/prior failure.
+- O_tau025 seed 43: monotone stages; no flagged rate growth/prior failure.
+- O_tau025 seed 44: monotone stages; no flagged rate growth/prior failure.
+- O_tau025 seed 45: monotone stages; no flagged rate growth/prior failure.
+- O seed 46: monotone stages; no flagged rate growth/prior failure.
+- O seed 47: monotone stages; no flagged rate growth/prior failure.
+- S_tau025 seed 46: monotone stages; no flagged rate growth/prior failure.
+- S_tau025 seed 47: monotone stages; no flagged rate growth/prior failure.
+- O_tau025 seed 46: monotone stages; no flagged rate growth/prior failure.
+- O_tau025 seed 47: monotone stages; no flagged rate growth/prior failure.
+- T seed 46: monotone stages; no flagged rate growth/prior failure.
+- T seed 47: monotone stages; no flagged rate growth/prior failure.
+
+All native symbol errors are zero. Per-stage marginals were not measured; symbol-stage death is not inferred.
+
 ## Matched T and recommended raw-S follow-up (8 October 2026)
 
 **Completed: nine fits, three per method.** Two detached workers reuse the retained reconstructed
@@ -242,6 +600,63 @@ percentage denominators differ. Recomputing the symmetric S/O summary gives **-2
 on the new median curves and **-3.561264%** as the median of the three symmetric paired gaps,
 reproducing the report's **−2.60% / −3.56%** at retained precision.
 
+### Full-target O with S's optimizer settings (8 October 2026)
+
+**Completed: three fit seeds.** The previous report was committed as `c4947b5`
+before this test. `O_tau025` uses the ordinary full-target O codec with the completed
+recommended S run's effective quantizer optimizer: **35 epochs**, warm LR
+**0.0008509229529398079**, initial **tau 0.25** annealed to 0.1, **550,000 nominal draws
+per epoch**, batch **6,250**, reconstruction weight **72.31601255189986**, two accepted
+candidates and the eight-attempt cap. The effective quantizer configuration was checked
+field-by-field against the completed S record. The original O used quantizer tau 0.5.
+
+This changes only O's quantizer temperature. O still trains from the complete target,
+with no 3M pool restriction, acquisition or sample replacement. It uses the same saved
+seed-43 starting tensors, target, full 150-column SI, RTX 3090, TF32/high policy and AMP-off
+setting as the completed controls. The separate full-target prior fit retains the same
+30 epochs, three accepted candidates, warm LR and prior temperature as the previous O/S
+fits; S's quantizer-only override never changed those prior settings.
+
+Fit seeds **43, 44, 45** are paired with the retained O and S runs. Primary comparisons
+are `O_tau025` versus O (optimizer effect), and S versus `O_tau025` (remaining sampling
+effect at matched optimizer settings), on medians of cumulative rates and raw WMAPE,
+and separately on individually paired seed curves. The comparison remains a single
+client-0/round-5 gradient, with no frozen-round or population claim.
+
+Plan: `Experiments/Protocol_test/plans/matched_o_tau025_svhn_seed43base_20261008.json`.
+Output: `_/experiments/matched_o_tau025_svhn_seed43base_20261008`.
+Supervisor unit: `fl-wz-matched-o-tau025-svhn-seed43base-20261008`.
+
+**Completed: three new O fits; twelve matched fits including retained controls.**
+The new worker and live plotter both exited with code **0**. All new native streams have
+zero symbol errors; all stages decrease distortion. No stream-growth or full-target
+joint-prior/marginal failures were flagged. No clients were excluded (one target retained).
+The original O/S/T records are reused without further fitting, and the new O control
+shares their exact starting prefix, target, full SI and numerical policy.
+
+On this fixed gradient, S retains its advantage after matching the optimizer settings:
+S versus `O_tau025` is **−4.024879%** on the median full-SI rANS curves, with paired gaps
+**−3.676251%, −5.188801%, −3.474724%** (three wins out of three), median **−3.676251%**.
+The original S/O median-curve gap was **−2.567006%**. Applying tau 0.25 to full-target O
+therefore does not account for that observed S advantage; the matched-settings result
+supports a sampling-related effect in this single-gradient diagnostic.
+
+`O_tau025` versus original O has a median-curve gap of **+1.953427%**, but its individual
+paired gaps are **+7.670517%, −4.659207%, −1.564142%**, median **−1.564142%** (two wins
+out of three). The difference between those summaries is retained rather than averaging
+gap percentages or treating the median curve as a single trained machine. It does not
+establish that tau 0.5 is generally optimal for O, or that sampling wins across clients.
+
+All percentages above are directed equal-distortion rate changes; negative favors the
+named row. Using the historical symmetric convention instead gives S/`O_tau025`
+**-4.109274%** on median curves and **-3.746404%** as the paired-seed median.
+
+Expanded raw tables, all five-method matrices, per-seed comparisons and PNG/PDF curves:
+`_/experiments/matched_o_tau025_svhn_seed43base_20261008_analysis`.
+The new worker runs serially; earlier control timings include concurrent GPU use, so the
+mixed timing columns are not a matched throughput benchmark. The prior-fit checks confirm
+that encoder/decoder weights stay fixed during the subsequent entropy-prior fitting.
+
 ### Matched median stage RD measurements
 
 Cumulative bits/float; medians over fit seeds 43–45. F* is one fixed seed-43 starting model.
@@ -253,6 +668,9 @@ F*'s joint-prior column is frozen CE, and its refitted-prior columns are unavail
 | O | 1 | — | 0.363550 | — | 0.357779 | 0.363216 | — | 0.363216 | -3.601309 (66.059390%) |
 | O | 2 | — | 0.452905 | — | 0.437813 | 0.443594 | — | 0.443594 | -5.070811 (55.777553%) |
 | O | 3 | 1.170209 | 0.733659 | — | 0.599014 | 0.604181 | — | 0.604181 | -7.032092 (44.503628%) |
+| O_tau025 | 1 | — | 0.366170 | — | 0.353358 | 0.358548 | — | 0.358548 | -3.786906 (64.662827%) |
+| O_tau025 | 2 | — | 0.509794 | — | 0.426559 | 0.431863 | — | 0.431863 | -4.513285 (59.475175%) |
+| O_tau025 | 3 | 1.165070 | 0.643560 | — | 0.598527 | 0.604500 | — | 0.604500 | -7.153676 (43.885010%) |
 | F* | 1 | — | 0.366520 | — | — | 0.372292 | — | 0.372292 | -3.093789 (70.034263%) |
 | F* | 2 | — | 0.490296 | — | — | 0.496130 | — | 0.496130 | -4.631368 (58.672093%) |
 | F* | 3 | 1.784724 | 0.765840 | — | — | 0.771315 | — | 0.771315 | -8.779112 (36.395226%) |
@@ -266,37 +684,40 @@ F*'s joint-prior column is frozen CE, and its refitted-prior columns are unavail
 ### Equal-distortion rate changes (%)
 
 Row versus column; negative favors the row. Both directions are recomputed.
-Coverage: one client/round, all three fit seeds for O/S/T; F* fixed. No clients excluded.
+Coverage: one client/round, all three fit seeds for O/O_tau025/S_tau025/T; F* fixed. No clients excluded.
 With/without symmetric whole-window client exclusions is identical (1/1 target retained).
 
-Full-SI rANS, all clients:
+Full-SI rANS, all measured clients (client 0):
 
 ```text
-                     O         F*   S_tau025          T
-          O     +0.000    -12.444     +2.635     -4.619
-         F*    +14.212     +0.000    +17.233     +7.600
-   S_tau025     -2.567    -14.700     +0.000     -7.552
-          T     +4.843     -7.063     +8.169     +0.000
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -1.916    -12.444     +2.635     -4.619
+   O_tau025     +1.953     +0.000    -10.656     +4.194     -2.820
+         F*    +14.212    +11.926     +0.000    +17.233     +7.600
+   S_tau025     -2.567     -4.025    -14.700     +0.000     -7.552
+          T     +4.843     +2.902     -7.063     +8.169     +0.000
 ```
 
 Full-SI rANS, with symmetric client exclusions (none):
 
 ```text
-                     O         F*   S_tau025          T
-          O     +0.000    -12.444     +2.635     -4.619
-         F*    +14.212     +0.000    +17.233     +7.600
-   S_tau025     -2.567    -14.700     +0.000     -7.552
-          T     +4.843     -7.063     +8.169     +0.000
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -1.916    -12.444     +2.635     -4.619
+   O_tau025     +1.953     +0.000    -10.656     +4.194     -2.820
+         F*    +14.212    +11.926     +0.000    +17.233     +7.600
+   S_tau025     -2.567     -4.025    -14.700     +0.000     -7.552
+          T     +4.843     +2.902     -7.063     +8.169     +0.000
 ```
 
 Native transport (T uses temporal SI), all clients and no-exclusion retained population:
 
 ```text
-                     O         F*   S_tau025          T
-          O     +0.000    -12.444     +2.635     -9.246
-         F*    +14.212     +0.000    +17.233     +2.667
-   S_tau025     -2.567    -14.700     +0.000    -11.883
-          T    +10.188     -2.598    +13.486     +0.000
+                     O   O_tau025         F*   S_tau025          T
+          O     +0.000     -1.916    -12.444     +2.635     -9.246
+   O_tau025     +1.953     +0.000    -10.656     +4.194     -7.553
+         F*    +14.212    +11.926     +0.000    +17.233     +2.667
+   S_tau025     -2.567     -4.025    -14.700     +0.000    -11.883
+          T    +10.188     +8.170     -2.598    +13.486     +0.000
 ```
 
 ### Individual fit-seed raw metrics
@@ -306,6 +727,9 @@ Native transport (T uses temporal SI), all clients and no-exclusion retained pop
 | O | 43 | 1.519806 | 0.733659 | — | 0.700296 | 0.706208 | 0.706208 | 37.495509 | 129.885737 | 86.494417 | 18.770758 |
 | O | 44 | 1.170209 | 0.743691 | — | 0.599014 | 0.604181 | 0.604181 | 44.503628 | 132.678187 | 81.312300 | 17.459393 |
 | O | 45 | 1.048250 | 0.588008 | — | 0.565294 | 0.571412 | 0.571412 | 47.404830 | 115.487408 | 64.316204 | 15.891779 |
+| O_tau025 | 43 | 1.709384 | 0.694298 | — | 0.662048 | 0.667742 | 0.667742 | 40.205969 | 167.780231 | 63.765543 | 16.048104 |
+| O_tau025 | 44 | 1.165070 | 0.629252 | — | 0.598527 | 0.604500 | 0.604500 | 43.885010 | 221.618731 | 64.206242 | 16.183633 |
+| O_tau025 | 45 | 0.876503 | 0.643560 | — | 0.484138 | 0.489693 | 0.489693 | 52.483861 | 113.116712 | 63.920530 | 15.887553 |
 | S_tau025 | 43 | 1.498782 | 0.832966 | — | 0.614682 | 0.620495 | 0.620495 | 41.671929 | 168.489269 | 82.214165 | 18.690400 |
 | S_tau025 | 44 | 1.580731 | 0.715245 | — | 0.679272 | 0.684919 | 0.684919 | 37.096467 | 102.918102 | 64.415337 | 16.104390 |
 | S_tau025 | 45 | 1.256194 | 0.569899 | — | 0.526909 | 0.532379 | 0.532379 | 49.298637 | 152.869870 | 64.412850 | 15.928421 |
@@ -315,12 +739,14 @@ Native transport (T uses temporal SI), all clients and no-exclusion retained pop
 
 ### Paired-seed comparisons
 
-Directed full-SI rANS gaps versus same-seed O; seed-gap medians are separate from median-curve gaps.
+Directed full-SI rANS gaps versus the same-seed reference; seed-gap medians are separate from median-curve gaps.
 
-| Method | Seed 43 | Seed 44 | Seed 45 | Valid pairs | Median paired gap % | Directed median-curve gap % |
-|---|---:|---:|---:|---:|---:|---:|
-| S_tau025 | +4.570148 | -9.963724 | -3.497871 | 3/3 | -3.497871 | -2.567006 |
-| T | +13.392703 | +3.326231 | -2.321965 | 3/3 | +3.326231 | +4.842531 |
+| Method | Reference | Seed 43 | Seed 44 | Seed 45 | Valid pairs | Median paired gap % | Directed median-curve gap % |
+|---|---|---:|---:|---:|---:|---:|---:|
+| O_tau025 | O | +7.670517 | -4.659207 | -1.564142 | 3/3 | -1.564142 | +1.953427 |
+| S_tau025 | O | +4.570148 | -9.963724 | -3.497871 | 3/3 | -3.497871 | -2.567006 |
+| S_tau025 | O_tau025 | -3.676251 | -5.188801 | -3.474724 | 3/3 | -3.676251 | -4.024879 |
+| T | O | +13.392703 | +3.326231 | -2.321965 | 3/3 | +3.326231 | +4.842531 |
 
 Diagnostics (no measurement is silently removed):
 
@@ -333,8 +759,12 @@ Diagnostics (no measurement is silently removed):
 - S_tau025 / seed 43: monotone stages; no flagged rate growth or full-target prior failure.
 - S_tau025 / seed 44: monotone stages; no flagged rate growth or full-target prior failure.
 - S_tau025 / seed 45: monotone stages; no flagged rate growth or full-target prior failure.
+- O_tau025 / seed 43: monotone stages; no flagged rate growth or full-target prior failure.
+- O_tau025 / seed 44: monotone stages; no flagged rate growth or full-target prior failure.
+- O_tau025 / seed 45: monotone stages; no flagged rate growth or full-target prior failure.
 
 All native rANS symbol errors are zero. Per-stage marginals were not measured; symbol-stage death is not inferred.
+
 
 ## Search inventory and setting changes
 

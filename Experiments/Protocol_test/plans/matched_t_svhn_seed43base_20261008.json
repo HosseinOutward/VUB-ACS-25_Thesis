@@ -1,0 +1,15 @@
+{
+  "name": "matched_t_svhn_seed43base_20261008",
+  "output_root": "../../../_/experiments/matched_t_svhn_seed43base_20261008",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "methods": [
+    "T"
+  ],
+  "seeds": [
+    43,
+    44,
+    45
+  ],
+  "sample_size": 3000000
+}

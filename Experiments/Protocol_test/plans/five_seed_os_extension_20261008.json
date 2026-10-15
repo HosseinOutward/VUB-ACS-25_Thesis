@@ -1,0 +1,15 @@
+{
+  "name": "five_seed_os_extension_20261008",
+  "output_root": "../../../_/experiments/five_seed_os_extension_20261008",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "sample_size": 3000000,
+  "methods": [
+    "O",
+    "S_tau025"
+  ],
+  "seeds": [
+    46,
+    47
+  ]
+}

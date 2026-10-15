@@ -6,19 +6,18 @@ import argparse
 import hashlib
 import json
 import multiprocessing
-import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from Experiments.Protocol_test import records
 from Experiments.Protocol_test import sampled_codec as _sampled_codec
+from Experiments.Protocol_test.replay_plan import ReplayCase, ReplayPlan, load_plan
 from FL_code.FL_core.explicit_cache import CacheEntry, TorchCodec, atomic_output, content_hash
 from FL_code.FL_core.codec import Access, CompressionRecord, create_protocol, simulate_compression
 from FL_code.FL_core.models import initialize_model
@@ -34,88 +33,6 @@ from temp_nsplit import nsplit_quantize
 _EXPERIMENT_SEMANTICS_VERSION = 11
 _CODEC_SEED_POLICY = "content_hash(seed,start_round,round_id,client_id)[:8]/v2"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-class ReplayCase(BaseModel):
-    """A protocol window; the runner measures every client of the trace in each of its rounds."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    case_id: str
-    codec_id: str
-    protocol: str = "wz_cancer"
-    start_round: int = Field(ge=0)
-    initial_si: Literal["raw", "nsplit"] = "raw"
-    round_codecs: tuple[str, ...]
-
-    @field_validator("case_id", "codec_id")
-    @classmethod
-    def validate_identifier(cls, value: str) -> str:
-        """Keep case output beneath its experiment directory."""
-        assert value not in {"", ".", ".."} and Path(value).name == value
-        return value
-
-    @field_validator("round_codecs", mode="before")
-    @classmethod
-    def expand_schedule(cls, value: str) -> tuple[str, ...]:
-        """Expand a space-separated schedule whose tokens optionally end in `*positive_integer`."""
-        schedule: list[str] = []
-        for item in value.split():
-            match = re.fullmatch(r"([^*]+)(?:\*([1-9][0-9]*))?", item)
-            assert match is not None, (
-                f"Invalid round_codecs item {item!r}; expected token or token*positive_integer."
-            )
-            token, repeats = match.groups()
-            schedule += [token] * int(repeats or 1)
-        return tuple(schedule)
-
-    @model_validator(mode="after")
-    def validate_window(self) -> ReplayCase:
-        """Require an explicit train/freeze protocol window."""
-        assert len(self.round_codecs) >= 2, "round_codecs must contain at least two rounds."
-        assert self.round_codecs[0] != "F", "The first schedule token must train a codec, not 'F'."
-        assert "F" in self.round_codecs, "round_codecs must contain at least one frozen round."
-        return self
-
-
-class ReplayPlan(BaseModel):
-    """One raw FL trace shared by independent sparse protocol cases and their outputs."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    name: str
-    description: str | None = None
-    fl_config: Path
-    trace_device: str = "cuda:0"
-    dataset_revision: str
-    output_root: Path
-    nsplit_bins: int = Field(default=2, ge=2, le=256)
-    cases: tuple[ReplayCase, ...]
-    comparisons: tuple[tuple[str, str], ...] = ()
-    seed: int = Field(default=43, ge=0)
-    gpu_ids: tuple[int, ...] = ()
-    max_parallel_cases: int = Field(default=1, ge=1)
-
-    @model_validator(mode="after")
-    def validate_cases(self) -> ReplayPlan:
-        """Require unique case identities, valid comparisons, and the plan's seed in every case."""
-        assert self.name and self.cases
-        identities = [(case.codec_id, case.case_id) for case in self.cases]
-        assert len(set(identities)) == len(identities), "Cases must have unique (codec_id, case_id) identities."
-        assert len(set(self.gpu_ids)) == len(self.gpu_ids) and all(gpu >= 0 for gpu in self.gpu_ids)
-        assert self.max_parallel_cases <= max(1, len(self.gpu_ids)), (
-            "max_parallel_cases cannot exceed the number of configured GPUs."
-        )
-        codecs = {case.codec_id for case in self.cases}
-        for candidate, reference in self.comparisons:
-            assert candidate != reference and {candidate, reference} <= codecs, "Invalid comparison."
-        return self
-
-
-def load_plan(path: Path) -> ReplayPlan:
-    """Read one plan, resolving its paths relative to the JSON file."""
-    payload = json.loads(path.read_text())
-    for field in ("fl_config", "output_root"):
-        payload[field] = (path.parent / payload[field]).resolve()
-    return ReplayPlan.model_validate(payload)
 
 
 def load_fl_config(path: Path) -> FLConfig:
@@ -279,6 +196,11 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], 
         temporary.write_text(json.dumps({"identity": identity}, indent=2))
 
     history_name = "raw_history" if case.initial_si == "raw" else f"nsplit{plan.nsplit_bins}_history"
+    # Server-only windows never consume a worker ledger; retaining it pins the entire raw prefix.
+    seed_access = Access.TEMPORAL_TOO if any(
+        protocol._get_curr_round_codec_name(round_id)[0].history_access is Access.TEMPORAL_TOO
+        for round_id, token in enumerate(case.round_codecs, case.start_round) if token != "F"
+    ) else Access.SERVER_ONLY
     last_round = case.start_round + len(case.round_codecs) - 1
     # Keyed only on the trajectory, so each save replaces the previous case's continuation state.
     checkpoint = CacheEntry(_REPO_ROOT / "_/data/trace_states", trace_identity, TorchCodec())
@@ -288,7 +210,7 @@ def run_case(plan: ReplayPlan, case: ReplayCase, provenance: Mapping[str, Any], 
                 delta = nsplit_quantize(delta, plan.nsplit_bins) if case.initial_si == "nsplit" else delta
                 for history in protocol.histories:
                     history.commit(
-                        delta, CompressionRecord(round_id, client_id, history_name), Access.TEMPORAL_TOO)
+                        delta, CompressionRecord(round_id, client_id, history_name), seed_access)
                 continue
             assert delta.numel() == manager.param_count
             set_global_seed(_codec_seed(plan.seed, case.start_round, round_id, client_id))
@@ -320,7 +242,7 @@ def _run_gpu_cases(
         mp_context=context,
         max_tasks_per_child=1,
     ) as pool:
-        cases = tuple(checkpoint_rounds)
+        cases = tuple(case for case in checkpoint_rounds if not (_case_dir(plan, case) / "complete.json").exists())
         for start in range(0, len(cases), plan.max_parallel_cases):
             batch = cases[start : start + plan.max_parallel_cases]
             futures = [
@@ -368,6 +290,13 @@ def run_sparse_plan(plan: ReplayPlan, plan_path: Path) -> tuple[Path, ...]:
         assert not any(plan.output_root.iterdir()), f"Output root contains untracked experiment results: {plan.output_root}."
         with atomic_output(manifest_path) as temporary:
             temporary.write_text(json.dumps({"identity": identity, "provenance": provenance}, indent=2))
+
+    for case in plan.cases:
+        if (_case_dir(plan, case) / "complete.json").exists():
+            manager = StateDictManager(initialize_model(cfg, torch.device("cpu")))
+            protocol = case_protocol(plan, case, manager)
+            records.read_completed_case(_case_dir(plan, case), expected_identity=_case_identity(
+                plan, case, trace_identity, protocol, cfg.num_clients))
 
     return (
         _run_gpu_cases(plan, provenance, checkpoint_rounds)

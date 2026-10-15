@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 import json
+from importlib import import_module
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 from time import monotonic
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from Experiments.Protocol_test.live_plot import REFRESH_SECONDS, RENDER_TIMEOUT_SECONDS
-from Experiments.Protocol_test.sparse_replay import ReplayPlan, load_plan
+
+
+class SupervisedPlan(Protocol):
+    """Minimal experiment contract consumed by the detached process supervisor."""
+
+    name: str
+    output_root: Path
+
+    @property
+    def cases(self) -> Sequence[object]: ...
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +44,7 @@ def check_delays() -> Iterator[int]:
         yield _ROUTINE_CHECK_DELAY
 
 
-def _control_dir(plan: ReplayPlan) -> Path:
+def _control_dir(plan: SupervisedPlan) -> Path:
     return plan.output_root.parent / f"{plan.output_root.name}_control"
 
 
@@ -44,7 +54,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _unit_name(plan: ReplayPlan) -> str:
+def _unit_name(plan: SupervisedPlan) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", plan.name.lower()).strip("-")
     return f"fl-wz-{normalized[:48]}"
 
@@ -82,7 +92,7 @@ def _health_probe(
 
 
 def _health_snapshot(
-    plan: ReplayPlan, runner: subprocess.Popen[bytes], plotter: subprocess.Popen[bytes],
+    plan: SupervisedPlan, runner: subprocess.Popen[bytes], plotter: subprocess.Popen[bytes],
     elapsed_seconds: int, runner_log: Path,
 ) -> dict[str, Any]:
     case_root = plan.output_root / "cases"
@@ -149,9 +159,9 @@ def _health_snapshot(
     }
 
 
-def supervise(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot") -> int:
+def supervise(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot", plan_module: str = "Experiments.Protocol_test.replay_plan") -> int:
     """Run replay as a child and persist timed health snapshots until completion."""
-    plan = load_plan(plan_path)
+    plan: SupervisedPlan = import_module(plan_module).load_plan(plan_path)
     control_dir = _control_dir(plan)
     control_dir.mkdir(parents=True, exist_ok=True)
     runner_log = control_dir / "runner.log"
@@ -173,6 +183,8 @@ def supervise(plan_path: Path, worker_module: str = "Experiments.Protocol_test.s
                 "PYTHONUNBUFFERED": "1",
                 "OMP_NUM_THREADS": "2",
                 "MKL_NUM_THREADS": "2",
+                "MALLOC_ARENA_MAX": "2",
+                "MALLOC_TRIM_THRESHOLD_": "131072",
             },
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -225,10 +237,10 @@ def supervise(plan_path: Path, worker_module: str = "Experiments.Protocol_test.s
     return runner.returncode or 0
 
 
-def launch(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot") -> str:
+def launch(plan_path: Path, worker_module: str = "Experiments.Protocol_test.sparse_replay", plotter_module: str = "Experiments.Protocol_test.live_plot", plan_module: str = "Experiments.Protocol_test.replay_plan") -> str:
     """Start the supervisor in an independent transient user service."""
     plan_path = plan_path.resolve()
-    plan = load_plan(plan_path)
+    plan: SupervisedPlan = import_module(plan_module).load_plan(plan_path)
     control_dir = _control_dir(plan)
     control_dir.mkdir(parents=True, exist_ok=True)
     unit = _unit_name(plan)
@@ -237,7 +249,7 @@ def launch(plan_path: Path, worker_module: str = "Experiments.Protocol_test.spar
         f"--working-directory={_REPO_ROOT}", "--property=OOMPolicy=continue",
         "--property=KillMode=control-group", sys.executable, "-u", "-m",
         "Experiments.Protocol_test.detached_replay", "supervise", str(plan_path),
-        "--worker-module", worker_module, "--plotter-module", plotter_module,
+        "--worker-module", worker_module, "--plotter-module", plotter_module, "--plan-module", plan_module,
     )
     result = subprocess.run(command, check=True, capture_output=True, text=True)
     _atomic_json(control_dir / "launch.json", {
@@ -257,11 +269,12 @@ def main() -> None:
     parser.add_argument("plan", type=Path)
     parser.add_argument("--worker-module", default="Experiments.Protocol_test.sparse_replay")
     parser.add_argument("--plotter-module", default="Experiments.Protocol_test.live_plot")
+    parser.add_argument("--plan-module", default="Experiments.Protocol_test.replay_plan")
     args = parser.parse_args()
     if args.action == "launch":
-        print(launch(args.plan, args.worker_module, args.plotter_module), flush=True)
+        print(launch(args.plan, args.worker_module, args.plotter_module, args.plan_module), flush=True)
     else:
-        raise SystemExit(supervise(args.plan.resolve(), args.worker_module, args.plotter_module))
+        raise SystemExit(supervise(args.plan.resolve(), args.worker_module, args.plotter_module, args.plan_module))
 
 
 if __name__ == "__main__":

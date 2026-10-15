@@ -1,0 +1,33 @@
+{
+  "name": "s_received_fp16_validated_hard_transport_pilot_20261014",
+  "output_root": "../../../_/experiments/s_received_fp16_validated_hard_transport_pilot_20261014",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "comparison_root": "../../../_/experiments/s_dedicated_refiner_coldfit_five_seed_20261011",
+  "fit_device": "cuda:0",
+  "seeds": [
+    43
+  ],
+  "extra_planes": [
+    0
+  ],
+  "retain_seeds": 1,
+  "sample_size": 20000,
+  "sample_fit_epochs": 35,
+  "sample_fit_lr": 0.000850922952939808,
+  "sample_fit_tau": 0.5,
+  "sample_fit_batch_size": 6250,
+  "training_message_coordinate_seed": 494155588,
+  "sample_refiner": false,
+  "sample_train_encoder": true,
+  "variant_modes": [
+    "received_fp16_training_message_validated_split_hard_transport_nll"
+  ],
+  "budget_sample_sizes": [
+    20000,
+    100000
+  ],
+  "include_budget_control": false,
+  "include_variant_controls": false,
+  "sample_validation_fraction": 0.2,
+  "sample_validation_seed": 494155589
+}

@@ -92,6 +92,10 @@ systemd-run --user --collect --unit=fl-wz-global-plot --service-type=exec \
   and the remaining workers use warm starts; worker curves remain intentionally aggregated.
 - `plans/or_tr_svhn_30c_start12_seed44.json` (+ `plans/svhn_30c_fl_config_seed44.json`) regenerates
   an independent seed-44 FL trajectory and compares OR with TR at start 12.
+- `plans/or_tr_svhn_30c_f9_warm_seed44_20261004.json` repeats paired warm-pool OR/TR on an independent
+  seed-44 trajectory at starts 5, 12, and 20. It measures 1,800 client-rounds with current
+  defaults and the prior-versus-marginal acceptance gate, without frozen-prior refitting.
+  Trace generation stays on `cuda:0`; quantizer fitting uses GPU 1, one case at a time.
 
 These plans train real 30-client quantizers and are not smoke tests.
 
@@ -100,13 +104,21 @@ These plans train real 30-client quantizers and are not smoke tests.
 Copy an ordinary OR/TR plan to a new named plan and set a fresh `output_root` under `Runs_exp/`;
 do not overwrite historical output or change `trace_device` for a same-trace comparison.
 Keep one trained round + `F*9`, all clients, and the same seed/placements for paired methods.
-Launch long runs through the detached supervisor, one quantizer job at a time on this host:
+Launch long runs through the detached supervisor and bound quantizer workers by measured host RAM:
 
 ```bash
 .venv/bin/python -m Experiments.Protocol_test.detached_replay launch Experiments/Protocol_test/plans/<new_plan>.json
 ```
 
 Its plotter starts automatically. Use the global watcher command above for shared axes.
+`plans/or_svhn_30c_seed44_parallel_20261004.json` and
+`plans/tr_svhn_30c_seed44_parallel_20261004.json` continue seed 44 in separate detached services,
+one worker per method, both running concurrently. OR/start5 is preserved when that original case
+finishes; OR then continues at starts 12/20. TR starts independently at start5. Completed cases are
+identity-validated before scheduling; only remaining cases occupy GPU slots. The monitor uses lightweight plan contracts, workers
+bound glibc arenas, and codecs release SI snapshots at client-round boundaries. Server-only
+windows seed only their consumed server ledger. These changes preserve coded data and trained
+weights; the trace device stays `cuda:0`.
 Read `<output_root>/../runs_control/{runner.log,health_checks.jsonl}` for progress and memory;
 stop via `systemctl --user stop fl-wz-<plan-name>`, never `pkill`. A prior semantic identity
 mismatch needs a new output root or an explicitly archived move, not deletion/reuse.
@@ -142,6 +154,15 @@ rate-table examples are preserved in the dated archive linked below.
 
 ## Sampled codecs
 
+The dedicated acquisition-refiner study is declared in
+[`plans/s_dedicated_refiner_five_seed_20261010.json`](plans/s_dedicated_refiner_five_seed_20261010.json).
+`sample_refiner=True` selects the independent prefix-conditioned secondary coding model;
+`sample_coordinate_seed` can explicitly pair coordinates across different network sizes.
+This study freezes the retained starting prefix during baseline-only refiner fitting,
+then uses `sample_training="prefix"` for every final S fit. See
+[`S_DEDICATED_REFINER_SWEEP.md`](S_DEDICATED_REFINER_SWEEP.md) for training assumptions,
+five-seed O comparisons, independent best-three trimming and live report paths.
+
 `SO` is the **sampled oracle**: it fits on raw current-target samples assumed free at the
 fitter. `SOR` adds rANS transport for the ordinary quantizer symbols; neither oracle sends a
 sample acquisition stream or replaces decoded positions with raw labels. Raw-sample studies
@@ -153,6 +174,15 @@ a charged acquisition payload; `SR` adds rANS symbol transport. Both families sh
 settings, while acquisition belongs only to S/SR. The existing extra-plane and FP16 acquisition
 paths remain implementations of S, rather than definitions of S. Sample WMAPE zero describes
 SO's exact training labels; zero recorded sample cost is its explicit oracle assumption.
+
+The practical extra-plane sweep is declared in
+[`plans/s_extra_planes_five_seed_20261009_r2.json`](plans/s_extra_planes_five_seed_20261009_r2.json).
+It uses `sampled_plane_sweep.py` and actual SR sample acquisition rather than the raw-label
+`starting_model_comparison.py` diagnostic: extra planes 0/1/2/3/6, fit seeds 43–47, a fresh O
+control for each seed, and independently selected best-three means for every method alongside
+untrimmed means. It retains the existing fixed SVHN target/starting model and measures one
+trained round, not a full protocol window. See [`S_EXTRA_PLANE_SWEEP.md`](S_EXTRA_PLANE_SWEEP.md)
+for the launch, live/final report paths and assumptions.
 
 `sampled_codec.py` registers `S` and its rANS variant `SR` with the replay runner. They inherit O's
 training process, but fit only reconstructed current-target samples with the full target's
@@ -196,8 +226,11 @@ plans, model captures, results and caches have been removed; S/SR and their code
 Cold and warm quantizer/prior lineages admit only finite candidates whose total hard-symbol
 prior rate is no greater than the empirical marginal rate of the same symbols, before the
 existing lowest-loss argmin. Quantizers also retain their symbol-usability checks. Required
-accepted quotas and bounded rejection budgets are unchanged: exhaustion fails loudly rather
-than deploying a rejected candidate. The policy is recorded in protocol identity, so records
+accepted quotas stay at three for cold quantizers and ordinary prior fitting, and two per warm
+quantizer/full-SI-prior parent.
+`WZcfgQuant.max_training_attempts` defaults to eight total attempts per lineage for both quantizers
+and priors; fitting stops once the accepted quota is met. Exhaustion fails loudly rather
+than deploying a rejected candidate. The policy and attempt limit are recorded in protocol identity, so records
 from before the gate cannot silently be reused. This is a training-time guard, not a guarantee
 against frozen-prior failure on later targets/SI.
 

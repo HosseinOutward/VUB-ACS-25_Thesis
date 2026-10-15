@@ -1,0 +1,15 @@
+{
+  "name": "s_dedicated_refiner_diagnostic_pilot_20261011",
+  "output_root": "../../../_/experiments/s_dedicated_refiner_diagnostic_pilot_20261011",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "seeds": [43],
+  "extra_planes": [0, 1, 3, 6],
+  "retain_seeds": 1,
+  "sample_size": 200000,
+  "sample_fit_epochs": 28,
+  "sample_fit_lr": 0.0006807383623518464,
+  "sample_fit_tau": 0.3,
+  "sample_fit_batch_size": 7500,
+  "sample_refiner": true
+}

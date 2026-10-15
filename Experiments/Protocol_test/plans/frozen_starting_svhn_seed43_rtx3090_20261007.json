@@ -1,0 +1,18 @@
+{
+  "name": "frozen_starting_svhn_seed43_rtx3090_20261007",
+  "output_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fl_config": "svhn_30c_fl_config.json",
+  "dataset_revision": "torchvision-svhn-train_32x32.mat-md5:e26dedcc434d2e4c54c9b2d4a06d8373",
+  "trace_device": "cuda:0",
+  "fit_device": "cuda:0",
+  "seed": 43,
+  "quantizer": {
+    "bins_per_plane": 2,
+    "num_planes": 9,
+    "training_log_every_epochs": 10,
+    "mixed_precision": false,
+    "numerical_policy": {
+      "float32_matmul_precision": "high"
+    }
+  }
+}

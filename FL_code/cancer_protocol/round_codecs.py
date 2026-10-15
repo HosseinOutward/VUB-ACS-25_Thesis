@@ -314,8 +314,10 @@ class _WZRoundCodec(BaseRoundCodec):
         return self.quantizer
 
     def release_round_resources(self) -> None:
-        """Release transient encoded side-information columns after this client-round."""
+        """Release SI snapshots after this client-round; the protocol refreshes them before reuse."""
         self._side_info_columns_cache.clear()
+        assert self.quantizer.side_info_list_used is not None
+        self.quantizer.side_info_list_used.clear()
 
     def get_encod_payload(
         self, delta_vec: torch.Tensor, record: CancerRecord
@@ -471,6 +473,11 @@ class ServerSIPriorMixin:
     _server_si_prior_model: EncoderDecoderLayeredRNN | None = None
     server_si_prior_training_result: PriorTrainingResult | None = None
 
+    def release_round_resources(self) -> None:
+        """Release the server-SI snapshot after coding while keeping its trained prior."""
+        super().release_round_resources()
+        self._server_si_prior_side_information.clear()
+
     def set_server_si_prior_training(
         self,
         history: ReconstructionHistory,
@@ -559,6 +566,11 @@ class _CurrentTargetWZRoundCodec(_WZRoundCodec):
 
     si: list[HistoryVector]
     _send_quantizer_state: bool
+
+    def release_round_resources(self) -> None:
+        """Drop training-only SI references once the client-round has finished."""
+        super().release_round_resources()
+        self.si.clear()
 
     def extra_training_problems(
         self,

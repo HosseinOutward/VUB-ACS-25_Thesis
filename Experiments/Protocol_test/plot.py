@@ -28,6 +28,7 @@ from numpy.typing import NDArray
 import pandas as pd
 
 from Experiments.Protocol_test import records
+from Experiments.Protocol_test.live_plot import GLOBAL_ANALYSIS_DIR
 from Experiments.Protocol_test.rd_metrics import GAP_METRIC_NAME, mean_wmape_db, rd_curve_gap, wmape_to_db
 
 RATE_FIELDS = ("quantizer_prior_stage_rates", "coder_stage_rates", "final_bytes")
@@ -44,7 +45,6 @@ _RATE_SHORT_LABELS = {
 }
 # One figure directory per x axis, plus one drawing both staged sources against a shared x axis.
 COMBINED_RATE_DIR = "combined_rate_sources"
-GLOBAL_ANALYSIS_DIR = "_global_analysis"
 _FIGURE_DIRECTORIES = {field: (field,) for field in _CURVE_RATE_FIELDS} | {COMBINED_RATE_DIR: _CURVE_RATE_FIELDS}
 _DIRECTORY_LABELS = dict(zip(RATE_FIELDS, RATE_LABELS, strict=True)) | {COMBINED_RATE_DIR: "Cumulative staged rate"}
 # Marker separates the two rate sources wherever they share an axis; dashes separate experiments.

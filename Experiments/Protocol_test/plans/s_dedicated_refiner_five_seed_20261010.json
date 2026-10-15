@@ -1,0 +1,15 @@
+{
+  "name": "s_dedicated_refiner_five_seed_20261010",
+  "output_root": "../../../_/experiments/s_dedicated_refiner_five_seed_20261010",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "seeds": [43, 44, 45, 46, 47],
+  "extra_planes": [0, 1, 2, 3, 6],
+  "retain_seeds": 3,
+  "sample_size": 3600000,
+  "sample_fit_epochs": 28,
+  "sample_fit_lr": 0.0006807383623518464,
+  "sample_fit_tau": 0.3,
+  "sample_fit_batch_size": 7500,
+  "sample_refiner": true
+}

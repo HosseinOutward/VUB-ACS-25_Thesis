@@ -1,0 +1,131 @@
+{
+  "name": "s_local_grid5_20261008_part3",
+  "output_root": "../../../_/experiments/s_local_grid5_20261008/shards/part3",
+  "reference_root": "../../../_/experiments/frozen_starting_svhn_seed43_rtx3090_20261007",
+  "fit_device": "cuda:0",
+  "methods": [
+    "S"
+  ],
+  "seeds": [
+    43,
+    44,
+    45,
+    46,
+    47
+  ],
+  "sample_size": 3000000,
+  "sample_fits": [
+    {
+      "name": "e42_l080_t030_n2400000_b5000",
+      "train_epochs": 42,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 2400000,
+      "train_batch_size": 5000
+    },
+    {
+      "name": "e42_l120_t020_n3600000_b5000",
+      "train_epochs": 42,
+      "lr": 0.0010211075435277695,
+      "tau": 0.2,
+      "sample_size": 3600000,
+      "train_batch_size": 5000
+    },
+    {
+      "name": "e35_l100_t025_n3000000_b5000",
+      "train_epochs": 35,
+      "lr": 0.000850922952939808,
+      "tau": 0.25,
+      "sample_size": 3000000,
+      "train_batch_size": 5000
+    },
+    {
+      "name": "e42_l100_t025_n3000000_b6250",
+      "train_epochs": 42,
+      "lr": 0.000850922952939808,
+      "tau": 0.25,
+      "sample_size": 3000000,
+      "train_batch_size": 6250
+    },
+    {
+      "name": "e28_l080_t030_n2400000_b5000",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 2400000,
+      "train_batch_size": 5000
+    },
+    {
+      "name": "e28_l120_t020_n3600000_b5000",
+      "train_epochs": 28,
+      "lr": 0.0010211075435277695,
+      "tau": 0.2,
+      "sample_size": 3600000,
+      "train_batch_size": 5000
+    },
+    {
+      "name": "e35_l080_t025_n3000000_b6250",
+      "train_epochs": 35,
+      "lr": 0.0006807383623518464,
+      "tau": 0.25,
+      "sample_size": 3000000,
+      "train_batch_size": 6250
+    },
+    {
+      "name": "e35_l100_t025_n3600000_b6250",
+      "train_epochs": 35,
+      "lr": 0.000850922952939808,
+      "tau": 0.25,
+      "sample_size": 3600000,
+      "train_batch_size": 6250
+    },
+    {
+      "name": "e42_l080_t020_n2400000_b7500",
+      "train_epochs": 42,
+      "lr": 0.0006807383623518464,
+      "tau": 0.2,
+      "sample_size": 2400000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e42_l080_t030_n3600000_b7500",
+      "train_epochs": 42,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e42_l120_t030_n2400000_b7500",
+      "train_epochs": 42,
+      "lr": 0.0010211075435277695,
+      "tau": 0.3,
+      "sample_size": 2400000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e35_l100_t025_n3000000_b7500",
+      "train_epochs": 35,
+      "lr": 0.000850922952939808,
+      "tau": 0.25,
+      "sample_size": 3000000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e28_l080_t030_n3600000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0006807383623518464,
+      "tau": 0.3,
+      "sample_size": 3600000,
+      "train_batch_size": 7500
+    },
+    {
+      "name": "e28_l120_t030_n2400000_b7500",
+      "train_epochs": 28,
+      "lr": 0.0010211075435277695,
+      "tau": 0.3,
+      "sample_size": 2400000,
+      "train_batch_size": 7500
+    }
+  ]
+}
